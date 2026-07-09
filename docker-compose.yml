@@ -1,0 +1,23 @@
+# Local development database. Start with: docker compose up -d
+# Postgres 16 to match production (AWS RDS). Data persists in the named volume.
+services:
+  db:
+    image: postgres:16
+    container_name: sampark-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sampark
+      POSTGRES_PASSWORD: sampark
+      POSTGRES_DB: sampark
+    ports:
+      - "5432:5432"
+    volumes:
+      - sampark_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sampark -d sampark"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  sampark_pgdata:

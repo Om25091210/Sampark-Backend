@@ -1,0 +1,209 @@
+// SAMPARK backend — Prisma schema (Phase 1).
+// Field names are camelCase (matching the camelCase wire entity contract) and mapped
+// to snake_case columns. Enum values are lowercase to serialize verbatim on the wire
+// (per ADR / CLAUDE.md rule 10). All primary domain tables carry a soft-delete column.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums (lowercase wire values; CadreFilter keeps client acronyms) ──────────
+
+enum Role {
+  super_admin
+  admin
+  officer
+  viewer
+}
+
+enum CadreCategory {
+  surrendered
+  jail
+  thana
+}
+
+enum CadreFilter {
+  DVCM
+  ACM
+  PM
+}
+
+enum AlertLevel {
+  critical
+  warning
+  normal
+}
+
+enum ReportingPlace {
+  thana
+  village
+}
+
+enum PersonStatus {
+  alive
+  dead
+}
+
+// ─── Users (officers + admins) ─────────────────────────────────────────────────
+
+model User {
+  id            Int       @id @default(autoincrement())
+  name          String
+  phone         String    @unique
+  email         String?   @unique
+  passwordHash  String?   @map("password_hash") // admin track (deferred build)
+  totpSecret    String?   @map("totp_secret")   // admin track (deferred build)
+  role          Role      @default(officer)
+  designation   String?
+  thana         String?
+  avatarUrl     String?   @map("avatar_url")
+  badgeImageUrl String?   @map("badge_image_url")
+  deletedAt     DateTime? @map("deleted_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  reports        Report[]       @relation("ReportReporter")
+  assignedCadres Cadre[]        @relation("CadreAssignedOfficer")
+  refreshTokens  RefreshToken[]
+
+  @@map("users")
+}
+
+// ─── Cadres (surrendered / jail / thana persons) ───────────────────────────────
+
+model Cadre {
+  id                 Int            @id @default(autoincrement())
+  name               String
+  phone              String
+  thana              String
+  currentAddress     String         @map("current_address")
+  permanentAddress   String?        @map("permanent_address")
+  designation        String
+  category           CadreCategory
+  filter             CadreFilter?
+  alertLevel         AlertLevel     @map("alert_level")
+  avatarUrl          String?        @map("avatar_url")
+  alertDate          DateTime?      @map("alert_date")
+  incident           String?
+  verificationOffice String?        @map("verification_office")
+  supervisoryOffice  String?        @map("supervisory_office")
+  alertTag           String?        @map("alert_tag")
+  aliases            String[]
+  surrenderDate      DateTime?      @map("surrender_date")
+  surrenderLocation  String?        @map("surrender_location")
+  surrenderYear      String?        @map("surrender_year")
+  regiment           String?
+  familyGroupInfo    String?        @map("family_group_info")
+  subDivision        String?        @map("sub_division")
+  assignedOfficerId  Int?           @map("assigned_officer_id")
+  deletedAt          DateTime?      @map("deleted_at")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
+
+  assignedOfficer User?    @relation("CadreAssignedOfficer", fields: [assignedOfficerId], references: [id])
+  reports         Report[]
+
+  @@index([category])
+  @@index([alertLevel])
+  @@index([assignedOfficerId])
+  @@map("cadres")
+}
+
+// ─── Reports (field reporting against a cadre) ─────────────────────────────────
+
+model Report {
+  id               Int            @id @default(autoincrement())
+  cadreId          Int            @map("cadre_id")
+  reportingPlace   ReportingPlace @map("reporting_place")
+  specificLocation String         @map("specific_location")
+  personStatus     PersonStatus   @map("person_status")
+  currentPhone     String         @map("current_phone")
+  currentActivity  String         @map("current_activity")
+  photoUrl         String?        @map("photo_url")
+  gpsLatitude      Float?         @map("gps_latitude")
+  gpsLongitude     Float?         @map("gps_longitude")
+  gpsAddress       String?        @map("gps_address")
+  isHomeAddress    Boolean?       @map("is_home_address")
+  reportedById     Int            @map("reported_by_id")
+  reportedAt       DateTime       @default(now()) @map("reported_at")
+  syncedAt         DateTime?      @map("synced_at")
+  // ADR-013: client-supplied UUID; unique + retained for the report's lifetime (no expiry).
+  idempotencyKey   String?        @unique @map("idempotency_key")
+  deletedAt        DateTime?      @map("deleted_at")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+
+  cadre      Cadre @relation(fields: [cadreId], references: [id])
+  reportedBy User  @relation("ReportReporter", fields: [reportedById], references: [id])
+
+  @@index([cadreId])
+  @@index([reportedById])
+  @@map("reports")
+}
+
+// ─── Auth support ──────────────────────────────────────────────────────────────
+
+model OtpChallenge {
+  id         Int       @id @default(autoincrement())
+  phone      String
+  codeHash   String    @map("code_hash")
+  expiresAt  DateTime  @map("expires_at")
+  consumedAt DateTime? @map("consumed_at")
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([phone])
+  @@map("otp_challenges")
+}
+
+model RefreshToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ─── Audit trail (append-only, hash-chained) ───────────────────────────────────
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  actorId    Int?     @map("actor_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  before     Json?
+  after      Json?
+  prevHash   String   @map("prev_hash")
+  hash       String   @unique
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+// ─── Transactional outbox ──────────────────────────────────────────────────────
+
+model OutboxEvent {
+  id            Int       @id @default(autoincrement())
+  aggregateType String    @map("aggregate_type")
+  aggregateId   String    @map("aggregate_id")
+  eventType     String    @map("event_type")
+  payload       Json
+  createdAt     DateTime  @default(now()) @map("created_at")
+  publishedAt   DateTime? @map("published_at")
+
+  @@index([publishedAt])
+  @@map("outbox_events")
+}
