@@ -3,3 +3,20 @@ dist/
 .env
 *.log
 coverage/
+
+# --- Terraform (infra/) ---
+# Provider plugin cache and local workspace metadata.
+infra/.terraform/
+# Real variable values; may name buckets/accounts. Never committed.
+infra/terraform.tfvars
+# State must only ever live in the S3 backend. A local *.tfstate here means
+# someone ran Terraform without `init`-ing the backend -- do not commit it.
+infra/*.tfstate
+infra/*.tfstate.*
+infra/.terraform.tfstate.lock.info
+# Saved plan files are binary and can embed sensitive values.
+infra/*.tfplan
+infra/crash.log
+
+# NOT ignored, and committed on purpose:
+#   infra/.terraform.lock.hcl   -- pins provider checksums; must be in git

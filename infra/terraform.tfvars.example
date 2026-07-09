@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars (gitignored) and adjust if you need to override a default.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# Every variable below already has a working default in variables.tf, so an empty
+# terraform.tfvars is valid. Uncomment only what you actually want to change.
+#
+# No secrets belong in this file. DATABASE_URL and JWT_SECRET live in Secrets
+# Manager and are rotated by hand after apply -- Terraform never sees their values.
+
+# --- Identity and tagging -------------------------------------------------
+# aws_region  = "ap-south-1"   # must be ap-south-* (data residency)
+# aws_profile = "sampark-admin" # never the account root user
+# project     = "sampark"
+# environment = "staging"       # flip to "production" when msg91 SMS lands
+# owner       = "bitcrackers"
+
+# --- Network --------------------------------------------------------------
+# vpc_cidr             = "10.0.0.0/16"
+# availability_zones   = ["ap-south-1a", "ap-south-1b"]
+# public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+# private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24"]
+
+# --- Application ----------------------------------------------------------
+# container_port    = 3000
+# health_check_path = "/healthz"
+
+# --- GitHub Actions OIDC --------------------------------------------------
+# github_repository = "Om25091210/Sampark-Backend"
+# github_branch     = "main"
