@@ -26,5 +26,7 @@
 # health_check_path = "/healthz"
 
 # --- GitHub Actions OIDC --------------------------------------------------
+# The OIDC trust policy is scoped to branch pushes on this repo:
+#   repo:Om25091210/Sampark-Backend:ref:refs/heads/*
 # github_repository = "Om25091210/Sampark-Backend"
 # github_branch     = "main"
