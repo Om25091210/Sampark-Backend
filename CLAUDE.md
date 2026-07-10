@@ -57,7 +57,12 @@ Do not swap these without an ADR — they are the recorded equivalents to the su
    and the happy path at minimum.
 9. **NO facial recognition.** Do not create facial-recognition endpoints, models, or stubs.
    Biometrics in scope are fingerprint-only (client device unlock; Phase-2 attendance devices).
-10. **`role` serializes to lowercase on the wire:** exactly `super_admin` | `admin` | `officer` |
+10. **`MOCK_OTP_ECHO` is staging-only.** It makes the mock SMS provider write the OTP to CloudWatch in
+   plaintext, so a deployed environment running `NODE_ENV=production` can still complete a login.
+   Production sets it `false` via the Terraform variable default (`infra/variables.tf`), whose
+   validation rejects `true` when `environment == "production"`. **Never override it.** It must be
+   deleted outright once a real SMS gateway (`msg91`) ships.
+11. **`role` serializes to lowercase on the wire:** exactly `super_admin` | `admin` | `officer` |
    `viewer`. The mobile client switches on these lowercase literals (`isAdmin`/`isSuperAdmin` compare
    the raw string), so every JSON payload must use them verbatim. The Prisma enum MAY be uppercase
    internally (`SUPER_ADMIN | ADMIN | OFFICER | VIEWER`) for DB readability, but responses must map it

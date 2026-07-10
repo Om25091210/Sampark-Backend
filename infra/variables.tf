@@ -81,6 +81,21 @@ variable "container_port" {
   default     = 3000
 }
 
+variable "mock_otp_echo" {
+  description = "Staging-only: log OTPs to CloudWatch. Must be false in production."
+  type        = bool
+  default     = false
+
+  # The default is the safety mechanism. A production workspace that simply never
+  # mentions this variable cannot enable it; enabling requires an explicit override
+  # in terraform.tfvars. The validation makes an accidental production override fail
+  # at plan time rather than leaking OTPs to CloudWatch at runtime.
+  validation {
+    condition     = !(var.mock_otp_echo && var.environment == "production")
+    error_message = "mock_otp_echo must be false when environment is production: it writes OTPs to CloudWatch in plaintext."
+  }
+}
+
 variable "health_check_path" {
   description = "ALB target group health check path. /healthz is liveness only -- deliberately NOT /readyz, which 503s on a transient DB blip and would trigger a task-replacement storm."
   type        = string

@@ -12,6 +12,7 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     otpLength: 6,
     otpMaxAttempts: 5,
     smsProvider: 'mock',
+    mockOtpEcho: false,
     storageProvider: 'mock',
     s3Region: 'ap-south-1',
     mediaUrlTtlSeconds: 604800,

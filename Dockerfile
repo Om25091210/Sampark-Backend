@@ -75,6 +75,22 @@ COPY --from=builder --chown=node:node /app/node_modules/.prisma ./node_modules/.
 
 COPY --from=builder --chown=node:node /app/dist ./dist
 
+# Amazon RDS certificate authority bundle.
+#
+# `pg` (via pg-boss) now treats sslmode=require as verify-full, and RDS presents a
+# certificate chained to the Amazon RDS CA, which is NOT in Node's default trust
+# store. Without this the driver fails with "self-signed certificate in certificate
+# chain" -- and because server.ts deliberately survives a pg-boss startup failure,
+# the API reports healthy while the transactional-outbox publisher never runs.
+# Prisma is unaffected (its own TLS stack), which is what makes the failure silent.
+#
+# NODE_EXTRA_CA_CERTS *appends* to Node's trust store, so public TLS still works.
+# The connection is now genuinely authenticated, not merely encrypted.
+ADD --chown=node:node --chmod=0644 \
+    https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+    /app/certs/rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/app/certs/rds-global-bundle.pem
+
 # migrate deploy reads the schema and the committed migration history at runtime.
 COPY --chown=node:node prisma ./prisma
 COPY --chown=node:node --chmod=0755 docker-entrypoint.sh ./

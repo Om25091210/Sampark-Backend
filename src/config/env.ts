@@ -25,6 +25,14 @@ const EnvSchema = z.object({
   // India-resident gateway wired in later.
   SMS_PROVIDER: z.enum(['mock', 'msg91']).default('mock'),
 
+  // Staging-only escape hatch: makes the mock provider log the OTP even when
+  // NODE_ENV is not `development`. Needed because a deployed environment must run
+  // NODE_ENV=production, which otherwise hides the code and leaves no way to
+  // complete a login. NEVER enable where real officers exist — the code lands in
+  // CloudWatch in plaintext. Terraform's `mock_otp_echo` variable defaults to
+  // false, so production cannot enable it by omission.
+  MOCK_OTP_ECHO: z.enum(['true', 'false']).default('false'),
+
   // Media storage (report photos + PDF exports). `mock` keeps objects in-process and
   // returns deterministic fake URLs (dev/test); `s3` uses AWS S3 in ap-south-1
   // (data-residency rule). AWS credentials come from the SDK's default chain.
@@ -61,6 +69,7 @@ export interface AppConfig {
   otpLength: number;
   otpMaxAttempts: number;
   smsProvider: Env['SMS_PROVIDER'];
+  mockOtpEcho: boolean;
   storageProvider: Env['STORAGE_PROVIDER'];
   s3Bucket?: string;
   s3Region: string;
@@ -78,6 +87,7 @@ export function toAppConfig(env: Env): AppConfig {
     otpLength: env.OTP_LENGTH,
     otpMaxAttempts: env.OTP_MAX_ATTEMPTS,
     smsProvider: env.SMS_PROVIDER,
+    mockOtpEcho: env.MOCK_OTP_ECHO === 'true',
     storageProvider: env.STORAGE_PROVIDER,
     s3Bucket: env.S3_BUCKET,
     s3Region: env.S3_REGION,
