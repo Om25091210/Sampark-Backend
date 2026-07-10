@@ -270,56 +270,37 @@ Android **release** build will need `usesCleartextTraffic`; Expo Go / dev builds
 Backend surface is unchanged from the Phase-1 build: **13 endpoints, 49 tests green**, mixed wire casing
 (snake_case request bodies + auth responses, camelCase entity responses) exactly as the clients expect.
 
-### ⚠️ Authenticated flows are NOT testable in staging today
+### Authenticated flows are live
 
-Two independent blockers. Both must be cleared before an OTP login can succeed. **Neither is a bug** —
-each is a consequence of a deliberate decision recorded in ADR-015.
+Both earlier blockers are cleared. A full OTP login has been exercised end to end against the deployed
+staging backend.
 
-**Blocker 1 — the staging database has schema but no rows.**
-`docker-entrypoint.sh` runs `prisma migrate deploy`, never `prisma db seed` (a deploy must not write
-fixture data). So *every* phone number returns `403 PHONE_NOT_REGISTERED`, including the seeded ones —
-the closed-roster check in `auth.service.ts` finds no user.
+**The staging database is seeded** — 4 users, 4 cadres, 9 reports. `docker-entrypoint.sh` still runs only
+`prisma migrate deploy`; a deploy must not write fixture data. The seed was applied once, by hand, via
+`ecs execute-command` (see *Re-seeding* below). It is idempotent.
 
-**Blocker 2 — the OTP is never printed anywhere.**
-`MockSmsProvider` surfaces the code **only when `nodeEnv === 'development'`** (`src/lib/sms.ts:23`). The
-task runs `NODE_ENV=production`, because `env.ts` accepts only `development | test | production` and the
-deployed runtime must not be in dev mode. So `aws logs tail` shows the request and no code.
+**`MOCK_OTP_ECHO=true` makes the OTP readable.** `MockSmsProvider` normally prints the code only under
+`NODE_ENV=development`, and a deployed environment must run `NODE_ENV=production`. This flag reopens that
+path for staging only. `createSmsProvider` logs a `warn` at boot when it is on under production.
 
-The OTP cannot be read out of the database either: `otp_challenges.code_hash` stores an HMAC of the code
-keyed by `JWT_SECRET` (`auth.service.ts:73`), not the code itself.
+### Staging-only feature flags — the pattern
 
-### Clearing the blockers
+`MOCK_OTP_ECHO` is the reference implementation for any future staging-only escape hatch. Four properties,
+all required:
 
-**Seeding (Blocker 1).** The compiled seed ships in the image at `dist/db/seed.js`. Do **not** use
-`npm run seed` — it invokes `tsx`, a devDependency absent from the runner. Requires the AWS
-`session-manager-plugin` installed locally; `enable_execute_command` and the `ssmmessages` grant on the
-task role are already in place.
+1. **Plain environment variable, never a Secrets Manager key.** A feature flag is not a secret, and burying
+   it in `sampark/staging` would freeze it under that resource's `ignore_changes = [secret_string]` guard.
+2. **Driven by a Terraform variable that defaults to the safe value** (`mock_otp_echo`, default `false`), so
+   an environment that never mentions it cannot enable it.
+3. **A `validation` block that rejects the unsafe combination at plan time** — `mock_otp_echo = true` with
+   `environment = "production"` fails `terraform plan`. The default only guards against *omission*; the
+   validation guards against someone writing `true` into a production `tfvars`.
+4. **A loud runtime warning** when the flag is active in a context that calls itself production.
 
-```
-TASK=$(aws ecs list-tasks --cluster sampark-staging-cluster --desired-status RUNNING \
-  --profile sampark-admin --region ap-south-1 --query 'taskArns[0]' --output text)
+Recorded as a standing rule in `Sampark Backend/CLAUDE.md`. The flag must be **deleted outright** once a
+real SMS gateway (`msg91`) ships — it writes OTPs to CloudWatch in plaintext.
 
-aws ecs execute-command --cluster sampark-staging-cluster --task "$TASK" \
-  --container sampark-backend --interactive --command "node dist/db/seed.js" \
-  --profile sampark-admin --region ap-south-1
-```
-
-The seed is idempotent (upsert on `phone`), so it is safe to re-run.
-
-**Reading an OTP (Blocker 2).** No clean option exists yet. In rough order of preference:
-
-1. **Implement the MSG91 provider** and send real SMS. This is the intended path and is already on the
-   Phase 2 Migration Checklist — note DLT registration takes 3–7 business days.
-2. **Add a dev-only OTP retrieval affordance** guarded on something other than `NODE_ENV` (e.g. a
-   `MOCK_OTP_ECHO=true` env var that only the mock provider honours). A small, reviewable backend change.
-3. **Temporarily set `NODE_ENV=development`** in the task definition. Works, but also enables the Swagger
-   UI at `/docs` on a publicly reachable HTTP endpoint and switches Pino to pretty-printing. Not
-   recommended without TLS.
-
-Until one is done, staging proves **deployment**, not **authenticated flows** — precisely the caveat
-recorded in ADR-015.
-
-### Seeded users (present after running the seed above)
+### Seeded users
 
 | Phone | Role | Name |
 |---|---|---|
@@ -328,35 +309,65 @@ recorded in ADR-015.
 | `+919770000001` | `officer` | राजेश कुमार सिंह |
 | `+919770000002` | `officer` | प्रिया वर्मा |
 
-Roles serialize lowercase on the wire, verbatim. Four cadres are also seeded, assigned to
-`+919770000001`.
+Roles serialize lowercase on the wire, verbatim. Four cadres are seeded, assigned to `+919770000001`.
+Any number outside this roster returns `403 PHONE_NOT_REGISTERED` — the closed-roster rule (DESIGN #5).
 
-### What IS testable right now, with no unblocking
-
-These exercise the network path, RBAC, and the error contract end to end:
-
-```
-curl http://<alb>/healthz                  # 200 {"status":"ok"}
-curl http://<alb>/readyz                   # 200 {"status":"ready"}  <- proves RDS + Prisma over TLS
-curl http://<alb>/api/v1/cadres            # 401 UNAUTHORIZED
-curl -X POST http://<alb>/api/v1/auth/otp/send \
-  -H 'content-type: application/json' -d '{"phone":"+919770000001"}'   # 403 PHONE_NOT_REGISTERED
-```
-
-`/readyz` is the load-bearing check. `/healthz` is pure liveness and returns `200` even when Prisma is
-completely broken — that is how a wrong-libssl query engine slipped through a green deploy during the
-initial Docker build. Always confirm `/readyz` after a deploy.
-
-### Test flow once both blockers are cleared
+### Test flow
 
 1. Set `EXPO_PUBLIC_API_URL` (above) in the mobile `.env`.
-2. Send an OTP from the app to a seeded number, e.g. `+919770000001`.
-3. Obtain the code by whichever route from *Clearing the blockers* was taken.
-4. Verify the OTP in the app → expect snake_case tokens + a camelCase `user`.
-5. Confirm the access + refresh tokens land in SecureStore and the 401 interceptor refreshes.
-6. Exercise protected endpoints: `GET /cadres`, `GET /cadres/:id/reports`.
-   `transfer` and `export` are **admin+** and will `403` for `+919770000001`.
+2. Send an OTP from the app to a seeded number, e.g. `+919770000001` → `200 { message, expires_in: 300 }`.
+3. Read the code from CloudWatch:
+   ```
+   aws logs tail /ecs/sampark-backend --profile sampark-admin --region ap-south-1 --follow \
+     --filter-pattern 'MOCK SMS'
+   ```
+   Yields `MOCK SMS — OTP for +919770000001: 586357`.
+4. Verify the OTP in the app → snake_case `access_token` / `refresh_token` / `token_type: "bearer"`, plus a
+   camelCase `user`.
+5. Confirm the tokens land in SecureStore and the 401 interceptor refreshes single-flight.
+6. Exercise protected endpoints. Verified working against staging:
+   - `GET /api/v1/auth/me` → `200`, camelCase `AuthUser` (no `completionPercent` — Phase 1.5).
+   - `GET /api/v1/cadres?page=1&pageSize=3` → `200`, `PaginatedResponse<Cadre>` (`data`, `page`, `pageSize`,
+     `total`, `hasMore`).
+   - `GET /api/v1/cadres/:id/reports/export` as an officer → `403`. `transfer` and `export` are **admin+**;
+     gate them in the UI.
 
-Known client gap: `CreateReportPayload` still carries no `idempotency_key`. The backend dedupes on it
-(`201` new / `200` replay); without it an offline retry can duplicate a report. That mobile change is part
-of the planned sync build (ADR-013), not a blocker for first wiring.
+The OTP is single-use and expires in 300 seconds. Request a fresh one per attempt.
+
+### Re-seeding
+
+```
+TASK=$(aws ecs list-tasks --cluster sampark-staging-cluster \
+  --service-name sampark-staging-backend-service \
+  --profile sampark-admin --region ap-south-1 --query 'taskArns[0]' --output text)
+
+aws ecs execute-command --cluster sampark-staging-cluster --task "$TASK" \
+  --container sampark-backend --interactive --command "node dist/db/seed.js" \
+  --profile sampark-admin --region ap-south-1
+```
+
+Use `node dist/db/seed.js`, **not** `npm run seed` — the latter invokes `tsx`, a devDependency stripped from
+the runner image. Needs the AWS `session-manager-plugin` installed locally; the `ssmmessages` grant on the
+task role and `enable_execute_command` on the service are already in place. There is no `psql` in the image;
+query with `node -e` through `@prisma/client`.
+
+### Health checks, and which one to trust
+
+```
+GET /healthz  -> 200 {"status":"ok"}      liveness only
+GET /readyz   -> 200 {"status":"ready"}   DB reachable through Prisma
+```
+
+Both are **unversioned**; `/api/v1/healthz` correctly returns `404`.
+
+**`/healthz` returning 200 proves almost nothing.** It stayed green through two separate outages during the
+initial deployment: a Prisma query engine built for the wrong libssl (every query 500'd), and a `pg` TLS
+failure that killed the transactional-outbox worker while the API kept serving. `/readyz` catches the first.
+Only the container logs catch the second — check for `outbox worker started` after any deploy that touches
+the image, and for the absence of `self-signed certificate` and `Ignoring extra certs`.
+
+### Known client gap
+
+`CreateReportPayload` still carries no `idempotency_key`. The backend dedupes on it (`201` new / `200`
+replay); without it an offline retry can duplicate a report. That mobile change is part of the planned sync
+build (ADR-013), not a blocker for first wiring.
