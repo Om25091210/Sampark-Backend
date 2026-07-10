@@ -86,10 +86,23 @@ COPY --from=builder --chown=node:node /app/dist ./dist
 #
 # NODE_EXTRA_CA_CERTS *appends* to Node's trust store, so public TLS still works.
 # The connection is now genuinely authenticated, not merely encrypted.
+#
+# Create the directory explicitly. `ADD --chmod=0644` applies the mode to any parent
+# directory it has to create as well, and a directory without the execute bit cannot
+# be traversed -- every read inside it fails with EACCES. Whether that happens
+# depends on the BuildKit version, so it reproduced in CI and not locally.
+RUN mkdir -p /app/certs
 ADD --chown=node:node --chmod=0644 \
     https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
     /app/certs/rds-global-bundle.pem
 ENV NODE_EXTRA_CA_CERTS=/app/certs/rds-global-bundle.pem
+
+# Fail the build if node cannot actually read the bundle. Node treats an unreadable
+# NODE_EXTRA_CA_CERTS as a *warning* and carries on with its default trust store, so
+# a broken bundle produces a healthy container that cannot open a pg connection --
+# and, because server.ts survives a pg-boss startup failure, a green deploy with the
+# outbox publisher silently dead. Checking `ls` is not enough; open() is the test.
+RUN node -e "const fs=require('fs'); const b=fs.readFileSync(process.env.NODE_EXTRA_CA_CERTS,'utf8'); const n=(b.match(/BEGIN CERTIFICATE/g)||[]).length; if(n<50) throw new Error('RDS CA bundle looks wrong: '+n+' certs'); console.log('RDS CA bundle readable:',n,'certs');"
 
 # migrate deploy reads the schema and the committed migration history at runtime.
 COPY --chown=node:node prisma ./prisma
