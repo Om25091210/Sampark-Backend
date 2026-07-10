@@ -153,7 +153,7 @@ example; use the **Authorize** button to paste a token and hit protected routes.
 
 The staging environment (`infra/`, `environment = "staging"`) diverges from production on a
 handful of durability, observability, and cost settings. Those divergences are recorded in
-**ADR-015**; this section is the operational checklist for closing them. Flipping
+**ADR-015 (draft, pending paste into thesis)**; this section is the operational checklist for closing them. Flipping
 `var.environment` to `"production"` changes `local.name_prefix`, so a production apply creates a
 parallel set of resources rather than mutating staging in place.
 
@@ -161,9 +161,16 @@ parallel set of resources rather than mutating staging in place.
 
 - [ ] **Upgrade the AWS account off the Free Plan.** `backup_retention_period = 7` is rejected with
       `FreeTierRestrictionError` on the free plan — this blocked the first staging apply.
-- [ ] **Register the domain / confirm `bitcrackers.in` DNS control**, and create a Route 53 hosted
-      zone (~₹43/mo).
-- [ ] **Request an ACM public certificate** for `api.bitcrackers.in` (free) and validate it via DNS.
+- [ ] **Delegate `api.bitcrackers.in` DNS to Route 53** — create the hosted zone (~₹43/mo) and point
+      the registrar's nameservers at it.
+- [ ] **Issue an ACM public certificate** for `api.bitcrackers.in` **in `ap-south-1`** (free), and
+      validate it via DNS. Region matters: an ALB can only use a certificate from its own region.
+- [ ] **Implement the MSG91 provider** (or the chosen India-resident gateway) behind the existing
+      `SmsProvider` interface in `src/lib/sms.ts`. Must cover `send` plus delivery-status webhook
+      handling, with tests. Today only `mock` exists.
+- [ ] **Obtain DLT registrations** from the SMS gateway — sender ID and OTP template, mandated by
+      Indian telecom regulation. **Takes 3–7 business days; start early.** Without them the gateway
+      accepts the API call and silently fails to deliver.
 - [ ] **Rotate the `om-admin` access key** and delete the account root access keys.
 
 ### 2. Infrastructure changes, by file
@@ -172,6 +179,12 @@ parallel set of resources rather than mutating staging in place.
 - [ ] Add a `:443` HTTPS listener with the ACM certificate; redirect `:80` → `:443`.
 - [ ] Route 53 alias record `api.bitcrackers.in` → ALB.
 - [ ] Delta cost is < ₹150/mo: the cert is free and ALB bills per LB-hour regardless of listener count.
+- [ ] **Enable access logs** to a dedicated S3 bucket. Needs a bucket policy granting the regional
+      ELB service principal `s3:PutObject` — log delivery silently no-ops without it.
+- [ ] **Attach WAF v2** with the AWS managed rule groups: Core (`AWSManagedRulesCommonRuleSet`),
+      Known Bad Inputs (`AWSManagedRulesKnownBadInputsRuleSet`), SQL Injection
+      (`AWSManagedRulesSQLiRuleSet`), and IP Reputation (`AWSManagedRulesAmazonIpReputationList`).
+- [ ] `enable_deletion_protection`: `false` → `true`.
 
 **`rds.tf`**
 - [ ] `backup_retention_period`: `1` → `7` (minimum).
@@ -193,7 +206,7 @@ parallel set of resources rather than mutating staging in place.
 - [ ] Gateway endpoint for S3 (free).
 - [ ] Interface endpoints for ECR (api + dkr), Secrets Manager, CloudWatch Logs (~₹500/mo total).
 - [ ] Keeps Fargate → AWS API traffic off the public internet. Required because tasks run in public
-      subnets with a public IP (no NAT Gateway — see ADR-015).
+      subnets with a public IP (no NAT Gateway — see ADR-015, draft, pending paste into thesis).
 
 **`s3.tf` / application**
 - [ ] Reduce `MEDIA_URL_TTL_SECONDS` from `604800` (7 days, the SigV4 maximum) to 1–6 hours, once
@@ -201,17 +214,18 @@ parallel set of resources rather than mutating staging in place.
 
 ### 3. Deploy pipeline
 
-- [ ] **`SMS_PROVIDER`: `mock` → `msg91`.** Implement `src/lib/sms.ts`'s msg91 provider. Until this
-      lands, **no officer can log in** — which is why staging is tagged `Environment=staging`
-      (DESIGN.md decision 6).
-- [ ] Complete **DLT registrations** (sender ID + OTP template) with the Indian telecom regulator;
-      msg91 will not deliver without them. Lead time is measured in days, not hours.
+- [ ] **Switch `SMS_PROVIDER` from `mock` to the real provider name** in the `sampark/production`
+      secret. The SDK integration and DLT registrations must already be done — see *Required before
+      the flip*. Until they are, **no officer can log in**, which is why this environment is tagged
+      `Environment=staging` (DESIGN.md decision 6).
 - [ ] Confirm `STORAGE_PROVIDER=s3` in the production task definition.
 - [ ] Re-verify the rolling deploy end-to-end: `ecs wait services-stable` must pass with the
       circuit breaker armed.
 
 ### 4. Documentation
 
+- [ ] Paste **ADR-015 (draft)** into `BC-THESIS-SAMPARK.md`, then drop the "draft" qualifier from every
+      reference in this file.
 - [ ] Update **ADR-015** with an `Outcome:` section recording what the production flip actually cost
       and broke.
 - [ ] Refresh the technology registry in `BC-THESIS-SAMPARK.md`.
@@ -224,4 +238,5 @@ parallel set of resources rather than mutating staging in place.
 
 - **ADR-011** — backend stack (Node/Fastify/Prisma; Redis deferred).
 - **ADR-014** — fully-private media bucket, presigned-URL access.
-- **ADR-015** — staging vs production configuration divergences and standing rules.
+- **ADR-015 (draft, pending paste into thesis)** — staging vs production configuration divergences
+  and standing rules.

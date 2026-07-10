@@ -13,6 +13,21 @@ output "private_subnet_ids" {
   value       = aws_subnet.private[*].id
 }
 
+output "alb_dns_name" {
+  description = "Mobile API base URL for integration testing: http://<this>/api/v1 (set EXPO_PUBLIC_API_URL)."
+  value       = aws_lb.main.dns_name
+}
+
+output "alb_target_group_arn" {
+  description = "Consumed by the ECS service's load_balancer block in ecs.tf."
+  value       = aws_lb_target_group.backend.arn
+}
+
+output "rds_endpoint" {
+  description = "Private endpoint. Reachable only from fargate-sg."
+  value       = aws_db_instance.main.address
+}
+
 output "ecr_repository_url" {
   description = "Push target for CI. Set as the ECR_REGISTRY workflow input."
   value       = aws_ecr_repository.backend.repository_url
