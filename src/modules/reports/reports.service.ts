@@ -4,11 +4,15 @@ import { toWireReport, type WireReport } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { notFound } from '../../lib/errors.js';
+import type { StorageProvider } from '../../lib/storage.js';
 import type { CreateReportBody, ListReportsQuery } from './reports.schema.js';
 
 export interface ReportsDeps {
   prisma: PrismaClient;
   log: FastifyBaseLogger;
+  // Storage + TTL power the per-read re-signing of photo keys (ADR-016).
+  storage: StorageProvider;
+  mediaUrlTtlSeconds: number;
 }
 
 export interface Paginated<T> {
@@ -35,7 +39,11 @@ export interface ReportsService {
 // nested `cadre` Pick the client renders.
 const withCadre = { include: { cadre: true } } as const;
 
-export function makeReportsService({ prisma }: ReportsDeps): ReportsService {
+export function makeReportsService({ prisma, storage, mediaUrlTtlSeconds }: ReportsDeps): ReportsService {
+  // Re-signs a stored S3 key into a fresh presigned GET URL (ADR-016). Passed to
+  // the serializer so every read hands out non-expired photo URLs.
+  const signUrl = (key: string): Promise<string> => storage.presignGet(key, mediaUrlTtlSeconds);
+
   // Confirms the cadre exists and is not soft-deleted; throws 404 otherwise.
   async function assertCadre(cadreId: number): Promise<void> {
     const cadre = await prisma.cadre.findFirst({ where: { id: cadreId, deletedAt: null } });
@@ -70,7 +78,7 @@ export function makeReportsService({ prisma }: ReportsDeps): ReportsService {
       ]);
 
       return {
-        data: rows.map(toWireReport),
+        data: await Promise.all(rows.map((r) => toWireReport(r, signUrl))),
         total,
         page: query.page,
         pageSize: query.pageSize,
@@ -84,7 +92,7 @@ export function makeReportsService({ prisma }: ReportsDeps): ReportsService {
         ...withCadre,
       });
       if (report === null) throw notFound('Report not found');
-      return toWireReport(report);
+      return toWireReport(report, signUrl);
     },
 
     async create(cadreId, body, reporterId) {
@@ -96,7 +104,7 @@ export function makeReportsService({ prisma }: ReportsDeps): ReportsService {
           where: { idempotencyKey: body.idempotency_key },
           ...withCadre,
         });
-        if (existing !== null) return { report: toWireReport(existing), created: false };
+        if (existing !== null) return { report: await toWireReport(existing, signUrl), created: false };
       }
 
       await assertCadre(cadreId);
@@ -110,6 +118,7 @@ export function makeReportsService({ prisma }: ReportsDeps): ReportsService {
         currentPhone: body.current_phone,
         currentActivity: body.current_activity,
         photoUrl: body.photo_url ?? null,
+        photoKeys: body.photo_keys ?? [],
         gpsLatitude: body.gps_coords?.latitude ?? null,
         gpsLongitude: body.gps_coords?.longitude ?? null,
         gpsAddress: body.gps_coords?.address ?? null,
@@ -136,7 +145,7 @@ export function makeReportsService({ prisma }: ReportsDeps): ReportsService {
           });
           return created;
         });
-        return { report: toWireReport(report), created: true };
+        return { report: await toWireReport(report, signUrl), created: true };
       } catch (err) {
         // Concurrent replay lost the race on the unique idempotency key: fetch and
         // return the winner's record (200) instead of surfacing the conflict.
@@ -149,7 +158,7 @@ export function makeReportsService({ prisma }: ReportsDeps): ReportsService {
             where: { idempotencyKey: body.idempotency_key },
             ...withCadre,
           });
-          if (winner !== null) return { report: toWireReport(winner), created: false };
+          if (winner !== null) return { report: await toWireReport(winner, signUrl), created: false };
         }
         throw err;
       }

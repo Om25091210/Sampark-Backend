@@ -154,6 +154,37 @@ describe('reports', () => {
     await app.close();
   });
 
+  it('create with photo_keys → response re-signs them into photoUrls (ADR-016)', async () => {
+    const app = await makeApp();
+    const keys = [`reports/cadre-${cadreId}/a.jpg`, `reports/cadre-${cadreId}/b.jpg`];
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+      headers: auth(officerToken), payload: { ...validBody(), photo_keys: keys },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as WireReportBody & { photoUrls?: string[] };
+    // Each stored key is handed back as a presigned URL, in order — never the raw key.
+    expect(body.photoUrls).toHaveLength(2);
+    expect(body.photoUrls![0]).toContain(keys[0]!);
+    expect(body.photoUrls![0]).toContain('X-Amz-Expires');
+    // The durable keys are persisted on the row.
+    const row = await prisma.report.findUnique({ where: { id: body.id }, select: { photoKeys: true } });
+    expect(row?.photoKeys).toEqual(keys);
+    await app.close();
+  });
+
+  it('create rejects more than 3 photo_keys → 400 VALIDATION_ERROR', async () => {
+    const app = await makeApp();
+    const keys = [1, 2, 3, 4].map((n) => `reports/cadre-${cadreId}/${n}.jpg`);
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+      headers: auth(officerToken), payload: { ...validBody(), photo_keys: keys },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+    await app.close();
+  });
+
   it('GET detail returns the report; unknown id → 404', async () => {
     const app = await makeApp();
     const created = await app.inject({

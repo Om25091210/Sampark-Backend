@@ -16,9 +16,9 @@ export const listReportsQuery = z.object({
 });
 
 // Create body is snake_case (per the client contract). Unknown keys the client
-// sends but the core contract doesn't model (e.g. `selected_date`, `photo_urls`)
-// are stripped by Zod's default (non-strict) parse — they belong to reports-media
-// or are not yet part of the wire contract, so ignoring them is non-breaking.
+// sends but the core contract doesn't model (e.g. `selected_date`) are stripped
+// by Zod's default (non-strict) parse — not yet part of the wire contract, so
+// ignoring them is non-breaking.
 export const createReportBody = z.object({
   // Path is authoritative; body `cadre_id` (always sent by the client) is
   // optional here and cross-checked in the route.
@@ -28,7 +28,11 @@ export const createReportBody = z.object({
   person_status: z.enum(['alive', 'dead']),
   current_phone: z.string().trim().min(1).max(20),
   current_activity: z.string().trim().min(1).max(1000),
+  // Legacy single-photo URL (kept for back-compat with older clients).
   photo_url: z.string().trim().max(2048).optional(),
+  // ADR-016: durable S3 keys returned by the upload endpoint. The UI allows up to
+  // 3 photos per report; the backend re-signs these keys to URLs on read.
+  photo_keys: z.array(z.string().trim().min(1).max(1024)).max(3).optional(),
   gps_coords: z
     .object({
       latitude: z.number(),

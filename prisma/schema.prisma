@@ -124,7 +124,12 @@ model Report {
   personStatus     PersonStatus   @map("person_status")
   currentPhone     String         @map("current_phone")
   currentActivity  String         @map("current_activity")
+  // Legacy single-photo URL (may be an expired presigned URL on old rows). New
+  // writes populate photoKeys instead; kept for backward-compatible reads.
   photoUrl         String?        @map("photo_url")
+  // ADR-016: durable S3 object keys for report photos. Keys are stored (never the
+  // presigned URL, which expires ≤7d); reads re-sign each key to a fresh GET URL.
+  photoKeys        String[]       @default([]) @map("photo_keys")
   gpsLatitude      Float?         @map("gps_latitude")
   gpsLongitude     Float?         @map("gps_longitude")
   gpsAddress       String?        @map("gps_address")

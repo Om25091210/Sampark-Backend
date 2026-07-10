@@ -137,7 +137,7 @@ describe('reports-media — photo upload', () => {
     await app.close();
   });
 
-  it('uploads a JPEG (officer) → 200 { url } and stores the object', async () => {
+  it('uploads a JPEG (officer) → 200 { key, url } and stores the object', async () => {
     const { app, storage } = await makeApp();
     const mp = multipartFile('file', 'photo.jpg', 'image/jpeg', JPEG);
     const res = await app.inject({
@@ -145,12 +145,15 @@ describe('reports-media — photo upload', () => {
       headers: { ...auth(officerToken), ...mp.headers }, payload: mp.body,
     });
     expect(res.statusCode).toBe(200);
-    const body = res.json() as { url: string };
+    const body = res.json() as { key: string; url: string };
     expect(typeof body.url).toBe('string');
     expect(body.url).toContain(`reports/cadre-${cadreId}/`);
+    // ADR-016: the durable key is returned so the client can persist it.
+    expect(body.key).toMatch(new RegExp(`^reports/cadre-${cadreId}/.+\\.jpg$`));
     // Exactly one object was stored, with the JPEG bytes + content type.
     expect(storage.objects.size).toBe(1);
     const [key, obj] = [...storage.objects.entries()][0]!;
+    expect(key).toBe(body.key);
     expect(key.startsWith(`reports/cadre-${cadreId}/`)).toBe(true);
     expect(obj.contentType).toBe('image/jpeg');
     expect(obj.body.equals(JPEG)).toBe(true);

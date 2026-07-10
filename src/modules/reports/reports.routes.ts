@@ -18,7 +18,12 @@ import {
 // Reports filed against a cadre. All routes require authentication; creating a
 // report is officer+ (viewers are read-only).
 export async function reportsRoutes(app: FastifyInstance): Promise<void> {
-  const service = makeReportsService({ prisma: app.prisma, log: app.log });
+  const service = makeReportsService({
+    prisma: app.prisma,
+    log: app.log,
+    storage: app.storage,
+    mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+  });
 
   app.get(
     '/cadres/:cadreId/reports',

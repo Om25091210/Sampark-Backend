@@ -19,7 +19,7 @@ export interface UploadInput {
 }
 
 export interface ReportsMediaService {
-  uploadPhoto(cadreId: number, file: UploadInput): Promise<{ url: string }>;
+  uploadPhoto(cadreId: number, file: UploadInput): Promise<{ key: string; url: string }>;
   exportReports(cadreId: number): Promise<{ download_url: string }>;
 }
 
@@ -44,8 +44,9 @@ export function makeReportsMediaService(deps: ReportsMediaDeps): ReportsMediaSer
       const key = `reports/cadre-${cadreId}/${randomUUID()}.${ext}`;
       await storage.put(key, file.buffer, file.contentType);
       const url = await storage.presignGet(key, mediaUrlTtlSeconds);
-      // snake_case response per the client contract (report.service.ts expects { url }).
-      return { url };
+      // ADR-016: `key` is the durable identity the client stores on the report
+      // (`photo_keys`); `url` is a presigned preview, valid only for the TTL window.
+      return { key, url };
     },
 
     async exportReports(cadreId) {

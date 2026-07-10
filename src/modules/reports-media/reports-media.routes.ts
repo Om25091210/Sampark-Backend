@@ -24,12 +24,14 @@ export async function reportsMediaRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Upload a report photo (officer+)',
         description:
           'multipart/form-data with a single `file` field (image/jpeg or image/png, ≤ 10 MB). ' +
-          'Returns a readable URL to store as the report’s `photo_url`.',
+          'Returns the durable `key` (store it in the report’s `photo_keys`) and a presigned ' +
+          '`url` for immediate preview (expires after the media TTL).',
         consumes: ['multipart/form-data'],
         security: bearerAuth,
         params: zodToJson(mediaCadreParam),
         response: {
-          200: jsonResponse('Stored — presigned URL', {
+          200: jsonResponse('Stored — durable key + presigned preview URL', {
+            key: 'reports/cadre-12/9f1c….jpg',
             url: 'https://sampark-media.s3.ap-south-1.amazonaws.com/reports/cadre-12/9f1c….jpg?X-Amz-…',
           }),
         },

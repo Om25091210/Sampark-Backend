@@ -104,7 +104,10 @@ export interface WireReport {
   personStatus: Report['personStatus'];
   currentPhone: string;
   currentActivity: string;
+  /** Legacy single-photo URL, passed through for old rows. Prefer `photoUrls`. */
   photoUrl?: string;
+  /** Fresh presigned GET URLs, re-signed from the stored S3 keys on every read (ADR-016). */
+  photoUrls?: string[];
   gpsCoords?: { latitude: number; longitude: number; address: string };
   isHomeAddress?: boolean;
   reportedAt: string;
@@ -115,7 +118,12 @@ export interface WireReport {
 // A report row optionally carrying its included `cadre` relation.
 type ReportWithCadre = Report & { cadre?: Cadre | null };
 
-export function toWireReport(r: ReportWithCadre): WireReport {
+// Turns a durable S3 key into a readable URL. Injected (not imported) so the
+// serializer stays free of storage/config coupling; callers pass the storage
+// provider's presigner. Absent in contexts that don't need photo URLs.
+export type SignUrl = (key: string) => Promise<string>;
+
+export async function toWireReport(r: ReportWithCadre, signUrl?: SignUrl): Promise<WireReport> {
   const wire: WireReport = {
     id: r.id,
     cadreId: r.cadreId,
@@ -130,6 +138,12 @@ export function toWireReport(r: ReportWithCadre): WireReport {
     reportedBy: r.reportedById,
     syncedAt: r.syncedAt?.toISOString(),
   };
+
+  // ADR-016: re-sign the stored keys into fresh, time-limited GET URLs per read.
+  // The key is the durable identity; the presigned URL is never persisted.
+  if (r.photoKeys.length > 0 && signUrl !== undefined) {
+    wire.photoUrls = await Promise.all(r.photoKeys.map((key) => signUrl(key)));
+  }
 
   // Nest GPS only when coordinates exist; `address` falls back to '' so the shape
   // matches the client's GpsCoords (address is a required string there).

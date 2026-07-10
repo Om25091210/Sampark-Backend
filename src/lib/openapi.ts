@@ -67,6 +67,9 @@ export const EXAMPLE_REPORT = {
   personStatus: 'alive',
   currentPhone: '+919812345678',
   currentActivity: 'खेती कर रहा है',
+  photoUrls: [
+    'https://sampark-media.s3.ap-south-1.amazonaws.com/reports/cadre-12/9f1c….jpg?X-Amz-…',
+  ],
   gpsCoords: { latitude: 18.79, longitude: 80.9, address: 'बीजापुर' },
   isHomeAddress: true,
   reportedAt: '2026-07-08T09:30:00.000Z',
