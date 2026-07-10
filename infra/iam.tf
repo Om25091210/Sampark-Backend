@@ -97,6 +97,37 @@ resource "aws_iam_role_policy" "ecs_task_media" {
   policy = data.aws_iam_policy_document.ecs_task_media.json
 }
 
+# Backs `enable_execute_command = true` on the ECS service (ecs.tf). Without these
+# four actions the flag is accepted, the service starts, and `aws ecs
+# execute-command` fails later with an opaque error.
+#
+# Resource must be "*": the ssmmessages actions establish a session channel and do
+# not support resource-level ARNs. The blast radius is bounded elsewhere -- the
+# session lands inside this task's container, and reaching it at all requires
+# ecs:ExecuteCommand on the cluster, which only an admin principal holds.
+#
+# This grant has nothing to do with Secrets Manager. The task role still has NO
+# secretsmanager:GetSecretValue -- see the comment on ecs_task_media above.
+data "aws_iam_policy_document" "ecs_task_exec" {
+  statement {
+    sid    = "SsmSessionChannelForExecuteCommand"
+    effect = "Allow"
+    actions = [
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_task_exec" {
+  name   = "${local.name_prefix}-execute-command"
+  role   = aws_iam_role.ecs_task.id
+  policy = data.aws_iam_policy_document.ecs_task_exec.json
+}
+
 # ---------------------------------------------------------------------------
 # GitHub Actions deploy role -- assumed via OIDC (trust policy in github_oidc.tf)
 # ---------------------------------------------------------------------------

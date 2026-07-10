@@ -186,6 +186,12 @@ parallel set of resources rather than mutating staging in place.
       (`AWSManagedRulesSQLiRuleSet`), and IP Reputation (`AWSManagedRulesAmazonIpReputationList`).
 - [ ] `enable_deletion_protection`: `false` → `true`.
 
+**`ecs.tf`**
+- [ ] Add a `deployment_alarms` block referencing CloudWatch alarms on ALB 5xx rate and running task
+      count, once those alarms exist (set up during the Phase 2 monitoring rollout). This catches a
+      deployment whose tasks start healthy and then degrade — a different failure mode from the
+      `deployment_circuit_breaker`, which only catches tasks that never stabilise.
+
 **`rds.tf`**
 - [ ] `backup_retention_period`: `1` → `7` (minimum).
 - [ ] `multi_az`: `false` → `true`.
