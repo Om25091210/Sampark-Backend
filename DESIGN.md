@@ -146,3 +146,82 @@ example; use the **Authorize** button to paste a token and hit protected routes.
 - **2 RBAC gates to honor in the mobile UI:** `transfer` + `export` are **admin+** (backend enforces
   `403`; mobile should only surface these to admins).
 - **1 prod-config reminder:** flip `STORAGE_PROVIDER=s3` for real photo/PDF persistence.
+
+---
+
+## Phase 2 Migration Checklist (staging → production)
+
+The staging environment (`infra/`, `environment = "staging"`) diverges from production on a
+handful of durability, observability, and cost settings. Those divergences are recorded in
+**ADR-015**; this section is the operational checklist for closing them. Flipping
+`var.environment` to `"production"` changes `local.name_prefix`, so a production apply creates a
+parallel set of resources rather than mutating staging in place.
+
+### 1. Required before the flip
+
+- [ ] **Upgrade the AWS account off the Free Plan.** `backup_retention_period = 7` is rejected with
+      `FreeTierRestrictionError` on the free plan — this blocked the first staging apply.
+- [ ] **Register the domain / confirm `bitcrackers.in` DNS control**, and create a Route 53 hosted
+      zone (~₹43/mo).
+- [ ] **Request an ACM public certificate** for `api.bitcrackers.in` (free) and validate it via DNS.
+- [ ] **Rotate the `om-admin` access key** and delete the account root access keys.
+
+### 2. Infrastructure changes, by file
+
+**`alb.tf`**
+- [ ] Add a `:443` HTTPS listener with the ACM certificate; redirect `:80` → `:443`.
+- [ ] Route 53 alias record `api.bitcrackers.in` → ALB.
+- [ ] Delta cost is < ₹150/mo: the cert is free and ALB bills per LB-hour regardless of listener count.
+
+**`rds.tf`**
+- [ ] `backup_retention_period`: `1` → `7` (minimum).
+- [ ] `multi_az`: `false` → `true`.
+- [ ] `performance_insights_enabled`: `false` → `true` (free at 7-day retention).
+- [ ] `monitoring_interval`: `0` → `60` (Enhanced Monitoring).
+- [ ] `skip_final_snapshot`: `true` → `false`.
+- [ ] Keep `deletion_protection = true` and keep `engine_version` pinned.
+
+**`secrets.tf`**
+- [ ] `recovery_window_in_days`: `0` → `30`.
+- [ ] Populate `DATABASE_URL` / `JWT_SECRET` by hand after the first apply; never through Terraform.
+
+**`github_oidc.tf`**
+- [ ] Tighten the OIDC trust `sub` from `repo:<owner>/<repo>:ref:refs/heads/*` to
+      `repo:<owner>/<repo>:ref:refs/heads/main`.
+
+**New — `vpc_endpoints.tf`**
+- [ ] Gateway endpoint for S3 (free).
+- [ ] Interface endpoints for ECR (api + dkr), Secrets Manager, CloudWatch Logs (~₹500/mo total).
+- [ ] Keeps Fargate → AWS API traffic off the public internet. Required because tasks run in public
+      subnets with a public IP (no NAT Gateway — see ADR-015).
+
+**`s3.tf` / application**
+- [ ] Reduce `MEDIA_URL_TTL_SECONDS` from `604800` (7 days, the SigV4 maximum) to 1–6 hours, once
+      the mobile client re-fetches presigned URLs on read instead of persisting them (ADR-014).
+
+### 3. Deploy pipeline
+
+- [ ] **`SMS_PROVIDER`: `mock` → `msg91`.** Implement `src/lib/sms.ts`'s msg91 provider. Until this
+      lands, **no officer can log in** — which is why staging is tagged `Environment=staging`
+      (DESIGN.md decision 6).
+- [ ] Complete **DLT registrations** (sender ID + OTP template) with the Indian telecom regulator;
+      msg91 will not deliver without them. Lead time is measured in days, not hours.
+- [ ] Confirm `STORAGE_PROVIDER=s3` in the production task definition.
+- [ ] Re-verify the rolling deploy end-to-end: `ecs wait services-stable` must pass with the
+      circuit breaker armed.
+
+### 4. Documentation
+
+- [ ] Update **ADR-015** with an `Outcome:` section recording what the production flip actually cost
+      and broke.
+- [ ] Refresh the technology registry in `BC-THESIS-SAMPARK.md`.
+- [ ] Record an ADR for the **NAT-less network topology** (Fargate in public subnets) — currently
+      justified only in the `infra/network.tf` comments and this checklist.
+- [ ] Record an ADR for the **99.9% uptime deviation**: single-AZ RDS plus a single Fargate task does
+      not meet the target in the root `CLAUDE.md`, and staging does not claim to.
+
+### 5. Cross-references
+
+- **ADR-011** — backend stack (Node/Fastify/Prisma; Redis deferred).
+- **ADR-014** — fully-private media bucket, presigned-URL access.
+- **ADR-015** — staging vs production configuration divergences and standing rules.

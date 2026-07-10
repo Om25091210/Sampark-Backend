@@ -1,8 +1,15 @@
 # Local development database. Start with: docker compose up -d
-# Postgres 16 to match production (AWS RDS). Data persists in the named volume.
+# Data persists in the named volume.
+#
+# Pinned to the exact minor version RDS runs (infra/rds.tf: engine_version = "16.14").
+# `postgres:16` floats across minors and would silently drift away from staging.
+# Change both together, never one alone.
+#
+# Debian image, not -alpine: the sampark_pgdata volume was initialised under glibc,
+# and musl's collation provider can order text indexes differently on the same data.
 services:
   db:
-    image: postgres:16
+    image: postgres:16.14
     container_name: sampark-pg
     restart: unless-stopped
     environment:
