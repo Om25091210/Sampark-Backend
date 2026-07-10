@@ -246,3 +246,117 @@ parallel set of resources rather than mutating staging in place.
 - **ADR-014** — fully-private media bucket, presigned-URL access.
 - **ADR-015 (draft, pending paste into thesis)** — staging vs production configuration divergences
   and standing rules.
+
+---
+
+## Mobile Integration (handoff — staging backend is live)
+
+### Live backend
+
+| | |
+|---|---|
+| **Base URL** | `http://sampark-staging-alb-2106262233.ap-south-1.elb.amazonaws.com` |
+| **API prefix** | `/api/v1` on all business routes |
+| **Health** | `/healthz`, `/readyz` — **unversioned**. `/api/v1/healthz` correctly returns `404` |
+| **Environment** | `Environment=staging` (AWS tag) / `NODE_ENV=production` (Node runtime) |
+| **Region** | ap-south-1, AWS account `231378335677`, CLI profile `sampark-admin` |
+| **Logs** | CloudWatch group `/ecs/sampark-backend`, 30-day retention |
+
+`EXPO_PUBLIC_API_URL=http://sampark-staging-alb-2106262233.ap-south-1.elb.amazonaws.com/api/v1`
+
+Note `http://`, not `https://`. TLS is a Phase 2 item (needs Route 53 + an ACM cert in ap-south-1). An
+Android **release** build will need `usesCleartextTraffic`; Expo Go / dev builds work as-is.
+
+Backend surface is unchanged from the Phase-1 build: **13 endpoints, 49 tests green**, mixed wire casing
+(snake_case request bodies + auth responses, camelCase entity responses) exactly as the clients expect.
+
+### ⚠️ Authenticated flows are NOT testable in staging today
+
+Two independent blockers. Both must be cleared before an OTP login can succeed. **Neither is a bug** —
+each is a consequence of a deliberate decision recorded in ADR-015.
+
+**Blocker 1 — the staging database has schema but no rows.**
+`docker-entrypoint.sh` runs `prisma migrate deploy`, never `prisma db seed` (a deploy must not write
+fixture data). So *every* phone number returns `403 PHONE_NOT_REGISTERED`, including the seeded ones —
+the closed-roster check in `auth.service.ts` finds no user.
+
+**Blocker 2 — the OTP is never printed anywhere.**
+`MockSmsProvider` surfaces the code **only when `nodeEnv === 'development'`** (`src/lib/sms.ts:23`). The
+task runs `NODE_ENV=production`, because `env.ts` accepts only `development | test | production` and the
+deployed runtime must not be in dev mode. So `aws logs tail` shows the request and no code.
+
+The OTP cannot be read out of the database either: `otp_challenges.code_hash` stores an HMAC of the code
+keyed by `JWT_SECRET` (`auth.service.ts:73`), not the code itself.
+
+### Clearing the blockers
+
+**Seeding (Blocker 1).** The compiled seed ships in the image at `dist/db/seed.js`. Do **not** use
+`npm run seed` — it invokes `tsx`, a devDependency absent from the runner. Requires the AWS
+`session-manager-plugin` installed locally; `enable_execute_command` and the `ssmmessages` grant on the
+task role are already in place.
+
+```
+TASK=$(aws ecs list-tasks --cluster sampark-staging-cluster --desired-status RUNNING \
+  --profile sampark-admin --region ap-south-1 --query 'taskArns[0]' --output text)
+
+aws ecs execute-command --cluster sampark-staging-cluster --task "$TASK" \
+  --container sampark-backend --interactive --command "node dist/db/seed.js" \
+  --profile sampark-admin --region ap-south-1
+```
+
+The seed is idempotent (upsert on `phone`), so it is safe to re-run.
+
+**Reading an OTP (Blocker 2).** No clean option exists yet. In rough order of preference:
+
+1. **Implement the MSG91 provider** and send real SMS. This is the intended path and is already on the
+   Phase 2 Migration Checklist — note DLT registration takes 3–7 business days.
+2. **Add a dev-only OTP retrieval affordance** guarded on something other than `NODE_ENV` (e.g. a
+   `MOCK_OTP_ECHO=true` env var that only the mock provider honours). A small, reviewable backend change.
+3. **Temporarily set `NODE_ENV=development`** in the task definition. Works, but also enables the Swagger
+   UI at `/docs` on a publicly reachable HTTP endpoint and switches Pino to pretty-printing. Not
+   recommended without TLS.
+
+Until one is done, staging proves **deployment**, not **authenticated flows** — precisely the caveat
+recorded in ADR-015.
+
+### Seeded users (present after running the seed above)
+
+| Phone | Role | Name |
+|---|---|---|
+| `+919999999999` | `super_admin` | सुपर एडमिन |
+| `+919888888888` | `admin` | एडमिन |
+| `+919770000001` | `officer` | राजेश कुमार सिंह |
+| `+919770000002` | `officer` | प्रिया वर्मा |
+
+Roles serialize lowercase on the wire, verbatim. Four cadres are also seeded, assigned to
+`+919770000001`.
+
+### What IS testable right now, with no unblocking
+
+These exercise the network path, RBAC, and the error contract end to end:
+
+```
+curl http://<alb>/healthz                  # 200 {"status":"ok"}
+curl http://<alb>/readyz                   # 200 {"status":"ready"}  <- proves RDS + Prisma over TLS
+curl http://<alb>/api/v1/cadres            # 401 UNAUTHORIZED
+curl -X POST http://<alb>/api/v1/auth/otp/send \
+  -H 'content-type: application/json' -d '{"phone":"+919770000001"}'   # 403 PHONE_NOT_REGISTERED
+```
+
+`/readyz` is the load-bearing check. `/healthz` is pure liveness and returns `200` even when Prisma is
+completely broken — that is how a wrong-libssl query engine slipped through a green deploy during the
+initial Docker build. Always confirm `/readyz` after a deploy.
+
+### Test flow once both blockers are cleared
+
+1. Set `EXPO_PUBLIC_API_URL` (above) in the mobile `.env`.
+2. Send an OTP from the app to a seeded number, e.g. `+919770000001`.
+3. Obtain the code by whichever route from *Clearing the blockers* was taken.
+4. Verify the OTP in the app → expect snake_case tokens + a camelCase `user`.
+5. Confirm the access + refresh tokens land in SecureStore and the 401 interceptor refreshes.
+6. Exercise protected endpoints: `GET /cadres`, `GET /cadres/:id/reports`.
+   `transfer` and `export` are **admin+** and will `403` for `+919770000001`.
+
+Known client gap: `CreateReportPayload` still carries no `idempotency_key`. The backend dedupes on it
+(`201` new / `200` replay); without it an offline retry can duplicate a report. That mobile change is part
+of the planned sync build (ADR-013), not a blocker for first wiring.
