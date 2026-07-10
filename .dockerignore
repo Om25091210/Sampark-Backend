@@ -1,0 +1,29 @@
+# Everything here is excluded from the build context: it is never uploaded to the
+# daemon, so it cannot end up in an image layer even by accident.
+
+# Rebuilt inside the image. Copying the host tree in would also drag in the wrong
+# platform's Prisma engine binaries.
+node_modules/
+dist/
+
+# Secrets and local config.
+.env
+.env.*
+!.env.example
+
+# Infrastructure. Terraform state can contain sensitive attribute values and has no
+# business inside an application image.
+infra/
+
+# Local-only.
+docker-compose.yml
+coverage/
+*.log
+.git/
+.github/
+.vscode/
+.idea/
+
+# Docs.
+*.md
+!README.md

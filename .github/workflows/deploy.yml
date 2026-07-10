@@ -1,0 +1,143 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two deploys of the same service at once would race UpdateService against each
+# other. Queue instead of cancelling: a cancelled run may have already pushed an
+# image and half-updated the service.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: sampark-backend
+  ECS_CLUSTER: sampark-staging-cluster
+  ECS_SERVICE: sampark-staging-backend-service
+  ECS_TASK_FAMILY: sampark-staging-backend
+  CONTAINER_NAME: sampark-backend
+
+jobs:
+  # Gate the deploy on the suite. The ECS circuit breaker catches a container that
+  # will not start; it cannot catch a container that starts and serves wrong answers.
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to the exact minor RDS runs (infra/rds.tf) and docker-compose.yml.
+        image: postgres:16.14
+        env:
+          POSTGRES_USER: sampark
+          POSTGRES_PASSWORD: sampark
+          POSTGRES_DB: sampark
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sampark -d sampark"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://sampark:sampark@localhost:5432/sampark?schema=public
+      JWT_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+
+    # id-token is what mints the OIDC JWT. Without it, configure-aws-credentials
+    # cannot assume the role and there is no fallback -- by design, no static keys
+    # exist anywhere in this repo or its secrets.
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # Assumes sampark-staging-github-actions-role. Its trust policy pins both the
+      # audience and the subject to repo:<owner>/<repo>:ref:refs/heads/* (iam.tf /
+      # github_oidc.tf), so a fork's pull_request run cannot assume it.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Tagged by commit SHA, never :latest. The ECR repository is IMMUTABLE, so a
+      # tag can never be repointed at different bytes and a rollback deploys exactly
+      # what it claims to. Consequence: re-running this workflow on an unchanged
+      # commit fails at push with ImageTagAlreadyExistsException. That is the
+      # immutability guarantee working, not a bug -- push a new commit instead.
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.sha.outputs.short }}
+          # GitHub's own cache backend. Survives across runs and needs no manual key
+          # management, unlike actions/cache + a hand-rolled BuildKit export.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Pull the live task definition and swap only the image. Everything else --
+      # secrets[], environment[], logConfiguration, the two role ARNs -- stays exactly
+      # as Terraform wrote it, so CI cannot silently drift the runtime config.
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_TASK_FAMILY" \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+      - name: Render new image into task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.sha.outputs.short }}
+
+      # Registers the revision, calls UpdateService, then blocks on
+      # `ecs wait services-stable`. The job fails visibly if the service never
+      # stabilises; the deployment_circuit_breaker in ecs.tf performs the actual
+      # rollback. ecs.tf sets ignore_changes on task_definition, so the next
+      # `terraform apply` will not drag the service back to this revision.
+      - name: Deploy to ECS and wait for stability
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: Deployed image
+        run: echo "Deployed ${ECR_REPOSITORY}:${{ steps.sha.outputs.short }} to ${ECS_SERVICE}"
