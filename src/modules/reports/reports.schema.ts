@@ -16,9 +16,8 @@ export const listReportsQuery = z.object({
 });
 
 // Create body is snake_case (per the client contract). Unknown keys the client
-// sends but the core contract doesn't model (e.g. `selected_date`) are stripped
-// by Zod's default (non-strict) parse — not yet part of the wire contract, so
-// ignoring them is non-breaking.
+// sends but the core contract doesn't model are stripped by Zod's default
+// (non-strict) parse.
 export const createReportBody = z.object({
   // Path is authoritative; body `cadre_id` (always sent by the client) is
   // optional here and cross-checked in the route.
@@ -28,6 +27,14 @@ export const createReportBody = z.object({
   person_status: z.enum(['alive', 'dead']),
   current_phone: z.string().trim().min(1).max(20),
   current_activity: z.string().trim().min(1).max(1000),
+  // The date the officer picked in the form — the date the reporting actually
+  // happened, which is NOT the row's insert time: an offline report composed on
+  // Monday may only drain on Thursday. Persisted to `reportedAt`; `createdAt`
+  // keeps the true insert time. Offset form accepted (the client sends UTC `Z`).
+  // Deliberately NOT rejected when in the future — the mobile drain treats every
+  // error the same and drops the action after 3 retries, so a 400 here would
+  // silently destroy a field report. The service clamps instead.
+  selected_date: z.string().datetime({ offset: true }).optional(),
   // Legacy single-photo URL (kept for back-compat with older clients).
   photo_url: z.string().trim().max(2048).optional(),
   // ADR-016: durable S3 keys returned by the upload endpoint. The UI allows up to

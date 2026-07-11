@@ -173,6 +173,66 @@ describe('reports', () => {
     await app.close();
   });
 
+  it('create honours a back-dated selected_date → reportedAt is the picked date, createdAt is now', async () => {
+    const app = await makeApp();
+    const picked = '2026-03-04T08:30:00.000Z';
+    const before = Date.now();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+      headers: auth(officerToken), payload: { ...validBody(), selected_date: picked },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as WireReportBody;
+    // The officer's picked date is what the client reads back and renders.
+    expect(body.reportedAt).toBe(picked);
+    // …while the insert time stays truthful, so the audit trail isn't back-dated.
+    const row = await prisma.report.findUnique({
+      where: { id: body.id }, select: { reportedAt: true, createdAt: true },
+    });
+    expect(row?.reportedAt.toISOString()).toBe(picked);
+    expect(row!.createdAt.getTime()).toBeGreaterThanOrEqual(before);
+    await app.close();
+  });
+
+  it('create with no selected_date → reportedAt defaults to now', async () => {
+    const app = await makeApp();
+    const before = Date.now();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+      headers: auth(officerToken), payload: validBody(),
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as WireReportBody;
+    expect(new Date(body.reportedAt as string).getTime()).toBeGreaterThanOrEqual(before);
+    await app.close();
+  });
+
+  it('create with a future selected_date → clamped to now, never rejected (offline drain would drop it)', async () => {
+    const app = await makeApp();
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+      headers: auth(officerToken), payload: { ...validBody(), selected_date: future },
+    });
+    // A 400 here would make the mobile drain retry 3× and then silently discard
+    // the report, so a skewed device clock must not cost the officer their work.
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as WireReportBody;
+    expect(new Date(body.reportedAt as string).getTime()).toBeLessThan(new Date(future).getTime());
+    await app.close();
+  });
+
+  it('create rejects a malformed selected_date → 400 VALIDATION_ERROR', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+      headers: auth(officerToken), payload: { ...validBody(), selected_date: '04-03-2026' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+    await app.close();
+  });
+
   it('create rejects more than 3 photo_keys → 400 VALIDATION_ERROR', async () => {
     const app = await makeApp();
     const keys = [1, 2, 3, 4].map((n) => `reports/cadre-${cadreId}/${n}.jpg`);

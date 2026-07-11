@@ -39,7 +39,22 @@ export interface ReportsService {
 // nested `cadre` Pick the client renders.
 const withCadre = { include: { cadre: true } } as const;
 
-export function makeReportsService({ prisma, storage, mediaUrlTtlSeconds }: ReportsDeps): ReportsService {
+// Resolves the officer-declared report date. The client's date picker caps at
+// today, so a future value means a skewed device clock — clamp it to now rather
+// than 400, because the mobile drain drops a queued report after 3 failed
+// retries and a rejection would lose the report outright. Absent → now().
+function resolveReportedAt(selectedDate: string | undefined, log: FastifyBaseLogger): Date | undefined {
+  if (selectedDate === undefined) return undefined;
+  const picked = new Date(selectedDate);
+  const now = new Date();
+  if (picked.getTime() > now.getTime()) {
+    log.warn({ selectedDate }, 'selected_date is in the future (device clock skew); clamping to now');
+    return now;
+  }
+  return picked;
+}
+
+export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }: ReportsDeps): ReportsService {
   // Re-signs a stored S3 key into a fresh presigned GET URL (ADR-016). Passed to
   // the serializer so every read hands out non-expired photo URLs.
   const signUrl = (key: string): Promise<string> => storage.presignGet(key, mediaUrlTtlSeconds);
@@ -117,6 +132,9 @@ export function makeReportsService({ prisma, storage, mediaUrlTtlSeconds }: Repo
         personStatus: body.person_status,
         currentPhone: body.current_phone,
         currentActivity: body.current_activity,
+        // Officer-declared event date. `undefined` falls through to the schema's
+        // @default(now()) for clients that don't send one.
+        reportedAt: resolveReportedAt(body.selected_date, log),
         photoUrl: body.photo_url ?? null,
         photoKeys: body.photo_keys ?? [],
         gpsLatitude: body.gps_coords?.latitude ?? null,
