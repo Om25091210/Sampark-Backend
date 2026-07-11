@@ -8,6 +8,8 @@ import { signAccessToken } from '../../lib/tokens.js';
 const prisma = new PrismaClient();
 const config = testConfig();
 const PHONES = ['+919000000010', '+919000000011', '+919000000012'];
+// Unique, searchable name prefix for the pagination fixture — see beforeAll.
+const PAGE_TOKEN = 'PGNFIXTURE';
 
 let adminId = 0;
 let officerAId = 0;
@@ -46,6 +48,20 @@ beforeAll(async () => {
   });
   cadreId = cadre.id;
 
+  // Pagination fixture. The pagination test must NOT depend on how many cadres
+  // happen to exist globally: CI runs `prisma migrate deploy` with no seed, and
+  // test files run in parallel against one database, so the global cadre count is
+  // shared mutable state. These three rows carry a unique token so the test can
+  // page over exactly its own data via `search`.
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: PAGE_TOKEN } } });
+  await prisma.cadre.createMany({
+    data: [1, 2, 3].map((n) => ({
+      name: `${PAGE_TOKEN}-${n}`, phone: `+91000000010${n}`, thana: 'पेजिनेशन',
+      currentAddress: 'Pagination fixture', designation: 'Fixture',
+      category: 'surrendered' as const, alertLevel: 'normal' as const, aliases: [],
+    })),
+  });
+
   adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
   officerToken = await signAccessToken({ sub: officerAId, role: 'officer' }, config.jwtSecret, '15m');
 });
@@ -61,6 +77,7 @@ afterAll(async () => {
   await prisma.auditLog.deleteMany({ where: { entityType: 'cadre', entityId: String(cadreId) } });
   await prisma.outboxEvent.deleteMany({ where: { aggregateType: 'cadre', aggregateId: String(cadreId) } });
   await prisma.cadre.deleteMany({ where: { id: cadreId } });
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: PAGE_TOKEN } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });
@@ -110,12 +127,30 @@ describe('cadres', () => {
     await app.close();
   });
 
-  it('paginates (pageSize=2)', async () => {
+  it('paginates (pageSize=2) over its own fixture, not the whole table', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres?pageSize=2', headers: auth(officerToken) });
-    const body = res.json() as ListBody;
-    expect(body.data.length).toBe(2);
-    expect(body.hasMore).toBe(body.total > 2);
+
+    // Scoped by `search` to this file's 3 fixture rows. Asserting against the
+    // global cadre count would make this test depend on the seed (absent in CI)
+    // and on whatever other parallel test files have created or deleted.
+    const p1 = await app.inject({
+      method: 'GET', url: `/api/v1/cadres?search=${PAGE_TOKEN}&pageSize=2`, headers: auth(officerToken),
+    });
+    const first = p1.json() as ListBody;
+    expect(first.total).toBe(3);
+    expect(first.data.length).toBe(2);
+    expect(first.hasMore).toBe(true);
+
+    const p2 = await app.inject({
+      method: 'GET', url: `/api/v1/cadres?search=${PAGE_TOKEN}&pageSize=2&page=2`, headers: auth(officerToken),
+    });
+    const second = p2.json() as ListBody;
+    expect(second.data.length).toBe(1);
+    expect(second.hasMore).toBe(false);
+
+    // No row appears on both pages.
+    const ids = [...first.data, ...second.data].map((c) => c.id);
+    expect(new Set(ids).size).toBe(3);
     await app.close();
   });
 
