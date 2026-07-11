@@ -153,7 +153,7 @@ example; use the **Authorize** button to paste a token and hit protected routes.
 
 The staging environment (`infra/`, `environment = "staging"`) diverges from production on a
 handful of durability, observability, and cost settings. Those divergences are recorded in
-**ADR-015 (draft, pending paste into thesis)**; this section is the operational checklist for closing them. Flipping
+**ADR-015**; this section is the operational checklist for closing them. Flipping
 `var.environment` to `"production"` changes `local.name_prefix`, so a production apply creates a
 parallel set of resources rather than mutating staging in place.
 
@@ -212,7 +212,7 @@ parallel set of resources rather than mutating staging in place.
 - [ ] Gateway endpoint for S3 (free).
 - [ ] Interface endpoints for ECR (api + dkr), Secrets Manager, CloudWatch Logs (~₹500/mo total).
 - [ ] Keeps Fargate → AWS API traffic off the public internet. Required because tasks run in public
-      subnets with a public IP (no NAT Gateway — see ADR-015, draft, pending paste into thesis).
+      subnets with a public IP (no NAT Gateway — see ADR-015, Open Decision 1).
 
 **`s3.tf` / application**
 - [ ] Reduce `MEDIA_URL_TTL_SECONDS` from `604800` (7 days, the SigV4 maximum) to 1–6 hours, once
@@ -230,8 +230,8 @@ parallel set of resources rather than mutating staging in place.
 
 ### 4. Documentation
 
-- [ ] Paste **ADR-015 (draft)** into `BC-THESIS-SAMPARK.md`, then drop the "draft" qualifier from every
-      reference in this file.
+- [x] Paste **ADR-015** into `BC-THESIS-SAMPARK.md` and drop the "draft" qualifier from every
+      reference in this file. *(Done 2026-07-11 — written up retrospectively from the implemented Terraform.)*
 - [ ] Update **ADR-015** with an `Outcome:` section recording what the production flip actually cost
       and broke.
 - [ ] Refresh the technology registry in `BC-THESIS-SAMPARK.md`.
@@ -244,8 +244,10 @@ parallel set of resources rather than mutating staging in place.
 
 - **ADR-011** — backend stack (Node/Fastify/Prisma; Redis deferred).
 - **ADR-014** — fully-private media bucket, presigned-URL access.
-- **ADR-015 (draft, pending paste into thesis)** — staging vs production configuration divergences
-  and standing rules.
+- **ADR-015** — staging vs production configuration divergences and standing rules.
+- **ADR-017** — `selected_date` → `reportedAt` (officer-declared event date) vs `createdAt` (server
+  insert time); future dates are clamped, not rejected, because the offline drain discards a report
+  after 3 failures of any kind.
 
 ---
 
