@@ -21,15 +21,20 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
       schema: {
         tags: ['Cadres'],
         summary: 'List cadres (filter + paginate)',
-        description: 'Query params are camelCase. `category=all` / `filter=All` mean "no filter".',
+        description:
+          'Query params are camelCase. `category=all` / `filter=All` mean "no filter". ' +
+          '`assignedTo=me` scopes the list to the caller\'s assigned cadres; `assignedTo=<officerId>` to that officer\'s.',
         security: bearerAuth,
         querystring: zodToJson(listCadresQuery),
         response: { 200: jsonResponse('Paginated cadres', examplePage(EXAMPLE_CADRE)) },
       },
     },
     async (request) => {
-      const query = listCadresQuery.parse(request.query);
-      return service.list(query);
+      const { assignedTo, ...rest } = listCadresQuery.parse(request.query);
+      // Resolve the `me` sentinel here, where the caller is known, so the service
+      // stays a pure query over a concrete officer id.
+      const resolved = assignedTo === 'me' ? request.authUser!.sub : assignedTo;
+      return service.list({ ...rest, assignedTo: resolved });
     },
   );
 

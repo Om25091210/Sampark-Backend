@@ -92,7 +92,11 @@ describe('cadres', () => {
     const mine = body.data.find((c) => c.id === cadreId);
     expect(mine).toBeDefined();
     expect(mine).toMatchObject({ currentAddress: 'Test address', category: 'surrendered', alertLevel: 'normal' });
-    expect(mine).not.toHaveProperty('assignedOfficerId');
+    // ADR-018 reversed this: `assignedOfficerId` used to be an internal column and
+    // is now deliberately on the wire — the clients need it for "my cadres" and for
+    // the admin assignment UI. It is not sensitive; any authenticated user can
+    // already page through every cadre.
+    expect(mine).toHaveProperty('assignedOfficerId', officerAId);
     expect(mine).not.toHaveProperty('deletedAt');
     await app.close();
   });

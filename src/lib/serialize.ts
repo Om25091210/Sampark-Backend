@@ -30,8 +30,12 @@ export function toWireUser(user: User): WireUser {
 }
 
 // Wire shape for a cadre (camelCase entity). Dates serialize to ISO strings;
-// internal columns (assignedOfficerId, deletedAt) and the mobile-only
-// `avatarSource` are never returned. Optional fields are omitted when null.
+// internal columns (deletedAt) and the mobile-only `avatarSource` are never
+// returned. Optional fields are omitted when null.
+//
+// `assignedOfficerId` IS returned (ADR-018): the clients need it to show "my
+// assigned cadres" and to drive the admin assignment UI. It is not sensitive —
+// every authenticated user can already list every cadre.
 export interface WireCadre {
   id: number;
   name: string;
@@ -56,6 +60,7 @@ export interface WireCadre {
   regiment?: string;
   familyGroupInfo?: string;
   subDivision?: string;
+  assignedOfficerId?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -85,6 +90,7 @@ export function toWireCadre(c: Cadre): WireCadre {
     regiment: c.regiment ?? undefined,
     familyGroupInfo: c.familyGroupInfo ?? undefined,
     subDivision: c.subDivision ?? undefined,
+    assignedOfficerId: c.assignedOfficerId ?? undefined,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
   };

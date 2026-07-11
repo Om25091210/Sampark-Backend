@@ -131,9 +131,10 @@ do not "fix" it to a single convention:
 | `POST /auth/refresh` | snake (`refresh_token`) | — | snake (`access_token`, `refresh_token?`) |
 | `GET /auth/me` | — | — | camelCase `AuthUser` |
 | `POST /auth/logout` | — | — | empty |
-| `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
+| `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`assignedTo`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
 | `GET /cadres/:id` | — | — | camelCase `Cadre` |
 | `POST /cadres/:id/transfer` | snake (`to_officer_id`) | — | empty |
+| `GET /officers` **(admin+)** | — | camelCase (`search`,`page`,`pageSize`) | camelCase `PaginatedResponse<Officer>` — `AuthUser` + `assignedCadreCount` |
 | `GET /cadres/:id/reports` | — | camelCase (`page`,`pageSize`,`search`) | camelCase `PaginatedResponse<Report>` |
 | `GET /cadres/:id/reports/:rid` | — | — | camelCase `Report` |
 | `POST /cadres/:id/reports` | snake (`cadre_id`, …, `idempotency_key`) | — | camelCase `Report` |
@@ -141,6 +142,11 @@ do not "fix" it to a single convention:
 | `GET /cadres/:id/reports/export` | — | — | snake (`download_url`) |
 
 `Cadre.avatarSource` is a mobile-local mock field — **never** return it in an entity response.
+
+`Cadre.assignedOfficerId` **is** returned (ADR-018). `assignedTo=me` on `GET /cadres` resolves to the
+caller; `assignedTo=<officerId>` scopes to that officer. It is a **filter, not an access boundary** —
+any authenticated user can already page through every cadre, so it narrows a reachable set rather than
+gating one. The access boundary is on `transfer` and `GET /officers` (both admin+).
 
 ### Auth — two tracks, one token system (see ADR-012)
 
@@ -175,10 +181,19 @@ Both tracks converge on the **same access+refresh token pair** and share the **s
 ## Phase 1 scope (mobile surface only)
 
 Backend **Phase 1 builds only the mobile-required endpoints** — the officer/SMS-OTP auth track, cadres,
-and reports listed above — plus `/healthz` and `/readyz`. **Out of scope for Phase 1**, deferred to its
-own explore→design→build cycle when the web is wired for real: the **admin email+password+TOTP auth
-track build**, and all **web-implied endpoints** (officers list, dashboard stats, activity feed,
-leaderboard, analytics). Those are documented here for direction, not implemented in Phase 1.
+and reports listed above — plus `/healthz` and `/readyz`, **plus the cadre-assignment surface (ADR-018):
+`GET /officers` (admin+) and the `assignedTo` filter on `GET /cadres`.**
+
+> **Scope amendment (ADR-018, 2026-07-11).** The officers list was previously listed below as an
+> out-of-scope, web-implied endpoint. It is now **in Phase 1**: the mobile "assigned cadres" feature
+> needs an admin-facing way to actually assign, and that needs a roster to pick from. `assignedOfficerId`
+> is also now **on the cadre wire entity** — it was previously an internal column documented as
+> never-returned.
+
+**Out of scope for Phase 1**, deferred to its own explore→design→build cycle when the web is wired for
+real: the **admin email+password+TOTP auth track build**, and the remaining **web-implied endpoints**
+(dashboard stats, activity feed, leaderboard, analytics). Those are documented here for direction, not
+implemented in Phase 1.
 
 ## Data & domain rules (from thesis, still binding)
 

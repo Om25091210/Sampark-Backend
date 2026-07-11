@@ -4,7 +4,7 @@ import { toWireCadre, type WireCadre } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
-import type { ListCadresQuery } from './cadres.schema.js';
+import type { ResolvedListCadresQuery } from './cadres.schema.js';
 
 export interface CadresDeps {
   prisma: PrismaClient;
@@ -20,7 +20,7 @@ export interface Paginated<T> {
 }
 
 export interface CadresService {
-  list(query: ListCadresQuery): Promise<Paginated<WireCadre>>;
+  list(query: ResolvedListCadresQuery): Promise<Paginated<WireCadre>>;
   getById(id: number): Promise<WireCadre>;
   transfer(cadreId: number, toOfficerId: number, actorId: number): Promise<void>;
 }
@@ -32,6 +32,8 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
       const where: Prisma.CadreWhereInput = { deletedAt: null };
       if (query.category !== undefined && query.category !== 'all') where.category = query.category;
       if (query.filter !== undefined && query.filter !== 'All') where.filter = query.filter;
+      // ADR-018: the route has already resolved `me` to a concrete officer id.
+      if (query.assignedTo !== undefined) where.assignedOfficerId = query.assignedTo;
 
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search.trim();

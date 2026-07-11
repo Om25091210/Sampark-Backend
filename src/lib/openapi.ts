@@ -43,6 +43,13 @@ export const EXAMPLE_AUTH_USER = {
   thana: 'बीजापुर सदर',
 };
 
+// An officer as the admin assignment picker sees them (ADR-018): the user entity
+// plus their current cadre load.
+export const EXAMPLE_OFFICER = {
+  ...EXAMPLE_AUTH_USER,
+  assignedCadreCount: 4,
+};
+
 export const EXAMPLE_CADRE = {
   id: 12,
   name: 'बबलू माडवी',
@@ -53,6 +60,7 @@ export const EXAMPLE_CADRE = {
   category: 'surrendered',
   alertLevel: 'critical',
   aliases: ['बब्बू', 'माडू'],
+  assignedOfficerId: 3,
   avatarUrl: 'https://sampark-media.s3.ap-south-1.amazonaws.com/cadres/12.jpg',
   surrenderYear: '2024',
   createdAt: '2026-07-01T10:00:00.000Z',
