@@ -18,6 +18,7 @@ import { cadresRoutes } from './modules/cadres/cadres.routes.js';
 import { officersRoutes } from './modules/officers/officers.routes.js';
 import { reportsRoutes } from './modules/reports/reports.routes.js';
 import { reportsMediaRoutes } from './modules/reports-media/reports-media.routes.js';
+import { statsRoutes } from './modules/stats/stats.routes.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -89,6 +90,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           { name: 'Cadres', description: 'Cadre records' },
           { name: 'Reports', description: 'Field reports filed against a cadre' },
           { name: 'Reports Media', description: 'Report photo upload + PDF export' },
+          { name: 'Stats', description: 'Dashboard summary counts' },
         ],
         components: {
           securitySchemes: {
@@ -112,6 +114,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       await api.register(officersRoutes);
       await api.register(reportsRoutes);
       await api.register(reportsMediaRoutes);
+      await api.register(statsRoutes);
     },
     { prefix: '/api/v1' },
   );

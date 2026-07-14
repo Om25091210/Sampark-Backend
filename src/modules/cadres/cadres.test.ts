@@ -11,6 +11,7 @@ const PHONES = ['+919000000010', '+919000000011', '+919000000012'];
 // Unique, searchable name prefixes for this file's own fixtures — see beforeAll.
 const PAGE_TOKEN = 'PGNFIXTURE';
 const ORIGIN_TOKEN = 'ORGFIXTURE';
+const ALERT_TOKEN = 'ALTFIXTURE';
 
 let adminId = 0;
 let officerAId = 0;
@@ -80,6 +81,21 @@ beforeAll(async () => {
     })),
   });
 
+  // Alert-severity fixture (ADR-020) — one row at each level so the alertLevel
+  // filter can be shown to select exactly the matching severity.
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: ALERT_TOKEN } } });
+  await prisma.cadre.createMany({
+    data: [
+      { name: `${ALERT_TOKEN}-C`, alertLevel: 'critical' as const },
+      { name: `${ALERT_TOKEN}-W`, alertLevel: 'warning' as const },
+      { name: `${ALERT_TOKEN}-N`, alertLevel: 'normal' as const },
+    ].map((c, i) => ({
+      ...c, phone: `+91000000021${i}`, thana: 'अलर्ट',
+      currentAddress: 'Alert fixture', designation: 'Fixture',
+      category: 'thana' as const, aliases: [],
+    })),
+  });
+
   adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
   officerToken = await signAccessToken({ sub: officerAId, role: 'officer' }, config.jwtSecret, '15m');
 });
@@ -97,6 +113,7 @@ afterAll(async () => {
   await prisma.cadre.deleteMany({ where: { id: cadreId } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: PAGE_TOKEN } } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: ORIGIN_TOKEN } } });
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: ALERT_TOKEN } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });
@@ -208,6 +225,27 @@ describe('cadres', () => {
     const body = res.json() as ListBody;
     expect(body.total).toBe(1);
     expect(body.data[0]).not.toHaveProperty('surrenderOrigin');
+    await app.close();
+  });
+
+  it('filters by alertLevel (the "सक्रिय अलर्ट" tile drill-down, ADR-020)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/cadres?search=${ALERT_TOKEN}&alertLevel=critical&pageSize=50`,
+      headers: auth(officerToken),
+    });
+    const body = res.json() as ListBody;
+    expect(body.total).toBe(1); // only the -C row, not -W or -N
+    expect(body.data.every((c) => (c as { alertLevel?: string }).alertLevel === 'critical')).toBe(true);
+    await app.close();
+  });
+
+  it('rejects an unknown alertLevel with 400', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/cadres?alertLevel=urgent', headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 

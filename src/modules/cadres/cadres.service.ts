@@ -36,6 +36,8 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
       if (query.assignedTo !== undefined) where.assignedOfficerId = query.assignedTo;
       // ADR-019: the two surrendered dashboard tiles differ only by this.
       if (query.surrenderOrigin !== undefined) where.surrenderOrigin = query.surrenderOrigin;
+      // ADR-020: the "सक्रिय अलर्ट" tile drills into critical cadres.
+      if (query.alertLevel !== undefined) where.alertLevel = query.alertLevel;
 
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search.trim();

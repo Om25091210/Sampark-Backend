@@ -131,7 +131,8 @@ do not "fix" it to a single convention:
 | `POST /auth/refresh` | snake (`refresh_token`) | — | snake (`access_token`, `refresh_token?`) |
 | `GET /auth/me` | — | — | camelCase `AuthUser` |
 | `POST /auth/logout` | — | — | empty |
-| `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`assignedTo`,`surrenderOrigin`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
+| `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`assignedTo`,`surrenderOrigin`,`alertLevel`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
+| `GET /stats/dashboard` | — | — | camelCase `DashboardStats` (counts; see ADR-020) |
 | `GET /cadres/:id` | — | — | camelCase `Cadre` |
 | `POST /cadres/:id/transfer` | snake (`to_officer_id`) | — | empty |
 | `GET /officers` **(admin+)** | — | camelCase (`search`,`page`,`pageSize`) | camelCase `PaginatedResponse<Officer>` — `AuthUser` + `assignedCadreCount` |
@@ -188,7 +189,9 @@ Both tracks converge on the **same access+refresh token pair** and share the **s
 
 Backend **Phase 1 builds only the mobile-required endpoints** — the officer/SMS-OTP auth track, cadres,
 and reports listed above — plus `/healthz` and `/readyz`, **plus the cadre-assignment surface (ADR-018):
-`GET /officers` (admin+) and the `assignedTo` filter on `GET /cadres`.**
+`GET /officers` (admin+) and the `assignedTo` filter on `GET /cadres`**, **plus the dashboard stats
+surface (ADR-020): `GET /stats/dashboard` and the `surrenderOrigin` (ADR-019) + `alertLevel` filters on
+`GET /cadres`.**
 
 > **Scope amendment (ADR-018, 2026-07-11).** The officers list was previously listed below as an
 > out-of-scope, web-implied endpoint. It is now **in Phase 1**: the mobile "assigned cadres" feature
@@ -196,10 +199,17 @@ and reports listed above — plus `/healthz` and `/readyz`, **plus the cadre-ass
 > is also now **on the cadre wire entity** — it was previously an internal column documented as
 > never-returned.
 
+> **Scope amendment (ADR-020, 2026-07-15).** `GET /stats/dashboard` was listed below as an out-of-scope
+> "dashboard stats" web-implied endpoint. It is now **in Phase 1**: the mobile admin dashboard shipped
+> hardcoded counts (4868 / 1478 / 312 / …), and replacing those fictional numbers with real ones needs a
+> counts endpoint. It is the **mobile** dashboard, not the web one. Scope is deliberately narrow — a
+> single summary-counts endpoint — not the full analytics/leaderboard/activity-feed set, which stay
+> deferred.
+
 **Out of scope for Phase 1**, deferred to its own explore→design→build cycle when the web is wired for
 real: the **admin email+password+TOTP auth track build**, and the remaining **web-implied endpoints**
-(dashboard stats, activity feed, leaderboard, analytics). Those are documented here for direction, not
-implemented in Phase 1.
+(activity feed, leaderboard, deeper analytics). Those are documented here for direction, not implemented
+in Phase 1.
 
 ## Data & domain rules (from thesis, still binding)
 

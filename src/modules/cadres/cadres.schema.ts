@@ -11,6 +11,10 @@ export const listCadresQuery = z.object({
   // Only meaningful alongside category=surrendered; non-surrendered cadres have
   // no origin, so combining it with another category correctly returns nothing.
   surrenderOrigin: z.enum(['district', 'other']).optional(),
+  // ADR-020. Server-side alert-severity filter, so the dashboard's "सक्रिय अलर्ट"
+  // tile can drill into exactly the critical cadres rather than filtering a single
+  // fetched page client-side (which would miss everyone past the first page).
+  alertLevel: z.enum(['critical', 'warning', 'normal']).optional(),
   // ADR-018. Scopes the list to one officer's assigned cadres.
   //   assignedTo=me  -> the calling user (the officer's "मेरे कैडर" tile)
   //   assignedTo=<id> -> that officer (the admin roster view)
