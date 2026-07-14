@@ -39,6 +39,17 @@ enum AlertLevel {
   normal
 }
 
+// ADR-019. Classifies WHERE a cadre surrendered relative to Bijapur, which the
+// dashboard splits into two tiles. Deliberately a separate column from
+// `surrenderLocation`: that field is free text recording the place ("थाना
+// नारायणपुर"), not a classification, and it is null for cadres who never
+// surrendered. Null here means "not applicable / not yet classified" — only
+// `category = surrendered` rows carry a value.
+enum SurrenderOrigin {
+  district // Bijapur district
+  other    // another district or state
+}
+
 enum ReportingPlace {
   thana
   village
@@ -94,9 +105,10 @@ model Cadre {
   supervisoryOffice  String?        @map("supervisory_office")
   alertTag           String?        @map("alert_tag")
   aliases            String[]
-  surrenderDate      DateTime?      @map("surrender_date")
-  surrenderLocation  String?        @map("surrender_location")
-  surrenderYear      String?        @map("surrender_year")
+  surrenderDate      DateTime?        @map("surrender_date")
+  surrenderLocation  String?          @map("surrender_location")
+  surrenderOrigin    SurrenderOrigin? @map("surrender_origin")
+  surrenderYear      String?          @map("surrender_year")
   regiment           String?
   familyGroupInfo    String?        @map("family_group_info")
   subDivision        String?        @map("sub_division")
@@ -111,6 +123,8 @@ model Cadre {
   @@index([category])
   @@index([alertLevel])
   @@index([assignedOfficerId])
+  // The two surrendered dashboard tiles both filter category + origin together.
+  @@index([category, surrenderOrigin])
   @@map("cadres")
 }
 

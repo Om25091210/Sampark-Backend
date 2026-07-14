@@ -8,8 +8,9 @@ import { signAccessToken } from '../../lib/tokens.js';
 const prisma = new PrismaClient();
 const config = testConfig();
 const PHONES = ['+919000000010', '+919000000011', '+919000000012'];
-// Unique, searchable name prefix for the pagination fixture — see beforeAll.
+// Unique, searchable name prefixes for this file's own fixtures — see beforeAll.
 const PAGE_TOKEN = 'PGNFIXTURE';
+const ORIGIN_TOKEN = 'ORGFIXTURE';
 
 let adminId = 0;
 let officerAId = 0;
@@ -62,6 +63,23 @@ beforeAll(async () => {
     })),
   });
 
+  // Surrender-origin fixture (ADR-019). Two district + one other, plus a thana
+  // cadre that must carry NO origin at all — the tiles split surrendered cadres,
+  // and a non-surrendered row has no origin to speak of.
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: ORIGIN_TOKEN } } });
+  await prisma.cadre.createMany({
+    data: [
+      { name: `${ORIGIN_TOKEN}-D1`, surrenderOrigin: 'district' as const, category: 'surrendered' as const },
+      { name: `${ORIGIN_TOKEN}-D2`, surrenderOrigin: 'district' as const, category: 'surrendered' as const },
+      { name: `${ORIGIN_TOKEN}-O1`, surrenderOrigin: 'other' as const, category: 'surrendered' as const },
+      { name: `${ORIGIN_TOKEN}-T1`, surrenderOrigin: null, category: 'thana' as const },
+    ].map((c, i) => ({
+      ...c, phone: `+91000000020${i}`, thana: 'ओरिजिन',
+      currentAddress: 'Origin fixture', designation: 'Fixture',
+      alertLevel: 'normal' as const, aliases: [],
+    })),
+  });
+
   adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
   officerToken = await signAccessToken({ sub: officerAId, role: 'officer' }, config.jwtSecret, '15m');
 });
@@ -78,12 +96,13 @@ afterAll(async () => {
   await prisma.outboxEvent.deleteMany({ where: { aggregateType: 'cadre', aggregateId: String(cadreId) } });
   await prisma.cadre.deleteMany({ where: { id: cadreId } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: PAGE_TOKEN } } });
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: ORIGIN_TOKEN } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });
 
 interface ListBody {
-  data: Array<{ id: number; category: string } & Record<string, unknown>>;
+  data: Array<{ id: number; category: string; surrenderOrigin?: string } & Record<string, unknown>>;
   total: number;
   page: number;
   pageSize: number;
@@ -151,6 +170,54 @@ describe('cadres', () => {
     // No row appears on both pages.
     const ids = [...first.data, ...second.data].map((c) => c.id);
     expect(new Set(ids).size).toBe(3);
+    await app.close();
+  });
+
+  // ── Surrender origin (ADR-019) ──────────────────────────────────────────────
+  //
+  // The dashboard's two surrendered tiles differ ONLY by this filter, so the thing
+  // worth proving is that they partition: same category, disjoint result sets, and
+  // together they account for every classified surrendered cadre in the fixture.
+  // Scoped by `search` to this file's own rows — CI has no seed data.
+
+  it('surrenderOrigin splits the surrendered cadres into two disjoint sets', async () => {
+    const app = await makeApp();
+    const q = (origin: string) =>
+      `/api/v1/cadres?search=${ORIGIN_TOKEN}&category=surrendered&surrenderOrigin=${origin}&pageSize=50`;
+
+    const d = (await app.inject({ method: 'GET', url: q('district'), headers: auth(officerToken) })).json() as ListBody;
+    const o = (await app.inject({ method: 'GET', url: q('other'), headers: auth(officerToken) })).json() as ListBody;
+
+    expect(d.total).toBe(2);
+    expect(o.total).toBe(1);
+    expect(d.data.every((c) => c.surrenderOrigin === 'district')).toBe(true);
+    expect(o.data.every((c) => c.surrenderOrigin === 'other')).toBe(true);
+
+    // The bug this replaces: both tiles returned the same list. They must not overlap.
+    const districtIds = new Set(d.data.map((c) => c.id));
+    expect(o.data.some((c) => districtIds.has(c.id))).toBe(false);
+    await app.close();
+  });
+
+  it('a non-surrendered cadre carries no surrenderOrigin on the wire', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/cadres?search=${ORIGIN_TOKEN}&category=thana&pageSize=50`,
+      headers: auth(officerToken),
+    });
+    const body = res.json() as ListBody;
+    expect(body.total).toBe(1);
+    expect(body.data[0]).not.toHaveProperty('surrenderOrigin');
+    await app.close();
+  });
+
+  it('rejects an unknown surrenderOrigin with 400', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/cadres?surrenderOrigin=bijapur', headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
     await app.close();
   });
 

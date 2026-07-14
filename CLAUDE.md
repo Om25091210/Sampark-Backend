@@ -131,7 +131,7 @@ do not "fix" it to a single convention:
 | `POST /auth/refresh` | snake (`refresh_token`) | — | snake (`access_token`, `refresh_token?`) |
 | `GET /auth/me` | — | — | camelCase `AuthUser` |
 | `POST /auth/logout` | — | — | empty |
-| `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`assignedTo`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
+| `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`assignedTo`,`surrenderOrigin`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
 | `GET /cadres/:id` | — | — | camelCase `Cadre` |
 | `POST /cadres/:id/transfer` | snake (`to_officer_id`) | — | empty |
 | `GET /officers` **(admin+)** | — | camelCase (`search`,`page`,`pageSize`) | camelCase `PaginatedResponse<Officer>` — `AuthUser` + `assignedCadreCount` |
@@ -142,6 +142,12 @@ do not "fix" it to a single convention:
 | `GET /cadres/:id/reports/export` | — | — | snake (`download_url`) |
 
 `Cadre.avatarSource` is a mobile-local mock field — **never** return it in an entity response.
+
+`Cadre.surrenderOrigin` (`district` | `other`, ADR-019) classifies where a cadre surrendered relative to
+Bijapur — it is what the dashboard's two surrendered tiles split on. It is **nullable and absent for
+non-surrendered cadres**, and it is a real column, never inferred from the free-text `surrenderLocation`.
+Any future create/update-cadre endpoint must collect it explicitly: a surrendered cadre with a null
+origin appears in **neither** tile.
 
 `Cadre.assignedOfficerId` **is** returned (ADR-018). `assignedTo=me` on `GET /cadres` resolves to the
 caller; `assignedTo=<officerId>` scopes to that officer. It is a **filter, not an access boundary** —

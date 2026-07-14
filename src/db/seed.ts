@@ -53,6 +53,9 @@ interface SeedCadre {
   supervisoryOffice: string;
   surrenderDate?: string; // DD/MM/YYYY
   surrenderLocation?: string;
+  // ADR-019. Only surrendered cadres have one — it is what the two dashboard
+  // tiles split on. Left undefined for jail/thana cadres.
+  surrenderOrigin?: 'district' | 'other';
   surrenderYear?: string;
   regiment?: string;
   subDivision?: string;
@@ -72,6 +75,7 @@ const CADRES: SeedCadre[] = [
     verificationOffice: 'पुलिस अधीक्षक बीजापुर',
     supervisoryOffice: 'पुलिस अधीक्षक बीजापुर',
     surrenderDate: '24/07/2025', surrenderLocation: 'बीजापुर, छत्तीसगढ़',
+    surrenderOrigin: 'district',
     surrenderYear: '2025', regiment: 'वज्र-2008', subDivision: 'भैरमगढ़',
     familyGroupInfo: 'सुक्की माडवी पद- प्लाटून न०12 पार्टी सदस्य (पत्नी)',
     incident: 'सितम्बर 2024 में प्लाटून नंबर 13 कमांडर ढितरू ओयाम के नेत्रत्व में 50 - 60 की संख्या में ग्राम हजरा में मिलिशियाँ के लिए एकत्रित हुए थे, तभी 03 सितम्बर 2024 को पुलिस गश्त सचजित होने पर सभी मिलिशिया सदस्य फरार हो गए।',
@@ -110,6 +114,7 @@ const CADRES: SeedCadre[] = [
     verificationOffice: 'पुलिस अधीक्षक दंतेवाड़ा',
     supervisoryOffice: 'पुलिस अधीक्षक दंतेवाड़ा',
     surrenderDate: '22/11/2022', surrenderLocation: 'थाना दंतेवाड़ा',
+    surrenderOrigin: 'other',
     surrenderYear: '2022', regiment: 'वज्र-2011', subDivision: 'दक्षिण दंतेवाड़ा',
     familyGroupInfo: 'पति एवं दो पुत्र, गोमपाड ग्राम में निवासरत',
     incident: 'जनवरी 2023 में दंतेवाड़ा शहर के समीप महिला संगठन की बैठक में भाग लेते हुए गिरफ्तार की गई, बाद में जमानत पर रिहा।',
@@ -163,6 +168,7 @@ async function seedCadre(c: SeedCadre, assignedOfficerId: number, reportedById: 
     supervisoryOffice: c.supervisoryOffice,
     surrenderDate: parseDMY(c.surrenderDate),
     surrenderLocation: c.surrenderLocation ?? null,
+    surrenderOrigin: c.surrenderOrigin ?? null,
     surrenderYear: c.surrenderYear ?? null,
     regiment: c.regiment ?? null,
     subDivision: c.subDivision ?? null,

@@ -6,6 +6,11 @@ export const listCadresQuery = z.object({
   category: z.enum(['surrendered', 'jail', 'thana', 'all']).optional(),
   filter: z.enum(['All', 'DVCM', 'ACM', 'PM']).optional(),
   search: z.string().trim().max(100).optional(),
+  // ADR-019. Splits the surrendered cadres into the dashboard's two tiles:
+  // `district` = surrendered in Bijapur, `other` = another district or state.
+  // Only meaningful alongside category=surrendered; non-surrendered cadres have
+  // no origin, so combining it with another category correctly returns nothing.
+  surrenderOrigin: z.enum(['district', 'other']).optional(),
   // ADR-018. Scopes the list to one officer's assigned cadres.
   //   assignedTo=me  -> the calling user (the officer's "मेरे कैडर" tile)
   //   assignedTo=<id> -> that officer (the admin roster view)

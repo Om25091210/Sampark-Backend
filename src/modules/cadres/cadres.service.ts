@@ -34,6 +34,8 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
       if (query.filter !== undefined && query.filter !== 'All') where.filter = query.filter;
       // ADR-018: the route has already resolved `me` to a concrete officer id.
       if (query.assignedTo !== undefined) where.assignedOfficerId = query.assignedTo;
+      // ADR-019: the two surrendered dashboard tiles differ only by this.
+      if (query.surrenderOrigin !== undefined) where.surrenderOrigin = query.surrenderOrigin;
 
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search.trim();
