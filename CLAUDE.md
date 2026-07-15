@@ -136,6 +136,7 @@ do not "fix" it to a single convention:
 | `GET /cadres/:id` | — | — | camelCase `Cadre` |
 | `POST /cadres/:id/transfer` | snake (`to_officer_id`) | — | empty |
 | `GET /officers` **(admin+)** | — | camelCase (`search`,`page`,`pageSize`) | camelCase `PaginatedResponse<Officer>` — `AuthUser` + `assignedCadreCount` |
+| `GET /reports` **(ADR-021)** | — | camelCase (`reportedBy`,`search`,`page`,`pageSize`) | camelCase `PaginatedResponse<Report>` — each row carries nested `cadre` |
 | `GET /cadres/:id/reports` | — | camelCase (`page`,`pageSize`,`search`) | camelCase `PaginatedResponse<Report>` |
 | `GET /cadres/:id/reports/:rid` | — | — | camelCase `Report` |
 | `POST /cadres/:id/reports` | snake (`cadre_id`, …, `idempotency_key`) | — | camelCase `Report` |
@@ -143,6 +144,11 @@ do not "fix" it to a single convention:
 | `GET /cadres/:id/reports/export` | — | — | snake (`download_url`) |
 
 `Cadre.avatarSource` is a mobile-local mock field — **never** return it in an entity response.
+
+`GET /reports` (ADR-021) is the aggregate reporting feed across all cadres. `reportedBy=me` resolves to the
+caller (the "my reporting record" screen); `reportedBy=<officerId>` scopes to that officer. Like
+`assignedTo`, it is a **filter, not an access boundary** — the per-cadre feed is already open to any
+authenticated user. Each row carries the nested `cadre` Pick.
 
 `Cadre.surrenderOrigin` (`district` | `other`, ADR-019) classifies where a cadre surrendered relative to
 Bijapur — it is what the dashboard's two surrendered tiles split on. It is **nullable and absent for
@@ -191,7 +197,8 @@ Backend **Phase 1 builds only the mobile-required endpoints** — the officer/SM
 and reports listed above — plus `/healthz` and `/readyz`, **plus the cadre-assignment surface (ADR-018):
 `GET /officers` (admin+) and the `assignedTo` filter on `GET /cadres`**, **plus the dashboard stats
 surface (ADR-020): `GET /stats/dashboard` and the `surrenderOrigin` (ADR-019) + `alertLevel` filters on
-`GET /cadres`.**
+`GET /cadres`**, **plus the officer reporting record (ADR-021): the aggregate `GET /reports` with its
+`reportedBy` filter.**
 
 > **Scope amendment (ADR-018, 2026-07-11).** The officers list was previously listed below as an
 > out-of-scope, web-implied endpoint. It is now **in Phase 1**: the mobile "assigned cadres" feature

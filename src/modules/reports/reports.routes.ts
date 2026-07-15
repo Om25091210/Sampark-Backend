@@ -3,6 +3,7 @@ import { makeReportsService } from './reports.service.js';
 import { badRequest } from '../../lib/errors.js';
 import {
   createReportBody,
+  listAllReportsQuery,
   listReportsQuery,
   reportCadreParam,
   reportDetailParams,
@@ -24,6 +25,32 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
     storage: app.storage,
     mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
   });
+
+  // Aggregate feed across every cadre (ADR-021) — the officer's own reporting
+  // record via `reportedBy=me`. Not a privilege boundary: the per-cadre feed below
+  // is already open to any authenticated user, so this only narrows a reachable set.
+  app.get(
+    '/reports',
+    {
+      preHandler: app.authenticate,
+      schema: {
+        tags: ['Reports'],
+        summary: 'List reports across cadres (newest first, paginated)',
+        description:
+          '`reportedBy=me` scopes to the calling user (the "my reporting record" screen); ' +
+          '`reportedBy=<officerId>` scopes to that officer; omitted lists all. Each row carries ' +
+          'its nested `cadre` so the client can show which cadre the report was about.',
+        security: bearerAuth,
+        querystring: zodToJson(listAllReportsQuery),
+        response: { 200: jsonResponse('Paginated reports', examplePage(EXAMPLE_REPORT)) },
+      },
+    },
+    async (request) => {
+      const { reportedBy, ...rest } = listAllReportsQuery.parse(request.query);
+      const resolved = reportedBy === 'me' ? request.authUser!.sub : reportedBy;
+      return service.list({ ...rest, reportedBy: resolved });
+    },
+  );
 
   app.get(
     '/cadres/:cadreId/reports',

@@ -15,6 +15,25 @@ export const listReportsQuery = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(15),
 });
 
+// The aggregate feed (ADR-021): reports across every cadre, for the officer's own
+// "reporting record". `reportedBy=me` resolves to the caller in the route;
+// `reportedBy=<officerId>` scopes to that officer. Like ADR-018's `assignedTo`, it
+// is a filter, not an access boundary — the per-cadre feed is already open to any
+// authenticated user.
+export const listAllReportsQuery = z.object({
+  reportedBy: z.union([z.literal('me'), z.coerce.number().int().positive()]).optional(),
+  search: z.string().trim().max(100).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(15),
+});
+
+export type ListAllReportsQuery = z.infer<typeof listAllReportsQuery>;
+
+// What the service receives after the route resolves the `me` sentinel.
+export type ResolvedListAllReportsQuery = Omit<ListAllReportsQuery, 'reportedBy'> & {
+  reportedBy?: number;
+};
+
 // Create body is snake_case (per the client contract). Unknown keys the client
 // sends but the core contract doesn't model are stripped by Zod's default
 // (non-strict) parse.

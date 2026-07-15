@@ -5,7 +5,11 @@ import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { notFound } from '../../lib/errors.js';
 import type { StorageProvider } from '../../lib/storage.js';
-import type { CreateReportBody, ListReportsQuery } from './reports.schema.js';
+import type {
+  CreateReportBody,
+  ListReportsQuery,
+  ResolvedListAllReportsQuery,
+} from './reports.schema.js';
 
 export interface ReportsDeps {
   prisma: PrismaClient;
@@ -31,6 +35,7 @@ export interface CreateReportResult {
 
 export interface ReportsService {
   listByCadre(cadreId: number, query: ListReportsQuery): Promise<Paginated<WireReport>>;
+  list(query: ResolvedListAllReportsQuery): Promise<Paginated<WireReport>>;
   getById(cadreId: number, reportId: number): Promise<WireReport>;
   create(cadreId: number, body: CreateReportBody, reporterId: number): Promise<CreateReportResult>;
 }
@@ -86,6 +91,42 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
           where,
           ...withCadre,
           // Newest report first (matches the mobile reports feed).
+          orderBy: [{ reportedAt: 'desc' }, { id: 'desc' }],
+          skip: (query.page - 1) * query.pageSize,
+          take: query.pageSize,
+        }),
+      ]);
+
+      return {
+        data: await Promise.all(rows.map((r) => toWireReport(r, signUrl))),
+        total,
+        page: query.page,
+        pageSize: query.pageSize,
+        hasMore: query.page * query.pageSize < total,
+      };
+    },
+
+    async list(query) {
+      // Aggregate feed across every cadre (ADR-021). No cadre assertion — this is
+      // not scoped to one cadre; it's "the reports matching this filter".
+      const where: Prisma.ReportWhereInput = { deletedAt: null };
+      // The route has already resolved `me` to a concrete officer id.
+      if (query.reportedBy !== undefined) where.reportedById = query.reportedBy;
+
+      if (query.search !== undefined && query.search !== '') {
+        const raw = query.search.trim();
+        where.OR = [
+          { specificLocation: { contains: raw, mode: 'insensitive' } },
+          { currentActivity: { contains: raw, mode: 'insensitive' } },
+          { currentPhone: { contains: raw, mode: 'insensitive' } },
+        ];
+      }
+
+      const [total, rows] = await prisma.$transaction([
+        prisma.report.count({ where }),
+        prisma.report.findMany({
+          where,
+          ...withCadre,
           orderBy: [{ reportedAt: 'desc' }, { id: 'desc' }],
           skip: (query.page - 1) * query.pageSize,
           take: query.pageSize,
