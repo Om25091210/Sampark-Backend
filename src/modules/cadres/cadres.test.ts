@@ -12,11 +12,16 @@ const PHONES = ['+919000000010', '+919000000011', '+919000000012'];
 const PAGE_TOKEN = 'PGNFIXTURE';
 const ORIGIN_TOKEN = 'ORGFIXTURE';
 const ALERT_TOKEN = 'ALTFIXTURE';
+const DUE_NAME = 'TEST CADRE DUE';
+// A cadre reporting on this date is next due 30 days later (ADR-022).
+const DUE_REPORT_AT = new Date('2026-06-01T00:00:00.000Z');
+const DUE_EXPECTED = new Date('2026-07-01T00:00:00.000Z').toISOString();
 
 let adminId = 0;
 let officerAId = 0;
 let officerBId = 0;
 let cadreId = 0;
+let dueCadreId = 0;
 let adminToken = '';
 let officerToken = '';
 
@@ -96,6 +101,25 @@ beforeAll(async () => {
     })),
   });
 
+  // Reporting-deadline fixture (ADR-022): a cadre with TWO reports. nextReportingDueAt
+  // must be computed from the NEWEST (DUE_REPORT_AT), not the older one, + 30 days.
+  await prisma.cadre.deleteMany({ where: { name: DUE_NAME } });
+  const dueCadre = await prisma.cadre.create({
+    data: {
+      name: DUE_NAME, phone: '+910000000900', thana: 'ड्यू', currentAddress: 'Due fixture',
+      designation: 'Fixture', category: 'thana', alertLevel: 'normal', aliases: [],
+    },
+  });
+  dueCadreId = dueCadre.id;
+  await prisma.report.createMany({
+    data: [
+      { cadreId: dueCadreId, reportedById: officerAId, reportingPlace: 'thana', specificLocation: 'x',
+        personStatus: 'alive', currentPhone: '+910', currentActivity: 'old', reportedAt: new Date('2026-04-01T00:00:00.000Z') },
+      { cadreId: dueCadreId, reportedById: officerAId, reportingPlace: 'thana', specificLocation: 'x',
+        personStatus: 'alive', currentPhone: '+910', currentActivity: 'new', reportedAt: DUE_REPORT_AT },
+    ],
+  });
+
   adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
   officerToken = await signAccessToken({ sub: officerAId, role: 'officer' }, config.jwtSecret, '15m');
 });
@@ -114,6 +138,8 @@ afterAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: PAGE_TOKEN } } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: ORIGIN_TOKEN } } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: ALERT_TOKEN } } });
+  await prisma.report.deleteMany({ where: { cadreId: dueCadreId } });
+  await prisma.cadre.deleteMany({ where: { name: DUE_NAME } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });
@@ -272,6 +298,34 @@ describe('cadres', () => {
     const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ id: cadreId, name: 'TEST CADRE ALPHA', category: 'surrendered' });
+    await app.close();
+  });
+
+  it('nextReportingDueAt = latest report date + 30 days (ADR-022)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(officerToken) });
+    expect(res.statusCode).toBe(200);
+    // Computed from the NEWER report (DUE_REPORT_AT), not the April one.
+    expect((res.json() as { nextReportingDueAt?: string }).nextReportingDueAt).toBe(DUE_EXPECTED);
+    await app.close();
+  });
+
+  it('a cadre with no reports has no nextReportingDueAt (no baseline)', async () => {
+    const app = await makeApp();
+    // The ALPHA fixture cadre has no reports.
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    expect(res.json()).not.toHaveProperty('nextReportingDueAt');
+    await app.close();
+  });
+
+  it('nextReportingDueAt is present in the list too, not only the detail', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/cadres?search=${encodeURIComponent(DUE_NAME)}&pageSize=50`, headers: auth(officerToken),
+    });
+    const body = res.json() as ListBody;
+    const due = body.data.find((c) => c.id === dueCadreId);
+    expect(due).toHaveProperty('nextReportingDueAt', DUE_EXPECTED);
     await app.close();
   });
 

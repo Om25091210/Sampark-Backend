@@ -25,6 +25,17 @@ export interface CadresService {
   transfer(cadreId: number, toOfficerId: number, actorId: number): Promise<void>;
 }
 
+// The cadre's most recent non-deleted report date only (ADR-022) — nothing else
+// of the report is needed for nextReportingDueAt.
+const LATEST_REPORT = {
+  reports: {
+    where: { deletedAt: null },
+    orderBy: [{ reportedAt: 'desc' }, { id: 'desc' }],
+    take: 1,
+    select: { reportedAt: true },
+  },
+} as const satisfies Prisma.CadreInclude;
+
 export function makeCadresService({ prisma }: CadresDeps): CadresService {
   return {
     async list(query) {
@@ -58,6 +69,9 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
         prisma.cadre.count({ where }),
         prisma.cadre.findMany({
           where,
+          // ADR-022: the latest non-deleted report's date, for nextReportingDueAt.
+          // `take: 1` over the desc order is one lateral join, not an N+1.
+          include: LATEST_REPORT,
           orderBy: { id: 'asc' },
           skip: (query.page - 1) * query.pageSize,
           take: query.pageSize,
@@ -65,7 +79,7 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
       ]);
 
       return {
-        data: rows.map(toWireCadre),
+        data: rows.map((r) => toWireCadre(r, r.reports[0]?.reportedAt ?? null)),
         total,
         page: query.page,
         pageSize: query.pageSize,
@@ -74,9 +88,12 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
     },
 
     async getById(id) {
-      const cadre = await prisma.cadre.findFirst({ where: { id, deletedAt: null } });
+      const cadre = await prisma.cadre.findFirst({
+        where: { id, deletedAt: null },
+        include: LATEST_REPORT,
+      });
       if (cadre === null) throw notFound('Cadre not found');
-      return toWireCadre(cadre);
+      return toWireCadre(cadre, cadre.reports[0]?.reportedAt ?? null);
     },
 
     async transfer(cadreId, toOfficerId, actorId) {

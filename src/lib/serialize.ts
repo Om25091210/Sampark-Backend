@@ -63,11 +63,27 @@ export interface WireCadre {
   familyGroupInfo?: string;
   subDivision?: string;
   assignedOfficerId?: number;
+  // ADR-022. When the cadre's next reporting check-in is due: the most recent
+  // report's date + 30 days. Derived, not stored. Absent when the cadre has never
+  // reported (no baseline to count from). The client colour-codes the card from it.
+  nextReportingDueAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export function toWireCadre(c: Cadre): WireCadre {
+// ADR-022. Fixed monthly reporting cadence. No per-category rules for now — the
+// simplest thing that works; revisit if it proves wrong.
+export const REPORTING_CADENCE_DAYS = 30;
+
+// `lastReportedAt` is the cadre's most recent (non-deleted) report date, or null
+// if it has never reported. The caller computes it (a `take: 1` include); passing
+// it in keeps the 30-day formula in one place.
+export function toWireCadre(c: Cadre, lastReportedAt?: Date | null): WireCadre {
+  const nextReportingDueAt =
+    lastReportedAt != null
+      ? new Date(lastReportedAt.getTime() + REPORTING_CADENCE_DAYS * 24 * 60 * 60 * 1000).toISOString()
+      : undefined;
+
   return {
     id: c.id,
     name: c.name,
@@ -94,6 +110,7 @@ export function toWireCadre(c: Cadre): WireCadre {
     familyGroupInfo: c.familyGroupInfo ?? undefined,
     subDivision: c.subDivision ?? undefined,
     assignedOfficerId: c.assignedOfficerId ?? undefined,
+    nextReportingDueAt,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
   };

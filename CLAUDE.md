@@ -156,6 +156,11 @@ non-surrendered cadres**, and it is a real column, never inferred from the free-
 Any future create/update-cadre endpoint must collect it explicitly: a surrendered cadre with a null
 origin appears in **neither** tile.
 
+`Cadre.nextReportingDueAt` (ADR-022) is the cadre's next reporting-check-in deadline: the most recent
+non-deleted report's date **+ 30 days**. It is **derived on read, never stored**, and **absent** when the
+cadre has never reported (no baseline). The mobile card colour-codes a deadline badge from it, kept
+visually separate from the alertLevel accent stripe.
+
 `Cadre.assignedOfficerId` **is** returned (ADR-018). `assignedTo=me` on `GET /cadres` resolves to the
 caller; `assignedTo=<officerId>` scopes to that officer. It is a **filter, not an access boundary** —
 any authenticated user can already page through every cadre, so it narrows a reachable set rather than
