@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../app.js';
 import { testConfig } from '../../test/helpers.js';
 import { signAccessToken } from '../../lib/tokens.js';
+import type { OfficerStats } from './stats.schema.js';
 
 const prisma = new PrismaClient();
 const config = testConfig();
@@ -60,6 +61,10 @@ beforeAll(async () => {
   const base = {
     phone: '+910000000300', thana: 'स्टैट', currentAddress: 'Stats fixture',
     designation: 'Fixture', aliases: [] as string[],
+    // ADR-031: assigned to this file's officer so /stats/me has something that is
+    // genuinely THEIRS to count. Harmless to the dashboard assertions — those count
+    // the whole table regardless of assignment.
+    assignedOfficerId: officerId,
   };
 
   // A distinctive sub-population so the endpoint's fields can be shown to reflect
@@ -125,6 +130,111 @@ describe('stats', () => {
     });
     expect(res.statusCode).toBe(403);
     await app.close();
+  });
+
+  // ── /stats/me (ADR-031) ────────────────────────────────────────────────────
+
+  it('GET /stats/me is the caller’s own — an officer is allowed, and the numbers are exact', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(officerToken) });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as OfficerStats;
+
+    // Unlike the org dashboard (whose totals move as other test files write), these
+    // are EXACT: nothing outside this file can be assigned to this officer.
+    expect(s.assignedCadres).toBe(3);
+    // ALERT never reported + THANA last reported 40d ago; OTHER reported 2d ago.
+    expect(s.overdueCadres).toBe(2);
+    expect(s.currentCadres).toBe(1);
+    expect(s.totalReports).toBe(2);
+    expect(s.reportsByPlace).toEqual({ thana: 2, village: 0 });
+    expect(s.cadresByCategory).toEqual({ surrendered: 2, jail: 0, thana: 1 });
+    // The three categories partition the officer's assigned cadres.
+    expect(s.cadresByCategory.surrendered + s.cadresByCategory.jail + s.cadresByCategory.thana)
+      .toBe(s.assignedCadres);
+    await app.close();
+  });
+
+  it('/stats/me is scoped to the caller, not the whole force', async () => {
+    const app = await makeApp();
+    // The admin owns no cadres and has filed no reports.
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(adminToken) });
+    const s = res.json() as OfficerStats;
+    expect(s.assignedCadres).toBe(0);
+    expect(s.totalReports).toBe(0);
+    // 0 assigned → 0%, NOT 100%. An officer with nothing has not completed
+    // everything; claiming 100 would be the most flattering possible lie.
+    expect(s.reportingCompletion).toBe(0);
+    await app.close();
+  });
+
+  it('reportingCompletion is current/assigned as a percentage', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(officerToken) });
+    const s = res.json() as OfficerStats;
+    // 1 of 3 cadres current → 33%. Asserted as a literal, not recomputed from the
+    // response: deriving the expectation from the same numbers under test would pass
+    // even if the endpoint returned nonsense consistently.
+    expect(s.reportingCompletion).toBe(33);
+    await app.close();
+  });
+
+  it('monthlyActivity always returns 6 IST months, oldest first, gaps filled with 0', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(officerToken) });
+    const s = res.json() as OfficerStats;
+    expect(s.monthlyActivity).toHaveLength(6);
+    // Every slot present and typed — a chart must never have to invent a gap.
+    for (const m of s.monthlyActivity) {
+      expect(m.month).toMatch(/^\d{4}-\d{2}$/);
+      expect(Number.isInteger(m.reports)).toBe(true);
+    }
+    // Strictly ascending, and the last is the current IST month.
+    const keys = s.monthlyActivity.map((m) => m.month);
+    expect([...keys].sort()).toEqual(keys);
+    const nowIst = new Date(Date.now() + 330 * 60 * 1000);
+    const thisMonth = `${nowIst.getUTCFullYear()}-${String(nowIst.getUTCMonth() + 1).padStart(2, '0')}`;
+    expect(keys[keys.length - 1]).toBe(thisMonth);
+    await app.close();
+  });
+
+  it('a report filed just after IST midnight counts in the IST month, not the UTC one', async () => {
+    const app = await makeApp();
+    const monthOf = (s: OfficerStats, k: string): number =>
+      s.monthlyActivity.find((m) => m.month === k)?.reports ?? 0;
+    const fetch = async (): Promise<OfficerStats> =>
+      (await app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(officerToken) }))
+        .json() as OfficerStats;
+
+    const before = await fetch();
+    // Only meaningful while both months sit inside the rolling 6-month window.
+    if (!before.monthlyActivity.some((m) => m.month === '2026-07')) {
+      await app.close();
+      return;
+    }
+    const juneBefore = monthOf(before, '2026-06');
+    const julyBefore = monthOf(before, '2026-07');
+
+    // 2026-06-30T19:00:00Z IS 2026-07-01 00:30 IST. Bucketing on the UTC month files
+    // it under June — the officer who wrote it at half past midnight on the 1st would
+    // find July empty. Same class of bug as the report-log filter (ADR-024), and a
+    // naive `date_trunc('month', reported_at)` fails exactly here.
+    const boundary = await prisma.report.create({
+      data: {
+        cadreId: cadreIds[0]!, reportedById: officerId, reportingPlace: 'thana',
+        specificLocation: 'सीमा', personStatus: 'alive', currentPhone: '+910',
+        currentActivity: 'boundary', reportedAt: new Date('2026-06-30T19:00:00.000Z'),
+      },
+    });
+    try {
+      const after = await fetch();
+      // July gained it; June did not move.
+      expect(monthOf(after, '2026-07')).toBe(julyBefore + 1);
+      expect(monthOf(after, '2026-06')).toBe(juneBefore);
+    } finally {
+      await prisma.report.delete({ where: { id: boundary.id } });
+      await app.close();
+    }
   });
 
   it('returns the full shape with integer counts', async () => {
