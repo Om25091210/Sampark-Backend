@@ -38,6 +38,9 @@ export function toWireUser(user: User): WireUser {
 // every authenticated user can already list every cadre.
 export interface WireCadre {
   id: number;
+  // The official register serial number (ADR-025). Absent until the import
+  // supplies one — never fall back to `id`, which is an unrelated surrogate key.
+  serialNumber?: string;
   name: string;
   phone: string;
   thana: string;
@@ -65,8 +68,15 @@ export interface WireCadre {
   assignedOfficerId?: number;
   // ADR-022. When the cadre's next reporting check-in is due: the most recent
   // report's date + 30 days. Derived, not stored. Absent when the cadre has never
-  // reported (no baseline to count from). The client colour-codes the card from it.
+  // reported (no baseline to count from).
   nextReportingDueAt?: string;
+  // ADR-023. The most recent report's date itself — the baseline the above is
+  // derived FROM. Exposed so the client can measure "time since last contact"
+  // without reconstructing it as `nextReportingDueAt - CADENCE`, which would mean
+  // a second copy of REPORTING_CADENCE_DAYS living in the mobile repo and
+  // silently disagreeing with this one the day the cadence changes.
+  // Absent when the cadre has never reported — same condition as above.
+  lastReportedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -86,6 +96,7 @@ export function toWireCadre(c: Cadre, lastReportedAt?: Date | null): WireCadre {
 
   return {
     id: c.id,
+    serialNumber: c.serialNumber ?? undefined,
     name: c.name,
     phone: c.phone,
     thana: c.thana,
@@ -111,6 +122,7 @@ export function toWireCadre(c: Cadre, lastReportedAt?: Date | null): WireCadre {
     subDivision: c.subDivision ?? undefined,
     assignedOfficerId: c.assignedOfficerId ?? undefined,
     nextReportingDueAt,
+    lastReportedAt: lastReportedAt?.toISOString(),
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
   };

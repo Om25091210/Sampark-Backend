@@ -89,6 +89,14 @@ model User {
 
 model Cadre {
   id                 Int            @id @default(autoincrement())
+  // ADR-025. The official register serial number carried over from the paper records.
+  // Deliberately NOT `id`: `id` is a surrogate autoincrement PK with gaps from
+  // deletes, and the ~1,790-row import will reassign every PK — a "serial number"
+  // an officer has written in a register must not change under them. Nullable
+  // because existing rows predate the import that supplies it; unique because a
+  // register number that repeats identifies nothing (a failed import surfacing
+  // duplicate serials is the point, not a problem).
+  serialNumber       String?        @unique @map("serial_number")
   name               String
   phone              String
   thana              String

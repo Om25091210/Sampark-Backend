@@ -318,6 +318,48 @@ describe('cadres', () => {
     await app.close();
   });
 
+  it('lastReportedAt is the latest report date itself, the baseline the due date derives from (ADR-023)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(officerToken) });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { lastReportedAt?: string; nextReportingDueAt?: string };
+    // The newer report, not the April one — same row nextReportingDueAt counts from.
+    expect(body.lastReportedAt).toBe(DUE_REPORT_AT.toISOString());
+    // The pair must stay exactly one cadence apart. This is the point of shipping
+    // lastReportedAt at all: the client derives "time since last contact" from it
+    // instead of keeping its own copy of the 30-day cadence to subtract.
+    const gapDays =
+      (Date.parse(body.nextReportingDueAt!) - Date.parse(body.lastReportedAt!)) / 86_400_000;
+    expect(gapDays).toBe(30);
+    await app.close();
+  });
+
+  it('a cadre with no reports has no lastReportedAt either', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    expect(res.json()).not.toHaveProperty('lastReportedAt');
+    await app.close();
+  });
+
+  it('serialNumber is absent when unset, and never falls back to id (ADR-025)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    expect(res.statusCode).toBe(200);
+    // The fixture has no serial. It must be omitted — NOT filled in from `id`,
+    // which is an unrelated surrogate key the import will reassign.
+    expect(res.json()).not.toHaveProperty('serialNumber');
+    await app.close();
+  });
+
+  it('serialNumber is serialized when set (ADR-025)', async () => {
+    const app = await makeApp();
+    await prisma.cadre.update({ where: { id: dueCadreId }, data: { serialNumber: 'BJP/2024/0731' } });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(officerToken) });
+    expect((res.json() as { serialNumber?: string }).serialNumber).toBe('BJP/2024/0731');
+    await prisma.cadre.update({ where: { id: dueCadreId }, data: { serialNumber: null } });
+    await app.close();
+  });
+
   it('nextReportingDueAt is present in the list too, not only the detail', async () => {
     const app = await makeApp();
     const res = await app.inject({
