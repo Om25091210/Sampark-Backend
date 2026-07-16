@@ -132,7 +132,7 @@ do not "fix" it to a single convention:
 | `GET /auth/me` | — | — | camelCase `AuthUser` |
 | `POST /auth/logout` | — | — | empty |
 | `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`assignedTo`,`surrenderOrigin`,`alertLevel`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
-| `GET /stats/dashboard` | — | — | camelCase `DashboardStats` (counts; see ADR-020) |
+| `GET /stats/dashboard` **(admin+)** | — | — | camelCase `DashboardStats` (counts; see ADR-020, gated by ADR-030) |
 | `GET /cadres/:id` | — | — | camelCase `Cadre` |
 | `POST /cadres/:id/transfer` | snake (`to_officer_id`) | — | empty |
 | `GET /officers` **(admin+)** | — | camelCase (`search`,`page`,`pageSize`) | camelCase `PaginatedResponse<Officer>` — `AuthUser` + `assignedCadreCount` |

@@ -11,11 +11,16 @@ const config = testConfig();
 // own fixtures by phone in afterAll — a shared number would let one file delete a
 // user another still references (an FK failure on the other's report.create).
 // In use elsewhere: 10-12 cadres, 30-31 reports, 40-42 reports-media, 50-53 officers.
+// ADR-030: two users now — the endpoint is admin+, and the officer exists to prove
+// it is refused rather than merely hidden in the UI.
 const PHONE = '+919000000060';
+const ADMIN_PHONE = '+919000000061';
 const TOKEN = 'STATFIXTURE';
 
 let officerId = 0;
 let officerToken = '';
+let adminId = 0;
+let adminToken = '';
 const cadreIds: number[] = [];
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
@@ -42,6 +47,13 @@ beforeAll(async () => {
   });
   officerId = officer.id;
   officerToken = await signAccessToken({ sub: officerId, role: 'officer' }, config.jwtSecret, '15m');
+
+  const admin = await prisma.user.upsert({
+    where: { phone: ADMIN_PHONE }, update: { deletedAt: null, role: 'admin', name: 'Stats Admin' },
+    create: { phone: ADMIN_PHONE, name: 'Stats Admin', role: 'admin' },
+  });
+  adminId = admin.id;
+  adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
 
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
 
@@ -86,7 +98,9 @@ beforeAll(async () => {
 afterAll(async () => {
   await prisma.report.deleteMany({ where: { cadreId: { in: cadreIds } } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
-  await prisma.user.deleteMany({ where: { phone: PHONE } });
+  // Both fixture users — leaving the admin behind would let it drift into another
+  // file's assertions (Sampark-Backend#3).
+  await prisma.user.deleteMany({ where: { phone: { in: [PHONE, ADMIN_PHONE] } } });
   await prisma.$disconnect();
 });
 
@@ -98,9 +112,24 @@ describe('stats', () => {
     await app.close();
   });
 
+  // ADR-030. These are org-wide supervisory counts — every cadre, every alert,
+  // everyone's reports. This endpoint previously took `[app.authenticate]` only, so
+  // an officer's own home screen rendered the whole organisation's posture, and any
+  // officer could curl it. Unlike `assignedTo=me` (a filter over rows the caller can
+  // already page through), an aggregate is not something an officer could assemble
+  // for themselves — so it is a real access boundary, not a view concern.
+  it('an officer is refused (403) — the aggregate is not theirs to read', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
   it('returns the full shape with integer counts', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) });
     expect(res.statusCode).toBe(200);
     const s = res.json() as Stats;
     for (const n of [s.totalCadres, s.activeAlerts, s.reportsThisWeek, s.pendingReporting,
@@ -115,7 +144,7 @@ describe('stats', () => {
   it('the three categories partition the total, and origin is a subset of surrendered', async () => {
     // Exact invariants — true no matter what other test files have in the table.
     const app = await makeApp();
-    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(officerToken) })).json() as Stats;
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) })).json() as Stats;
     expect(s.totalCadres).toBe(s.byCategory.surrendered.total + s.byCategory.thana + s.byCategory.jail);
     // district + other ≤ total: a surrendered cadre may have a NULL origin (ADR-019),
     // so the two tiles need not sum to the surrendered total.
@@ -126,7 +155,7 @@ describe('stats', () => {
 
   it('each fixture row is reflected in its field (counts are live, not hardcoded)', async () => {
     const app = await makeApp();
-    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(officerToken) })).json() as Stats;
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) })).json() as Stats;
     // Lower bounds: my fixture contributes at least this much; parallel data only adds.
     expect(s.byCategory.surrendered.district).toBeGreaterThanOrEqual(1);
     expect(s.byCategory.surrendered.other).toBeGreaterThanOrEqual(1);

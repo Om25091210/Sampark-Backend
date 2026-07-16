@@ -24,14 +24,22 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/stats/dashboard',
     {
-      preHandler: [app.authenticate],
+      // ADR-030: admin+. These are ORG-WIDE supervisory counts — every cadre, every
+      // alert, everyone's reports. ADR-020 built them for the admin dashboard and
+      // never gated them, so any authenticated user could read the whole
+      // organisation's posture; an officer's own home rendered them.
+      //
+      // Unlike `assignedTo=me` (a filter over data the caller can already page
+      // through), this is a genuine access boundary: an aggregate is not something
+      // an officer could assemble for themselves from what they are allowed to see.
+      preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
       schema: {
         tags: ['Stats'],
-        summary: 'Dashboard summary counts',
+        summary: 'Dashboard summary counts (admin+)',
         description:
           'Home-dashboard snapshot: total cadres, active (critical) alerts, reports in the ' +
           'last 7 days, cadres overdue on the 30-day reporting cadence, and per-category counts ' +
-          '(surrendered split by origin per ADR-019).',
+          '(surrendered split by origin per ADR-019). Admin+ only — org-wide supervisory data.',
         security: bearerAuth,
         response: { 200: jsonResponse('Dashboard stats', EXAMPLE_DASHBOARD_STATS) },
       },
