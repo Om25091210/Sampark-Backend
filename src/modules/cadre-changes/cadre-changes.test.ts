@@ -210,16 +210,55 @@ describe('cadre change requests (ADR-026)', () => {
     await app.close();
   });
 
-  it('super_admin may sign the admin rung, so a request cannot deadlock without an admin', async () => {
+  // ADR-028. This test previously asserted the OPPOSITE — that a super_admin could
+  // sign the admin rung so a request could not deadlock without an admin. That was
+  // wrong: it let one person complete a two-person review by clicking approve
+  // twice, which is exactly what the ladder exists to prevent.
+  it('super_admin CANNOT pre-empt the admin rung — two people, not one clicking twice', async () => {
     const app = await makeApp();
-    const req = await submit(app, officerToken, { currentAddress: 'डेडलॉक' });
-    // First approval by super_admin clears the ADMIN rung...
-    const first = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
-    expect((first.json() as WireChange).awaitingRole).toBe('super_admin');
-    // ...and it still needs its own rung signed. Not applied by one call.
-    expect((first.json() as WireChange).status).toBe('pending');
-    const second = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
-    expect((second.json() as WireChange).status).toBe('applied');
+    const req = await submit(app, officerToken, { currentAddress: 'दो व्यक्ति' });
+
+    const early = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect(early.statusCode).toBe(403);
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).currentAddress).toBe(ORIGINAL_ADDRESS);
+
+    // It is not even in the super_admin's queue yet — nothing for them to act on.
+    const q = await app.inject({ method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(superToken) });
+    expect((q.json() as { data: WireChange[] }).data.some((c) => c.id === req.id)).toBe(false);
+
+    // Admin signs first; only now does it reach the super_admin.
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    const q2 = await app.inject({ method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(superToken) });
+    expect((q2.json() as { data: WireChange[] }).data.some((c) => c.id === req.id)).toBe(true);
+
+    // And ONE approval from the super_admin finishes it — no double-click.
+    const done = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect((done.json() as WireChange).status).toBe('applied');
+    await app.close();
+  });
+
+  it('an approved request leaves the admin queue after exactly one approval', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { regiment: 'रेजिमेंट-क' });
+
+    const before = await app.inject({ method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(adminToken) });
+    expect((before.json() as { data: WireChange[] }).data.some((c) => c.id === req.id)).toBe(true);
+
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+
+    const after = await app.inject({ method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(adminToken) });
+    expect((after.json() as { data: WireChange[] }).data.some((c) => c.id === req.id)).toBe(false);
+    await app.close();
+  });
+
+  it('an admin-submitted request goes straight to the super_admin queue', async () => {
+    const app = await makeApp();
+    // needsAdmin=false, so there is no admin rung to clear first.
+    const req = await submit(app, adminToken, { regiment: 'रेजिमेंट-ख' });
+    const q = await app.inject({ method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(superToken) });
+    expect((q.json() as { data: WireChange[] }).data.some((c) => c.id === req.id)).toBe(true);
+    const done = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect((done.json() as WireChange).status).toBe('applied');
     await app.close();
   });
 

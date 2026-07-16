@@ -101,16 +101,27 @@ export function canWriteDirect(role: Role): boolean {
 /**
  * Whether `role` can cast the approval this request is still waiting on.
  *
- * An admin cannot clear the super_admin step and vice versa — each role signs its
- * own rung. A super_admin may sign the admin rung too (they outrank it), which
- * keeps a request from deadlocking when no admin is around; the reverse is never
- * true.
+ * STRICT: each rung is signed by its own role, in order. An officer's change needs
+ * an admin's signature and THEN a super_admin's — two different people.
+ *
+ * ADR-028. A super_admin may NOT sign the admin rung. An earlier version allowed
+ * it, to stop a request deadlocking with no admin around. That was unrequested,
+ * and it quietly destroyed the point of the ladder: a super_admin could approve an
+ * officer's change single-handedly by clicking twice, collapsing a two-level
+ * review into one person while still looking like two. Preventing a hypothetical
+ * deadlock is not worth silently voiding the control the whole feature exists for.
  */
 export function canApproveNext(
   role: Role,
-  req: { needsAdmin: boolean; adminApprovedAt: Date | null; needsSuperAdmin: boolean },
+  req: {
+    needsAdmin: boolean;
+    adminApprovedAt: Date | null;
+    needsSuperAdmin: boolean;
+    superAdminApprovedAt: Date | null;
+  },
 ): boolean {
-  const adminStepOutstanding = req.needsAdmin && req.adminApprovedAt === null;
-  if (adminStepOutstanding) return role === 'admin' || role === 'super_admin';
-  return role === 'super_admin' && req.needsSuperAdmin;
+  // The admin rung, while outstanding, is the admin's alone.
+  if (req.needsAdmin && req.adminApprovedAt === null) return role === 'admin';
+  // Then — and only then — the super_admin rung.
+  return role === 'super_admin' && req.needsSuperAdmin && req.superAdminApprovedAt === null;
 }

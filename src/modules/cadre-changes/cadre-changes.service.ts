@@ -342,10 +342,15 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
           where.needsAdmin = true;
           where.adminApprovedAt = null;
         } else if (actor.role === 'super_admin') {
-          where.OR = [
-            { needsAdmin: true, adminApprovedAt: null },
-            { needsSuperAdmin: true, superAdminApprovedAt: null },
-          ];
+          // ADR-028. Only what a super_admin can actually sign RIGHT NOW: their own
+          // rung, and only once the admin rung (where required) is already cleared.
+          //
+          // Previously this also matched requests still awaiting an admin, so the
+          // super_admin approved, watched the card stay put, and approved again —
+          // which is how one person silently completed a two-person review.
+          where.needsSuperAdmin = true;
+          where.superAdminApprovedAt = null;
+          where.OR = [{ needsAdmin: false }, { NOT: { adminApprovedAt: null } }];
         } else {
           // Officers and viewers approve nothing; an empty queue is the honest
           // answer rather than a 403 on a list they are allowed to read.
