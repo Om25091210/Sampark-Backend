@@ -39,6 +39,11 @@ interface SeedReport {
 // field the mobile profile screen reads is populated here so the DB-backed
 // screens show complete records (matching what the removed screen mocks held).
 interface SeedCadre {
+  // ADR-025. The paper-register number. These are PLACEHOLDERS — the real values
+  // arrive with the ~1,790-row import (Design-Docs#7), which owns the true format.
+  // Seeded so the profile's serial chip is actually visible before that import:
+  // with every row null the field renders nothing and cannot be reviewed at all.
+  serialNumber: string;
   name: string;
   phone: string;
   thana: string;
@@ -66,6 +71,7 @@ interface SeedCadre {
 
 const CADRES: SeedCadre[] = [
   {
+    serialNumber: 'BJP/2025/0001',
     name: 'बबलू माडवी', phone: '+919770784646', thana: 'बीजापुर / गंगालूर',
     currentAddress: 'मझीवाडा थाना गंगालूर जिला बीजापुर छ०ग०',
     permanentAddress: 'मझीवाडा गंगालूर जिला बीजापुर',
@@ -87,6 +93,7 @@ const CADRES: SeedCadre[] = [
     ],
   },
   {
+    serialNumber: 'BJP/2025/0002',
     name: 'महेन्द्र कुमार मड़कम', phone: '+919753402185', thana: 'नारायणपुर',
     currentAddress: 'ग्राम धनोरा, थाना नारायणपुर, जिला नारायणपुर',
     permanentAddress: 'ग्राम धनोरा, जिला नारायणपुर, छत्तीसगढ़',
@@ -105,6 +112,7 @@ const CADRES: SeedCadre[] = [
     ],
   },
   {
+    serialNumber: 'BJP/2025/0003',
     name: 'किरण बाई नेताम', phone: '+918319641027', thana: 'दंतेवाड़ा',
     currentAddress: 'ग्राम गोमपाड, थाना दंतेवाड़ा, जिला दंतेवाड़ा',
     permanentAddress: 'ग्राम गोमपाड, जिला दंतेवाड़ा, छत्तीसगढ़',
@@ -124,6 +132,7 @@ const CADRES: SeedCadre[] = [
     ],
   },
   {
+    serialNumber: 'BJP/2025/0004',
     name: 'राजेंद्र कश्यप', phone: '+917049528963', thana: 'सुकमा',
     currentAddress: 'ग्राम छिंदगढ़, थाना सुकमा, जिला सुकमा',
     permanentAddress: 'ग्राम छिंदगढ़, जिला सुकमा, छत्तीसगढ़',
@@ -154,6 +163,7 @@ async function seedUsers(): Promise<void> {
 
 async function seedCadre(c: SeedCadre, assignedOfficerId: number, reportedById: number): Promise<void> {
   const data = {
+    serialNumber: c.serialNumber,
     name: c.name,
     phone: c.phone,
     thana: c.thana,
