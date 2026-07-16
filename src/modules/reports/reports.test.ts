@@ -276,15 +276,59 @@ describe('reports', () => {
     await app.close();
   });
 
-  it('search filters the list by specific location', async () => {
+  // ── Date-only filter (ADR-024) ─────────────────────────────────────────────
+
+  it('date filters the log to that IST calendar day', async () => {
+    const app = await makeApp();
+    // 12:00 IST on each day — safely inside the day under either timezone reading,
+    // so this test passes even if the IST handling were wrong. The boundary test
+    // below is the one that actually pins the behaviour.
+    await app.inject({ method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`, headers: auth(officerToken), payload: { ...validBody(), specific_location: 'चौदह', selected_date: '2026-07-14T06:30:00.000Z' } });
+    await app.inject({ method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`, headers: auth(officerToken), payload: { ...validBody(), specific_location: 'पंद्रह', selected_date: '2026-07-15T06:30:00.000Z' } });
+
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}/reports?date=2026-07-15`, headers: auth(officerToken) });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { data: WireReportBody[]; total: number };
+    expect(body.total).toBe(1);
+    expect(body.data[0]!.specificLocation).toBe('पंद्रह');
+    await app.close();
+  });
+
+  it('date buckets a report by IST, not UTC, across the midnight boundary', async () => {
+    const app = await makeApp();
+    // 00:30 IST on the 16th IS 19:00 UTC on the 15th. A UTC-day filter would file
+    // this under the 15th, so the officer who wrote it at half past midnight would
+    // pick "16 जुलाई" and not find their own report.
+    await app.inject({ method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`, headers: auth(officerToken), payload: { ...validBody(), specific_location: 'आधी रात के बाद', selected_date: '2026-07-15T19:00:00.000Z' } });
+
+    const utcDay = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}/reports?date=2026-07-15`, headers: auth(officerToken) });
+    expect((utcDay.json() as { total: number }).total).toBe(0);
+
+    const istDay = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}/reports?date=2026-07-16`, headers: auth(officerToken) });
+    const body = istDay.json() as { data: WireReportBody[]; total: number };
+    expect(body.total).toBe(1);
+    expect(body.data[0]!.specificLocation).toBe('आधी रात के बाद');
+    await app.close();
+  });
+
+  it('a malformed date → 400 VALIDATION_ERROR', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}/reports?date=16-07-2026`, headers: auth(officerToken) });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+    await app.close();
+  });
+
+  it('a legacy `search` param is ignored, not rejected', async () => {
     const app = await makeApp();
     await app.inject({ method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`, headers: auth(officerToken), payload: { ...validBody(), specific_location: 'रेलवे स्टेशन' } });
     await app.inject({ method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`, headers: auth(officerToken), payload: { ...validBody(), specific_location: 'बस अड्डा' } });
 
+    // An older build still sending `search` must not 400 a field officer mid-task.
+    // Zod strips the unknown key, so the filter simply does not apply.
     const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}/reports?search=${encodeURIComponent('रेलवे')}`, headers: auth(officerToken) });
-    const body = res.json() as { data: WireReportBody[]; total: number };
-    expect(body.total).toBe(1);
-    expect(body.data[0]!.specificLocation).toBe('रेलवे स्टेशन');
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { total: number }).total).toBe(2);
     await app.close();
   });
 

@@ -7,10 +7,22 @@ export const reportDetailParams = z.object({
   reportId: z.coerce.number().int().positive(),
 });
 
-// List query params are camelCase (per the client contract). `search` matches
-// across specific location, current activity, and current phone.
+// List query params are camelCase (per the client contract).
+//
+// ADR-024: the per-cadre report log filters by DATE ONLY — free-text `search` was
+// removed. A cadre's log is a chronological record an officer scans by "when",
+// not by remembering a phrase someone typed into `currentActivity`. An old client
+// still sending `search` is not rejected: Zod's non-strict parse strips unknown
+// keys, so the param is ignored rather than 400-ing a field officer mid-task.
+//
+// `date` is a CALENDAR DAY in India Standard Time (see the range helper in the
+// service), not a UTC day and not a timestamp.
 export const listReportsQuery = z.object({
-  search: z.string().trim().max(100).optional(),
+  date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD')
+    .refine((d) => !Number.isNaN(Date.parse(`${d}T00:00:00.000Z`)), 'date is not a real calendar date')
+    .optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(50).default(15),
 });

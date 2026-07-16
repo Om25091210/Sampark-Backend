@@ -44,6 +44,23 @@ export interface ReportsService {
 // nested `cadre` Pick the client renders.
 const withCadre = { include: { cadre: true } } as const;
 
+// ADR-024. The report-log date filter is a calendar-day filter in **India
+// Standard Time**, not UTC.
+//
+// `reportedAt` is stored UTC. A report filed at 00:30 IST on the 16th is
+// 19:00 UTC on the 15th, so filtering on the UTC day would file it under the
+// previous date for the officer who wrote it — they would pick "16 जुलाई" and not
+// find their own report. Data residency is India-only and every user is in
+// Chhattisgarh, so a fixed +05:30 is correct; IST has no DST to track.
+const IST_OFFSET_MS = 330 * 60 * 1000; // +05:30
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** `2026-07-16` (IST) → the UTC half-open instant range [gte, lt) covering it. */
+export function istDayRangeUtc(day: string): { gte: Date; lt: Date } {
+  const gte = new Date(Date.parse(`${day}T00:00:00.000Z`) - IST_OFFSET_MS);
+  return { gte, lt: new Date(gte.getTime() + DAY_MS) };
+}
+
 // Resolves the officer-declared report date. The client's date picker caps at
 // today, so a future value means a skewed device clock — clamp it to now rather
 // than 400, because the mobile drain drops a queued report after 3 failed
@@ -76,13 +93,12 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
 
       // Soft-delete filter applies to every read.
       const where: Prisma.ReportWhereInput = { cadreId, deletedAt: null };
-      if (query.search !== undefined && query.search !== '') {
-        const raw = query.search.trim();
-        where.OR = [
-          { specificLocation: { contains: raw, mode: 'insensitive' } },
-          { currentActivity: { contains: raw, mode: 'insensitive' } },
-          { currentPhone: { contains: raw, mode: 'insensitive' } },
-        ];
+      // ADR-024: date-only. Filters on `reportedAt` (the date the officer says the
+      // reporting happened), never `createdAt` (when the row landed) — an offline
+      // report composed Monday may only drain Thursday, and the officer looking for
+      // it will pick Monday.
+      if (query.date !== undefined) {
+        where.reportedAt = istDayRangeUtc(query.date);
       }
 
       const [total, rows] = await prisma.$transaction([
