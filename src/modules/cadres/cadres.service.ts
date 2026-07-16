@@ -34,9 +34,39 @@ const LATEST_REPORT = {
     take: 1,
     select: { reportedAt: true },
   },
+  // ADR-027. The last editor's name, for "अंतिम बदलाव — <officer>".
+  lastEditedBy: { select: { id: true, name: true } },
 } as const satisfies Prisma.CadreInclude;
 
 export function makeCadresService({ prisma }: CadresDeps): CadresService {
+  /**
+   * ADR-027. Which fields have an in-flight change request, for every cadre on the
+   * page — ONE query for the whole page, not one per row. A list endpoint that
+   * fans out per row is how a 15-row page becomes 16 round trips.
+   *
+   * Returns a map that is complete for `ids`: a cadre with nothing pending gets an
+   * empty array, never a missing entry, so callers cannot confuse "none" with
+   * "not looked up".
+   */
+  async function pendingFieldsFor(ids: number[]): Promise<Map<number, string[]>> {
+    const out = new Map<number, string[]>(ids.map((id) => [id, []]));
+    if (ids.length === 0) return out;
+
+    const rows = await prisma.cadreChangeRequest.findMany({
+      where: { cadreId: { in: ids }, status: 'pending' },
+      select: { cadreId: true, changes: true },
+    });
+
+    for (const r of rows) {
+      const fields = Object.keys(r.changes as Record<string, unknown>);
+      const existing = out.get(r.cadreId);
+      // A cadre can hold several pending requests (on different fields — ADR-027
+      // refuses a second request on the SAME field), so union rather than replace.
+      if (existing !== undefined) for (const f of fields) if (!existing.includes(f)) existing.push(f);
+    }
+    return out;
+  }
+
   return {
     async list(query) {
       // Soft-delete filter applies to every read.
@@ -78,8 +108,14 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
         }),
       ]);
 
+      const pending = await pendingFieldsFor(rows.map((r) => r.id));
+
       return {
-        data: rows.map((r) => toWireCadre(r, r.reports[0]?.reportedAt ?? null)),
+        data: rows.map((r) =>
+          toWireCadre(r, r.reports[0]?.reportedAt ?? null, {
+            pendingFields: pending.get(r.id) ?? [],
+          }),
+        ),
         total,
         page: query.page,
         pageSize: query.pageSize,
@@ -93,7 +129,10 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
         include: LATEST_REPORT,
       });
       if (cadre === null) throw notFound('Cadre not found');
-      return toWireCadre(cadre, cadre.reports[0]?.reportedAt ?? null);
+      const pending = await pendingFieldsFor([cadre.id]);
+      return toWireCadre(cadre, cadre.reports[0]?.reportedAt ?? null, {
+        pendingFields: pending.get(cadre.id) ?? [],
+      });
     },
 
     async transfer(cadreId, toOfficerId, actorId) {

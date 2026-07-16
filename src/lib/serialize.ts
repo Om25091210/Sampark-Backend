@@ -81,6 +81,16 @@ export interface WireCadre {
   // silently disagreeing with this one the day the cadence changes.
   // Absent when the cadre has never reported — same condition as above.
   lastReportedAt?: string;
+  // ADR-027. Which fields currently have an in-flight change request. ALWAYS
+  // present (empty array = nothing pending) on both the list and the detail — an
+  // optional array would make "no pending changes" and "not computed here"
+  // indistinguishable, and the UI would guess wrong in exactly one of them.
+  pendingFields: string[];
+  // ADR-027. Who last changed this record's contents and when — the answer to
+  // "has someone touched this recently?" before an officer proposes their own
+  // edit. Absent on a cadre nobody has edited since the write path existed.
+  lastEditedAt?: string;
+  lastEditedBy?: { id: number; name: string };
   createdAt: string;
   updatedAt: string;
 }
@@ -89,10 +99,26 @@ export interface WireCadre {
 // simplest thing that works; revisit if it proves wrong.
 export const REPORTING_CADENCE_DAYS = 30;
 
+/** ADR-027. What the caller must supply so `pendingFields` / `lastEditedBy` are real. */
+export interface CadreEditContext {
+  /** Fields with an in-flight change request. Pass `[]`, never omit — see WireCadre. */
+  pendingFields: string[];
+  /** The last editor, if the cadre carries `lastEditedById`. */
+  lastEditedBy?: { id: number; name: string } | null;
+}
+
 // `lastReportedAt` is the cadre's most recent (non-deleted) report date, or null
 // if it has never reported. The caller computes it (a `take: 1` include); passing
 // it in keeps the 30-day formula in one place.
-export function toWireCadre(c: Cadre, lastReportedAt?: Date | null): WireCadre {
+//
+// `edit` (ADR-027) is likewise the caller's job: pending changes are a batched
+// lookup over the whole page, not a per-row query, so the serializer takes the
+// answer rather than fetching it and turning a list into an N+1.
+export function toWireCadre(
+  c: Cadre & { lastEditedBy?: { id: number; name: string } | null },
+  lastReportedAt?: Date | null,
+  edit?: CadreEditContext,
+): WireCadre {
   const nextReportingDueAt =
     lastReportedAt != null
       ? new Date(lastReportedAt.getTime() + REPORTING_CADENCE_DAYS * 24 * 60 * 60 * 1000).toISOString()
@@ -128,6 +154,9 @@ export function toWireCadre(c: Cadre, lastReportedAt?: Date | null): WireCadre {
     assignedOfficerId: c.assignedOfficerId ?? undefined,
     nextReportingDueAt,
     lastReportedAt: lastReportedAt?.toISOString(),
+    pendingFields: edit?.pendingFields ?? [],
+    lastEditedAt: c.lastEditedAt?.toISOString(),
+    lastEditedBy: edit?.lastEditedBy ?? c.lastEditedBy ?? undefined,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
   };

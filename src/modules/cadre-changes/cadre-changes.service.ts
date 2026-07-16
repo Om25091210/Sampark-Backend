@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { Prisma, type PrismaClient, type Role, type CadreChangeRequest } from '@prisma/client';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
-import { badRequest, forbidden, notFound } from '../../lib/errors.js';
+import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import {
   canApproveNext,
   canSubmit,
@@ -198,6 +198,11 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
       after[field] = entry.new;
     }
 
+    // ADR-027. The submitter is the editor of record, not the approver who happened
+    // to sign last: the officer proposed the change, the approver only allowed it.
+    data.lastEditedAt = new Date();
+    data.lastEditedById = req.submittedById;
+
     await tx.cadre.update({ where: { id: req.cadreId }, data: data as Prisma.CadreUpdateInput });
 
     const applied = await tx.cadreChangeRequest.update({
@@ -253,6 +258,38 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
 
       if (Object.keys(changes).length === 0) {
         throw badRequest('No change proposed — every value matches the cadre already', 'NO_CHANGE');
+      }
+
+      // ADR-027. One in-flight proposal per field. Two officers proposing the same
+      // field used to be caught only at APPLY time: both sat pending, the first
+      // approved won, and the second went `stale` days later — after two approvers
+      // had spent attention on a change that was never going to land. Refuse the
+      // second submission at the door instead, naming who holds the field and
+      // since when, so the officer can go talk to them.
+      //
+      // Checked in JS rather than a JSONB key query: a cadre has a handful of
+      // pending rows at most, and `changes ? 'field'` is not expressible through
+      // Prisma's typed filters without raw SQL.
+      const inFlight = await prisma.cadreChangeRequest.findMany({
+        where: { cadreId, status: 'pending' },
+        include: { submittedBy: { select: { id: true, name: true } } },
+        orderBy: { submittedAt: 'asc' },
+      });
+
+      const clashes: string[] = [];
+      for (const field of Object.keys(changes)) {
+        const holder = inFlight.find((r) =>
+          Object.keys(r.changes as Record<string, unknown>).includes(field),
+        );
+        if (holder !== undefined) {
+          clashes.push(`${field} (${holder.submittedBy.name}, अनुरोध #${holder.id})`);
+        }
+      }
+      if (clashes.length > 0) {
+        throw conflict(
+          `इन फ़ील्ड पर पहले से एक अनुरोध लंबित है: ${clashes.join(', ')}`,
+          'CHANGE_PENDING',
+        );
       }
 
       const { needsAdmin, needsSuperAdmin } = requiredApprovalsFor(actor.role);
@@ -450,7 +487,12 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
       const before = { alertTag: cadre.alertTag, aliases: cadre.aliases };
 
       await prisma.$transaction(async (tx) => {
-        await tx.cadre.update({ where: { id: cadreId }, data: body });
+        // A tag/alias write is still someone touching the record (ADR-027) — an
+        // officer checking "who last edited this" should see it.
+        await tx.cadre.update({
+          where: { id: cadreId },
+          data: { ...body, lastEditedAt: new Date(), lastEditedById: actor.id },
+        });
         await writeAuditLog(tx, {
           actorId: actor.id,
           action: 'cadre.updated',

@@ -95,6 +95,7 @@ model User {
   assignedCadres Cadre[]        @relation("CadreAssignedOfficer")
   refreshTokens  RefreshToken[]
 
+  lastEditedCadres       Cadre[]              @relation("CadreLastEditor") // ADR-027
   // ADR-026
   submittedChanges       CadreChangeRequest[] @relation("ChangeSubmitter")
   adminApprovedChanges   CadreChangeRequest[] @relation("ChangeAdminApprover")
@@ -146,11 +147,23 @@ model Cadre {
   // never null: a tri-state checkbox nobody asked for.
   hardcopyDocsExist  Boolean        @default(false) @map("hardcopy_docs_exist")
   assignedOfficerId  Int?           @map("assigned_officer_id")
+  // ADR-027. Who last changed this record's contents, and when. Deliberately NOT
+  // `updatedAt`: that moves on every write including assignment transfers, so it
+  // cannot answer "has someone edited this cadre's details recently?" — which is
+  // the question an officer asks before proposing an edit of their own.
+  //
+  // Denormalised on purpose, unlike nextReportingDueAt (ADR-022, derived). This is
+  // not a function of existing data — it is a fact recorded at write time, and only
+  // the two write paths (a change request applying, a direct tag/alias write) ever
+  // set it. Nothing else can make it drift.
+  lastEditedAt       DateTime?      @map("last_edited_at")
+  lastEditedById     Int?           @map("last_edited_by_id")
   deletedAt          DateTime?      @map("deleted_at")
   createdAt          DateTime       @default(now()) @map("created_at")
   updatedAt          DateTime       @updatedAt @map("updated_at")
 
   assignedOfficer User?                @relation("CadreAssignedOfficer", fields: [assignedOfficerId], references: [id])
+  lastEditedBy    User?                @relation("CadreLastEditor", fields: [lastEditedById], references: [id]) // ADR-027
   reports         Report[]
   changeRequests  CadreChangeRequest[] // ADR-026
 

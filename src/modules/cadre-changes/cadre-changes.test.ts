@@ -52,7 +52,13 @@ interface WireChange {
 async function resetCadre(): Promise<void> {
   await prisma.cadre.update({
     where: { id: cadreId },
-    data: { phone: ORIGINAL_PHONE, currentAddress: ORIGINAL_ADDRESS, hardcopyDocsExist: false, aliases: [], alertTag: null },
+    data: {
+      phone: ORIGINAL_PHONE, currentAddress: ORIGINAL_ADDRESS, hardcopyDocsExist: false,
+      aliases: [], alertTag: null,
+      // ADR-027 — reset too, or an earlier test's editor bleeds into the next one's
+      // assertion and the suite passes for the wrong reason.
+      lastEditedAt: null, lastEditedById: null,
+    },
   });
 }
 
@@ -281,6 +287,97 @@ describe('cadre change requests (ADR-026)', () => {
     });
     expect(res.statusCode).toBe(400);
     expect((res.json() as { error: { code: string } }).error.code).toBe('NO_CHANGE');
+    await app.close();
+  });
+
+  // ── Race prevention + edit visibility (ADR-027) ────────────────────────────
+
+  it('a second proposal on the SAME field is refused at submission (409), not left to go stale', async () => {
+    const app = await makeApp();
+    const first = await submit(app, officerToken, { phone: '+910000000089' });
+
+    const second = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/changes`, headers: auth(adminToken),
+      payload: { changes: { phone: '+910000000088' } },
+    });
+    expect(second.statusCode).toBe(409);
+    const err = (second.json() as { error: { code: string; message: string } }).error;
+    expect(err.code).toBe('CHANGE_PENDING');
+    // The message names who holds the field, so the second officer can go ask them.
+    expect(err.message).toContain('Chg Officer');
+    expect(err.message).toContain(`#${first.id}`);
+
+    // Only the original is in flight — no silent duplicate was created.
+    expect(await prisma.cadreChangeRequest.count({ where: { cadreId, status: 'pending' } })).toBe(1);
+    await app.close();
+  });
+
+  it('a different field on the same cadre is still allowed', async () => {
+    const app = await makeApp();
+    await submit(app, officerToken, { phone: '+910000000087' });
+    const other = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/changes`, headers: auth(adminToken),
+      payload: { changes: { currentAddress: 'दूसरा फ़ील्ड' } },
+    });
+    expect(other.statusCode).toBe(201);
+    await app.close();
+  });
+
+  it('the field frees up once the first request is decided', async () => {
+    const app = await makeApp();
+    const first = await submit(app, officerToken, { phone: '+910000000086' });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${first.id}/cancel`, headers: auth(officerToken) });
+
+    const second = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/changes`, headers: auth(officerToken),
+      payload: { changes: { phone: '+910000000085' } },
+    });
+    expect(second.statusCode).toBe(201);
+    await app.close();
+  });
+
+  it('pendingFields marks what is in flight, on both the detail and the list', async () => {
+    const app = await makeApp();
+    const before = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    // Always an array — "nothing pending" must not be indistinguishable from
+    // "not computed".
+    expect((before.json() as { pendingFields: string[] }).pendingFields).toEqual([]);
+
+    await submit(app, officerToken, { phone: '+910000000084', hardcopyDocsExist: true });
+
+    const detail = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    expect((detail.json() as { pendingFields: string[] }).pendingFields.sort()).toEqual(['hardcopyDocsExist', 'phone']);
+
+    const list = await app.inject({ method: 'GET', url: `/api/v1/cadres?search=${encodeURIComponent(CADRE_NAME)}&pageSize=50`, headers: auth(officerToken) });
+    const row = (list.json() as { data: { id: number; pendingFields: string[] }[] }).data.find((c) => c.id === cadreId)!;
+    expect(row.pendingFields.sort()).toEqual(['hardcopyDocsExist', 'phone']);
+    await app.close();
+  });
+
+  it('lastEditedAt/By records the SUBMITTER, not the approver who signed last', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { currentAddress: 'सम्पादित' });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+
+    const detail = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const body = detail.json() as { lastEditedAt?: string; lastEditedBy?: { id: number; name: string } };
+    expect(body.lastEditedAt).toBeDefined();
+    // The officer proposed it; the approvers only allowed it.
+    expect(body.lastEditedBy?.id).toBe(officerId);
+    // Cleared, since pendingFields is now empty again.
+    expect((detail.json() as { pendingFields: string[] }).pendingFields).toEqual([]);
+    await app.close();
+  });
+
+  it('a direct tag write also counts as an edit', async () => {
+    const app = await makeApp();
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken), payload: { alertTag: 'निगरानी' },
+    });
+    const detail = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const body = detail.json() as { lastEditedBy?: { id: number } };
+    expect(body.lastEditedBy?.id).toBe(officerId);
     await app.close();
   });
 
