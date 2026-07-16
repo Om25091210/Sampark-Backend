@@ -53,7 +53,9 @@ async function resetCadre(): Promise<void> {
   await prisma.cadre.update({
     where: { id: cadreId },
     data: {
-      phone: ORIGINAL_PHONE, currentAddress: ORIGINAL_ADDRESS, hardcopyDocsExist: false,
+      phone: ORIGINAL_PHONE, currentAddress: ORIGINAL_ADDRESS,
+      hasAadhaar: false, hasBankAccount: false, hasAbProforma: false, hasAgreementLetter: false,
+      avatarKey: null,
       aliases: [], alertTag: null,
       // ADR-027 — reset too, or an earlier test's editor bleeds into the next one's
       // assertion and the suite passes for the wrong reason.
@@ -382,14 +384,14 @@ describe('cadre change requests (ADR-026)', () => {
     // "not computed".
     expect((before.json() as { pendingFields: string[] }).pendingFields).toEqual([]);
 
-    await submit(app, officerToken, { phone: '+910000000084', hardcopyDocsExist: true });
+    await submit(app, officerToken, { phone: '+910000000084', hasAadhaar: true });
 
     const detail = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
-    expect((detail.json() as { pendingFields: string[] }).pendingFields.sort()).toEqual(['hardcopyDocsExist', 'phone']);
+    expect((detail.json() as { pendingFields: string[] }).pendingFields.sort()).toEqual(['hasAadhaar', 'phone']);
 
     const list = await app.inject({ method: 'GET', url: `/api/v1/cadres?search=${encodeURIComponent(CADRE_NAME)}&pageSize=50`, headers: auth(officerToken) });
     const row = (list.json() as { data: { id: number; pendingFields: string[] }[] }).data.find((c) => c.id === cadreId)!;
-    expect(row.pendingFields.sort()).toEqual(['hardcopyDocsExist', 'phone']);
+    expect(row.pendingFields.sort()).toEqual(['hasAadhaar', 'phone']);
     await app.close();
   });
 
@@ -459,15 +461,79 @@ describe('cadre change requests (ADR-026)', () => {
 
   // ── The hardcopy checkbox — the second consumer ─────────────────────────────
 
-  it('hardcopyDocsExist rides the same chain as any other cadre fact', async () => {
+  // ADR-029. The four documents are tracked individually. The single
+  // `hardcopyDocsExist` flag they replaced could not answer the real question:
+  // an officer holding the Aadhaar but not the agreement letter had to lie either
+  // way. These tests pin that they move independently.
+  it('each hardcopy document rides the chain independently', async () => {
     const app = await makeApp();
-    const req = await submit(app, officerToken, { hardcopyDocsExist: true });
-    expect(req.changes.hardcopyDocsExist).toEqual({ old: false, new: true });
-    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).hardcopyDocsExist).toBe(false);
+    const req = await submit(app, officerToken, { hasAadhaar: true, hasBankAccount: true });
+    expect(req.changes.hasAadhaar).toEqual({ old: false, new: true });
+    expect(req.changes.hasBankAccount).toEqual({ old: false, new: true });
+    // Untouched documents are not in the request at all — so they take no lock.
+    expect(req.changes.hasAbProforma).toBeUndefined();
+
+    const before = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(before.hasAadhaar).toBe(false);
 
     await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
     await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
-    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).hardcopyDocsExist).toBe(true);
+
+    const after = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(after.hasAadhaar).toBe(true);
+    expect(after.hasBankAccount).toBe(true);
+    // The two nobody proposed stay false — the whole point of splitting the flag.
+    expect(after.hasAbProforma).toBe(false);
+    expect(after.hasAgreementLetter).toBe(false);
+    await app.close();
+  });
+
+  it('one document pending does not lock the other three', async () => {
+    const app = await makeApp();
+    await submit(app, officerToken, { hasAadhaar: true });
+    // A different document is a different field, so ADR-027's per-field lock lets
+    // it through.
+    const other = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/changes`, headers: auth(adminToken),
+      payload: { changes: { hasAgreementLetter: true } },
+    });
+    expect(other.statusCode).toBe(201);
+    // Same document, though, is refused.
+    const same = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/changes`, headers: auth(adminToken),
+      payload: { changes: { hasAadhaar: true } },
+    });
+    expect(same.statusCode).toBe(409);
+    await app.close();
+  });
+
+  it('a proposed avatarKey carries signed previews so the approver can see the photo', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { avatarKey: 'cadres/cadre-1/avatar-test.jpg' });
+    const entry = req.changes.avatarKey as { new: string; newUrl?: string; oldUrl?: string };
+    expect(entry.new).toBe('cadres/cadre-1/avatar-test.jpg');
+    // Without this the approver is shown a key string and asked to approve a photo
+    // they cannot see — a rubber stamp, not a decision.
+    expect(entry.newUrl).toBeDefined();
+    expect(entry.newUrl).toContain('cadres/cadre-1/avatar-test.jpg');
+    // No previous photo → nothing to sign.
+    expect(entry.oldUrl).toBeUndefined();
+    await app.close();
+  });
+
+  it('an approved avatarKey becomes the cadre photo and is served as a fresh URL', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { avatarKey: 'cadres/cadre-1/avatar-new.jpg' });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).avatarKey).toBe('cadres/cadre-1/avatar-new.jpg');
+
+    // The wire entity exposes a signed URL, never the key — ADR-016's lesson.
+    const detail = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const body = detail.json() as Record<string, unknown>;
+    expect(body.avatarUrl).toContain('avatar-new.jpg');
+    expect(body).not.toHaveProperty('avatarKey');
     await app.close();
   });
 

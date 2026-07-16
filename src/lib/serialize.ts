@@ -65,10 +65,14 @@ export interface WireCadre {
   regiment?: string;
   familyGroupInfo?: string;
   subDivision?: string;
-  // ADR-026. Whether the physical paperwork (आधार, बैंक खाता, AB प्रोफार्मा,
-  // अनुबंध पत्र) is on file. Always present — it is a NOT NULL boolean, never a
-  // tri-state. Written only via the change-request workflow.
-  hardcopyDocsExist: boolean;
+  // ADR-029. The four hardcopy documents, INDIVIDUALLY (ADR-026 shipped them as one
+  // flag; the client asked for them apart, and "the paperwork exists" is
+  // unanswerable when three of four are on file). Always present — NOT NULL
+  // booleans, never tri-state. Written only via the change-request workflow.
+  hasAadhaar: boolean;
+  hasBankAccount: boolean;
+  hasAbProforma: boolean;
+  hasAgreementLetter: boolean;
   assignedOfficerId?: number;
   // ADR-022. When the cadre's next reporting check-in is due: the most recent
   // report's date + 30 days. Derived, not stored. Absent when the cadre has never
@@ -105,6 +109,13 @@ export interface CadreEditContext {
   pendingFields: string[];
   /** The last editor, if the cadre carries `lastEditedById`. */
   lastEditedBy?: { id: number; name: string } | null;
+  /**
+   * ADR-029. A freshly-signed GET URL for `avatarKey`. Supplied by the caller for
+   * the same reason `pendingFields` is: signing is async and per-page, and having
+   * the serializer reach for it would turn every cadre list into an N+1 of S3
+   * calls. Absent → falls back to the legacy `avatarUrl` column.
+   */
+  avatarUrl?: string;
 }
 
 // `lastReportedAt` is the cadre's most recent (non-deleted) report date, or null
@@ -136,7 +147,11 @@ export function toWireCadre(
     category: c.category,
     filter: c.filter ?? undefined,
     alertLevel: c.alertLevel,
-    avatarUrl: c.avatarUrl ?? undefined,
+    // ADR-029. Prefer a freshly-signed URL from the durable `avatarKey`; fall back
+    // to the legacy `avatarUrl` column for rows that predate it. Never emit the
+    // key itself — the client renders a URL, and a stored URL is what ADR-016
+    // taught us not to trust.
+    avatarUrl: edit?.avatarUrl ?? c.avatarUrl ?? undefined,
     alertDate: c.alertDate?.toISOString(),
     incident: c.incident ?? undefined,
     verificationOffice: c.verificationOffice ?? undefined,
@@ -150,7 +165,10 @@ export function toWireCadre(
     regiment: c.regiment ?? undefined,
     familyGroupInfo: c.familyGroupInfo ?? undefined,
     subDivision: c.subDivision ?? undefined,
-    hardcopyDocsExist: c.hardcopyDocsExist,
+    hasAadhaar: c.hasAadhaar,
+    hasBankAccount: c.hasBankAccount,
+    hasAbProforma: c.hasAbProforma,
+    hasAgreementLetter: c.hasAgreementLetter,
     assignedOfficerId: c.assignedOfficerId ?? undefined,
     nextReportingDueAt,
     lastReportedAt: lastReportedAt?.toISOString(),

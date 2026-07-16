@@ -32,7 +32,12 @@ const EXAMPLE_CHANGE = {
 // Scope is the cadre, NOT the user account — officers do not edit their own
 // profile through this.
 export async function cadreChangesRoutes(app: FastifyInstance): Promise<void> {
-  const service = makeCadreChangesService({ prisma: app.prisma, log: app.log });
+  const service = makeCadreChangesService({
+    prisma: app.prisma,
+    log: app.log,
+    storage: app.storage,
+    mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+  });
 
   // `AuthPrincipal.role` is a plain `string` (it comes off the JWT), but every
   // policy decision here switches on the Role union. Narrow it once, at this

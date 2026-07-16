@@ -27,7 +27,14 @@ const fieldValue = {
   regiment: z.string().trim().max(200).nullable(),
   familyGroupInfo: z.string().trim().max(2000).nullable(),
   subDivision: z.string().trim().max(200).nullable(),
-  hardcopyDocsExist: z.boolean(),
+  hasAadhaar: z.boolean(),
+  hasBankAccount: z.boolean(),
+  hasAbProforma: z.boolean(),
+  hasAgreementLetter: z.boolean(),
+  // A key returned by POST /cadres/:cadreId/avatar/upload — never a URL, and never
+  // a path the client invents: an unchecked string here would let a caller point a
+  // cadre's photo at any object in the bucket.
+  avatarKey: z.string().trim().min(1).max(1024).nullable(),
 } as const satisfies Record<(typeof APPROVAL_FIELDS)[number], z.ZodTypeAny>;
 
 export const changeableFieldsSchema = z.object(fieldValue).partial();

@@ -4,11 +4,15 @@ import { toWireCadre, type WireCadre } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
+import type { StorageProvider } from '../../lib/storage.js';
 import type { ResolvedListCadresQuery } from './cadres.schema.js';
 
 export interface CadresDeps {
   prisma: PrismaClient;
   log: FastifyBaseLogger;
+  // ADR-029. Re-signs `avatarKey` on read, exactly as reports do for photo keys.
+  storage: StorageProvider;
+  mediaUrlTtlSeconds: number;
 }
 
 export interface Paginated<T> {
@@ -38,7 +42,25 @@ const LATEST_REPORT = {
   lastEditedBy: { select: { id: true, name: true } },
 } as const satisfies Prisma.CadreInclude;
 
-export function makeCadresService({ prisma }: CadresDeps): CadresService {
+export function makeCadresService({ prisma, storage, mediaUrlTtlSeconds }: CadresDeps): CadresService {
+  /**
+   * ADR-029. Signs each row's `avatarKey` into a fresh GET URL. Only rows that
+   * actually carry a key cost an S3 call, so a page of cadres with no photos costs
+   * nothing.
+   */
+  async function avatarUrlsFor(
+    rows: { id: number; avatarKey: string | null }[],
+  ): Promise<Map<number, string>> {
+    const out = new Map<number, string>();
+    const withKey = rows.filter((r) => r.avatarKey !== null);
+    await Promise.all(
+      withKey.map(async (r) => {
+        out.set(r.id, await storage.presignGet(r.avatarKey!, mediaUrlTtlSeconds));
+      }),
+    );
+    return out;
+  }
+
   /**
    * ADR-027. Which fields have an in-flight change request, for every cadre on the
    * page — ONE query for the whole page, not one per row. A list endpoint that
@@ -108,12 +130,16 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
         }),
       ]);
 
-      const pending = await pendingFieldsFor(rows.map((r) => r.id));
+      const [pending, avatars] = await Promise.all([
+        pendingFieldsFor(rows.map((r) => r.id)),
+        avatarUrlsFor(rows),
+      ]);
 
       return {
         data: rows.map((r) =>
           toWireCadre(r, r.reports[0]?.reportedAt ?? null, {
             pendingFields: pending.get(r.id) ?? [],
+            avatarUrl: avatars.get(r.id),
           }),
         ),
         total,
@@ -129,9 +155,13 @@ export function makeCadresService({ prisma }: CadresDeps): CadresService {
         include: LATEST_REPORT,
       });
       if (cadre === null) throw notFound('Cadre not found');
-      const pending = await pendingFieldsFor([cadre.id]);
+      const [pending, avatars] = await Promise.all([
+        pendingFieldsFor([cadre.id]),
+        avatarUrlsFor([cadre]),
+      ]);
       return toWireCadre(cadre, cadre.reports[0]?.reportedAt ?? null, {
         pendingFields: pending.get(cadre.id) ?? [],
+        avatarUrl: avatars.get(cadre.id),
       });
     },
 

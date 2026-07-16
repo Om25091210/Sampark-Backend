@@ -54,6 +54,45 @@ export async function reportsMediaRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // ADR-029. POST /cadres/:cadreId/avatar/upload — multipart `file` → S3 → { key, url }.
+  // Open to every non-viewer: uploading is not the same as changing the photo. The
+  // key only becomes the cadre's portrait once a change request carrying it is
+  // approved, so an officer uploading here has not altered the record.
+  app.post(
+    '/cadres/:cadreId/avatar/upload',
+    {
+      preHandler: [app.authenticate, app.requireRole('officer', 'admin', 'super_admin')],
+      schema: {
+        tags: ['Reports Media'],
+        summary: 'Upload a cadre photo (officer+) — returns a key to propose',
+        description:
+          'multipart/form-data with a single `file` field (image/jpeg or image/png, ≤ 10 MB). ' +
+          'Returns the durable `key` and a presigned `url` for preview. The key does NOT become the ' +
+          'cadre’s photo by itself — propose it as `avatarKey` via POST /cadres/:cadreId/changes and it ' +
+          'applies on approval (ADR-026/029).',
+        consumes: ['multipart/form-data'],
+        security: bearerAuth,
+        params: zodToJson(mediaCadreParam),
+        response: {
+          200: jsonResponse('Stored — durable key + presigned preview URL', {
+            key: 'cadres/cadre-12/avatar-9f1c….jpg',
+            url: 'https://sampark-media.s3.ap-south-1.amazonaws.com/cadres/cadre-12/avatar-9f1c….jpg?X-Amz-…',
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const { cadreId } = mediaCadreParam.parse(request.params);
+      const mp = await request.file();
+      if (mp === undefined) throw badRequest('multipart file field "file" is required', 'FILE_REQUIRED');
+      if (!isAllowedImageType(mp.mimetype)) {
+        throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Only image/jpeg and image/png are accepted');
+      }
+      const buffer = await mp.toBuffer();
+      return service.uploadAvatar(cadreId, { buffer, contentType: mp.mimetype });
+    },
+  );
+
   // GET /cadres/:cadreId/reports/export — Hindi PDF → S3 → { download_url }. Admin+.
   app.get(
     '/cadres/:cadreId/reports/export',

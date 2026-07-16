@@ -20,6 +20,8 @@ export interface UploadInput {
 
 export interface ReportsMediaService {
   uploadPhoto(cadreId: number, file: UploadInput): Promise<{ key: string; url: string }>;
+  /** ADR-029. The cadre's portrait, as opposed to a report's evidence photo. */
+  uploadAvatar(cadreId: number, file: UploadInput): Promise<{ key: string; url: string }>;
   exportReports(cadreId: number): Promise<{ download_url: string }>;
 }
 
@@ -46,6 +48,21 @@ export function makeReportsMediaService(deps: ReportsMediaDeps): ReportsMediaSer
       const url = await storage.presignGet(key, mediaUrlTtlSeconds);
       // ADR-016: `key` is the durable identity the client stores on the report
       // (`photo_keys`); `url` is a presigned preview, valid only for the TTL window.
+      return { key, url };
+    },
+
+    // ADR-029. The cadre's own photo. Same storage discipline as report photos —
+    // the durable `key` is what gets persisted (proposed through the change-request
+    // workflow), the `url` is a presigned preview for the picker only. A separate
+    // key prefix from `reports/` so a cadre portrait and a report's evidence photo
+    // never share a namespace.
+    async uploadAvatar(cadreId, file) {
+      await assertCadre(cadreId);
+
+      const ext = EXT_BY_TYPE[file.contentType] ?? 'bin';
+      const key = `cadres/cadre-${cadreId}/avatar-${randomUUID()}.${ext}`;
+      await storage.put(key, file.buffer, file.contentType);
+      const url = await storage.presignGet(key, mediaUrlTtlSeconds);
       return { key, url };
     },
 

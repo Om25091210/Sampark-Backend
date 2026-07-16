@@ -140,12 +140,25 @@ model Cadre {
   regiment           String?
   familyGroupInfo    String?        @map("family_group_info")
   subDivision        String?        @map("sub_division")
-  // ADR-026. "आधार, बैंक खाता, AB प्रोफार्मा और अनुबंध पत्र" — whether the physical
-  // paperwork exists on file. Goes through the approval chain like any other cadre
-  // fact: an officer ticking it is asserting the documents exist, which is a claim
-  // someone above them signs off on. Defaults false = "not confirmed present",
-  // never null: a tri-state checkbox nobody asked for.
-  hardcopyDocsExist  Boolean        @default(false) @map("hardcopy_docs_exist")
+  // ADR-029. The four hardcopy documents, tracked INDIVIDUALLY. ADR-026 shipped
+  // these as one `hardcopyDocsExist` boolean; the client asked for them separately,
+  // and they were right — "the paperwork exists" is unanswerable when the Aadhaar
+  // is on file and the agreement letter is not. One flag forced an officer to lie
+  // in one direction or the other.
+  //
+  // Each goes through the approval chain like any other cadre fact: ticking one is
+  // asserting a document physically exists, which is a claim someone above the
+  // officer signs off on. Default false = "not confirmed present", never null — a
+  // tri-state nobody asked for.
+  hasAadhaar         Boolean        @default(false) @map("has_aadhaar")
+  hasBankAccount     Boolean        @default(false) @map("has_bank_account")
+  hasAbProforma      Boolean        @default(false) @map("has_ab_proforma")
+  hasAgreementLetter Boolean        @default(false) @map("has_agreement_letter")
+  // ADR-029. Durable S3 key for the cadre's photo. ADR-016's lesson: store the KEY,
+  // never a presigned URL (which expires ≤7d and would rot in the column). The
+  // legacy `avatarUrl` above stays for rows that predate this; the serializer
+  // prefers a freshly-signed `avatarKey` and falls back to it.
+  avatarKey          String?        @map("avatar_key")
   assignedOfficerId  Int?           @map("assigned_officer_id")
   // ADR-027. Who last changed this record's contents, and when. Deliberately NOT
   // `updatedAt`: that moves on every write including assignment transfers, so it

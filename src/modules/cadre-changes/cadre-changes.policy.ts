@@ -43,7 +43,16 @@ export const APPROVAL_FIELDS = [
   'regiment',
   'familyGroupInfo',
   'subDivision',
-  'hardcopyDocsExist',
+  // ADR-029. The four hardcopy documents, individually. Each is a claim that a
+  // physical document exists, so each is signed off like any other cadre fact.
+  'hasAadhaar',
+  'hasBankAccount',
+  'hasAbProforma',
+  'hasAgreementLetter',
+  // ADR-029. The cadre's photo, proposed as a durable S3 key (uploaded first, then
+  // proposed). Approval-gated for the same reason as the name: it is a claim about
+  // who this person IS, and the approver is shown the proposed image to judge it.
+  'avatarKey',
 ] as const;
 
 export type DirectField = (typeof DIRECT_FIELDS)[number];

@@ -3,6 +3,7 @@ import { Prisma, type PrismaClient, type Role, type CadreChangeRequest } from '@
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
+import type { StorageProvider } from '../../lib/storage.js';
 import {
   canApproveNext,
   canSubmit,
@@ -19,6 +20,10 @@ import type {
 export interface CadreChangesDeps {
   prisma: PrismaClient;
   log: FastifyBaseLogger;
+  // ADR-029. Signs proposed/current `avatarKey`s into preview URLs so an approver
+  // can actually LOOK at a photo before approving it.
+  storage: StorageProvider;
+  mediaUrlTtlSeconds: number;
 }
 
 export interface Actor {
@@ -69,6 +74,13 @@ function sameValue(a: JsonValue, b: JsonValue): boolean {
 export interface WireChangeEntry {
   old: JsonValue;
   new: JsonValue;
+  /**
+   * ADR-029. For `avatarKey` only: signed preview URLs for the two keys. An
+   * approver shown `cadres/cadre-2/avatar-9f1c….jpg` is being asked to approve a
+   * photo they cannot see, which is not a decision — it is a rubber stamp.
+   */
+  oldUrl?: string;
+  newUrl?: string;
 }
 
 export interface WireChangeRequest {
@@ -107,14 +119,40 @@ function awaitingRole(r: CadreChangeRequest): 'admin' | 'super_admin' | undefine
   return undefined;
 }
 
-function toWire(r: Row): WireChangeRequest {
+type SignFn = (key: string) => Promise<string>;
+
+/**
+ * ADR-029. Attaches signed previews to an `avatarKey` entry. Everything else is
+ * passed through untouched — only a photo needs looking at.
+ */
+async function withPreviews(
+  changes: Record<string, WireChangeEntry>,
+  sign: SignFn,
+): Promise<Record<string, WireChangeEntry>> {
+  const entry = changes.avatarKey;
+  if (entry === undefined) return changes;
+
+  const signIfKey = async (v: JsonValue): Promise<string | undefined> =>
+    typeof v === 'string' && v !== '' ? sign(v) : undefined;
+
+  return {
+    ...changes,
+    avatarKey: {
+      ...entry,
+      oldUrl: await signIfKey(entry.old),
+      newUrl: await signIfKey(entry.new),
+    },
+  };
+}
+
+async function toWire(r: Row, sign: SignFn): Promise<WireChangeRequest> {
   return {
     id: r.id,
     cadreId: r.cadreId,
     cadre: r.cadre
       ? { id: r.cadre.id, name: r.cadre.name, serialNumber: r.cadre.serialNumber ?? undefined }
       : undefined,
-    changes: r.changes as unknown as Record<string, WireChangeEntry>,
+    changes: await withPreviews(r.changes as unknown as Record<string, WireChangeEntry>, sign),
     submittedBy: r.submittedBy,
     submittedAt: r.submittedAt.toISOString(),
     note: r.note ?? undefined,
@@ -147,7 +185,14 @@ export interface CadreChangesService {
   patchDirect(cadreId: number, body: PatchCadreBody, actor: Actor): Promise<void>;
 }
 
-export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChangesService {
+export function makeCadreChangesService({
+  prisma,
+  storage,
+  mediaUrlTtlSeconds,
+}: CadreChangesDeps): CadreChangesService {
+  // ADR-029. Re-signs an avatarKey into a short-lived preview URL for the approver.
+  const signUrl = (key: string): Promise<string> => storage.presignGet(key, mediaUrlTtlSeconds);
+
   /** Applies a request's values to the cadre, or marks it stale. Caller supplies the tx. */
   async function applyWithin(
     tx: Prisma.TransactionClient,
@@ -324,7 +369,7 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
         return req;
       });
 
-      return toWire(await loadOrThrow(created.id));
+      return toWire(await loadOrThrow(created.id), signUrl);
     },
 
     async list(query, actor) {
@@ -370,7 +415,7 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
       ]);
 
       return {
-        data: (rows as Row[]).map(toWire),
+        data: await Promise.all((rows as Row[]).map((r) => toWire(r, signUrl))),
         total,
         page: query.page,
         pageSize: query.pageSize,
@@ -423,7 +468,7 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
         return next;
       });
 
-      return toWire(await loadOrThrow(updated.id));
+      return toWire(await loadOrThrow(updated.id), signUrl);
     },
 
     async reject(id, reason, actor) {
@@ -453,7 +498,7 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
         });
       });
 
-      return toWire(await loadOrThrow(id));
+      return toWire(await loadOrThrow(id), signUrl);
     },
 
     async cancel(id, actor) {
@@ -480,7 +525,7 @@ export function makeCadreChangesService({ prisma }: CadreChangesDeps): CadreChan
         });
       });
 
-      return toWire(await loadOrThrow(id));
+      return toWire(await loadOrThrow(id), signUrl);
     },
 
     async patchDirect(cadreId, body, actor) {

@@ -12,7 +12,13 @@ import {
 
 // Cadre records. All routes require authentication; transfer is admin+.
 export async function cadresRoutes(app: FastifyInstance): Promise<void> {
-  const service = makeCadresService({ prisma: app.prisma, log: app.log });
+  const service = makeCadresService({
+    prisma: app.prisma,
+    log: app.log,
+    // ADR-029: re-signs `avatarKey` on read, so a cadre photo never goes stale.
+    storage: app.storage,
+    mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+  });
 
   app.get(
     '/cadres',
