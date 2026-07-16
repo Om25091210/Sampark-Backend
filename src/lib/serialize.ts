@@ -65,6 +65,10 @@ export interface WireCadre {
   regiment?: string;
   familyGroupInfo?: string;
   subDivision?: string;
+  // ADR-026. Whether the physical paperwork (आधार, बैंक खाता, AB प्रोफार्मा,
+  // अनुबंध पत्र) is on file. Always present — it is a NOT NULL boolean, never a
+  // tri-state. Written only via the change-request workflow.
+  hardcopyDocsExist: boolean;
   assignedOfficerId?: number;
   // ADR-022. When the cadre's next reporting check-in is due: the most recent
   // report's date + 30 days. Derived, not stored. Absent when the cadre has never
@@ -120,6 +124,7 @@ export function toWireCadre(c: Cadre, lastReportedAt?: Date | null): WireCadre {
     regiment: c.regiment ?? undefined,
     familyGroupInfo: c.familyGroupInfo ?? undefined,
     subDivision: c.subDivision ?? undefined,
+    hardcopyDocsExist: c.hardcopyDocsExist,
     assignedOfficerId: c.assignedOfficerId ?? undefined,
     nextReportingDueAt,
     lastReportedAt: lastReportedAt?.toISOString(),

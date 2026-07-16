@@ -1,0 +1,387 @@
+import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest';
+import { PrismaClient } from '@prisma/client';
+import type { FastifyInstance } from 'fastify';
+import { buildApp } from '../../app.js';
+import { testConfig } from '../../test/helpers.js';
+import { signAccessToken } from '../../lib/tokens.js';
+
+const prisma = new PrismaClient();
+const config = testConfig();
+
+// Fixture phones must not collide with ANY other test file's — suites share one
+// database and run in parallel, so a duplicate phone upserts another file's user
+// out from under it mid-run. This block (80-83) was free at the time of writing;
+// the blocks already taken were 01 / 10-12 / 30-31 / 40-42 / 50-53 / 60 / 70-71.
+//
+// This is exactly the fragility tracked in Sampark-Backend#3, and it is not
+// theoretical: this file was first written on 50-53, which silently belongs to
+// officers.test.ts, and the whole officers suite failed on the next full run while
+// passing in isolation. Verify with:
+//   grep -rho "+91[0-9]\{10\}" --include=*.test.ts src/ | sort -u
+const PHONES = ['+919000000080', '+919000000081', '+919000000082', '+919000000083'];
+const CADRE_NAME = 'TEST CADRE CHANGES';
+
+let superId = 0;
+let adminId = 0;
+let officerId = 0;
+let viewerId = 0;
+let cadreId = 0;
+let superToken = '';
+let adminToken = '';
+let officerToken = '';
+let viewerToken = '';
+
+const auth = (t: string) => ({ authorization: `Bearer ${t}` });
+const makeApp = (): Promise<FastifyInstance> => buildApp({ config, prisma, logger: false });
+
+const ORIGINAL_PHONE = '+910000000055';
+const ORIGINAL_ADDRESS = 'मूल पता';
+
+interface WireChange {
+  id: number;
+  status: string;
+  needsAdmin: boolean;
+  needsSuperAdmin: boolean;
+  awaitingRole?: string;
+  changes: Record<string, { old: unknown; new: unknown }>;
+  submittedBy: { id: number; name: string; role: string };
+  decidedReason?: string;
+  adminApprovedAt?: string;
+}
+
+async function resetCadre(): Promise<void> {
+  await prisma.cadre.update({
+    where: { id: cadreId },
+    data: { phone: ORIGINAL_PHONE, currentAddress: ORIGINAL_ADDRESS, hardcopyDocsExist: false, aliases: [], alertTag: null },
+  });
+}
+
+/** Submit as `token`, returning the created request. */
+async function submit(
+  app: FastifyInstance,
+  token: string,
+  changes: Record<string, unknown>,
+  note?: string,
+): Promise<WireChange> {
+  const res = await app.inject({
+    method: 'POST',
+    url: `/api/v1/cadres/${cadreId}/changes`,
+    headers: auth(token),
+    payload: { changes, note },
+  });
+  expect(res.statusCode).toBe(201);
+  return res.json() as WireChange;
+}
+
+beforeAll(async () => {
+  const mk = async (phone: string, role: 'super_admin' | 'admin' | 'officer' | 'viewer', name: string) =>
+    prisma.user.upsert({
+      where: { phone }, update: { deletedAt: null, role, name }, create: { phone, name, role },
+    });
+
+  superId = (await mk(PHONES[0]!, 'super_admin', 'Chg Super')).id;
+  adminId = (await mk(PHONES[1]!, 'admin', 'Chg Admin')).id;
+  officerId = (await mk(PHONES[2]!, 'officer', 'Chg Officer')).id;
+  viewerId = (await mk(PHONES[3]!, 'viewer', 'Chg Viewer')).id;
+
+  await prisma.cadreChangeRequest.deleteMany({ where: { cadre: { name: CADRE_NAME } } });
+  await prisma.cadre.deleteMany({ where: { name: CADRE_NAME } });
+  const cadre = await prisma.cadre.create({
+    data: {
+      name: CADRE_NAME, phone: ORIGINAL_PHONE, thana: 'बीजापुर', currentAddress: ORIGINAL_ADDRESS,
+      designation: 'Fixture', category: 'surrendered', alertLevel: 'normal', aliases: [],
+    },
+  });
+  cadreId = cadre.id;
+
+  superToken = await signAccessToken({ sub: superId, role: 'super_admin' }, config.jwtSecret, '15m');
+  adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
+  officerToken = await signAccessToken({ sub: officerId, role: 'officer' }, config.jwtSecret, '15m');
+  viewerToken = await signAccessToken({ sub: viewerId, role: 'viewer' }, config.jwtSecret, '15m');
+});
+
+afterEach(async () => {
+  const rows = await prisma.cadreChangeRequest.findMany({ where: { cadreId }, select: { id: true } });
+  const ids = rows.map((r) => String(r.id));
+  if (ids.length > 0) {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'cadre_change_request', entityId: { in: ids } } });
+  }
+  await prisma.cadreChangeRequest.deleteMany({ where: { cadreId } });
+  await resetCadre();
+});
+
+afterAll(async () => {
+  await prisma.cadreChangeRequest.deleteMany({ where: { cadreId } });
+  await prisma.cadre.deleteMany({ where: { name: CADRE_NAME } });
+  await prisma.$disconnect();
+});
+
+describe('cadre change requests (ADR-026)', () => {
+  // ── The ladder ─────────────────────────────────────────────────────────────
+
+  it('officer → admin → super_admin: NOT applied until the last rung signs', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { phone: '+910000000099' }, 'नंबर बदल गया है');
+
+    expect(req.status).toBe('pending');
+    expect(req.needsAdmin).toBe(true);
+    expect(req.needsSuperAdmin).toBe(true);
+    expect(req.awaitingRole).toBe('admin');
+    // The old value is captured as evidence for the approver and the drift check.
+    expect(req.changes.phone).toEqual({ old: ORIGINAL_PHONE, new: '+910000000099' });
+    // Every approver sees who proposed it.
+    expect(req.submittedBy.id).toBe(officerId);
+
+    // Admin signs the first rung — the cadre must NOT change yet.
+    const a = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    expect(a.statusCode).toBe(200);
+    const afterAdmin = a.json() as WireChange;
+    expect(afterAdmin.status).toBe('pending');
+    expect(afterAdmin.awaitingRole).toBe('super_admin');
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).phone).toBe(ORIGINAL_PHONE);
+
+    // Super admin signs the last rung — now it applies, in the same transaction.
+    const s = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect(s.statusCode).toBe(200);
+    expect((s.json() as WireChange).status).toBe('applied');
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).phone).toBe('+910000000099');
+    await app.close();
+  });
+
+  it('admin submits → needs only super_admin', async () => {
+    const app = await makeApp();
+    const req = await submit(app, adminToken, { currentAddress: 'नया पता' });
+    expect(req.needsAdmin).toBe(false);
+    expect(req.needsSuperAdmin).toBe(true);
+    expect(req.awaitingRole).toBe('super_admin');
+
+    const s = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect((s.json() as WireChange).status).toBe('applied');
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).currentAddress).toBe('नया पता');
+    await app.close();
+  });
+
+  it('super_admin submits → applied immediately, still recorded in the trail', async () => {
+    const app = await makeApp();
+    const req = await submit(app, superToken, { currentAddress: 'सुपर पता' });
+    expect(req.status).toBe('applied');
+    expect(req.needsAdmin).toBe(false);
+    expect(req.needsSuperAdmin).toBe(false);
+    expect(req.awaitingRole).toBeUndefined();
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).currentAddress).toBe('सुपर पता');
+    // The row exists even though nobody approved it — an unapproved-but-applied
+    // edit still belongs in history.
+    expect(await prisma.cadreChangeRequest.count({ where: { id: req.id } })).toBe(1);
+    await app.close();
+  });
+
+  it('viewer cannot propose (403)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/changes`, headers: auth(viewerToken),
+      payload: { changes: { phone: '+910000000098' } },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('officer cannot approve anything (403)', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { phone: '+910000000097' });
+    const res = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(officerToken) });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('an approver cannot approve their own proposal', async () => {
+    const app = await makeApp();
+    // Admin proposes; only super_admin is left to sign — but admin outranks nothing
+    // here and must not self-clear.
+    const req = await submit(app, adminToken, { currentAddress: 'स्वयं' });
+    const res = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    expect(res.statusCode).toBe(403);
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).currentAddress).toBe(ORIGINAL_ADDRESS);
+    await app.close();
+  });
+
+  it('super_admin may sign the admin rung, so a request cannot deadlock without an admin', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { currentAddress: 'डेडलॉक' });
+    // First approval by super_admin clears the ADMIN rung...
+    const first = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect((first.json() as WireChange).awaitingRole).toBe('super_admin');
+    // ...and it still needs its own rung signed. Not applied by one call.
+    expect((first.json() as WireChange).status).toBe('pending');
+    const second = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect((second.json() as WireChange).status).toBe('applied');
+    await app.close();
+  });
+
+  // ── Drift ──────────────────────────────────────────────────────────────────
+
+  it('a value that moved after submission goes stale instead of clobbering', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { phone: '+910000000096' });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+
+    // Someone else changes the phone while the request sits awaiting super_admin.
+    await prisma.cadre.update({ where: { id: cadreId }, data: { phone: '+910000000077' } });
+
+    const s = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    const out = s.json() as WireChange;
+    expect(out.status).toBe('stale');
+    expect(out.decidedReason).toContain('phone');
+    // The newer value survives — the approval did NOT overwrite it.
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).phone).toBe('+910000000077');
+    await app.close();
+  });
+
+  // ── Rejection / cancellation ───────────────────────────────────────────────
+
+  it('rejection is terminal, needs a reason, and keeps the earlier approval on the row', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { phone: '+910000000095' });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+
+    const noReason = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/reject`, headers: auth(superToken), payload: {} });
+    expect(noReason.statusCode).toBe(400);
+
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/changes/${req.id}/reject`, headers: auth(superToken),
+      payload: { reason: 'सत्यापन नहीं हुआ' },
+    });
+    const out = res.json() as WireChange;
+    expect(out.status).toBe('rejected');
+    expect(out.decidedReason).toBe('सत्यापन नहीं हुआ');
+    // The admin who backed it is still on the record.
+    expect(out.adminApprovedAt).toBeDefined();
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).phone).toBe(ORIGINAL_PHONE);
+
+    // Terminal: no second bite.
+    const again = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect(again.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('only the submitter can withdraw their request', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { phone: '+910000000094' });
+    const notMine = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/cancel`, headers: auth(adminToken) });
+    expect(notMine.statusCode).toBe(403);
+    const mine = await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/cancel`, headers: auth(officerToken) });
+    expect((mine.json() as WireChange).status).toBe('cancelled');
+    await app.close();
+  });
+
+  it('proposing the value the cadre already holds → 400 NO_CHANGE', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/changes`, headers: auth(officerToken),
+      payload: { changes: { phone: ORIGINAL_PHONE } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('NO_CHANGE');
+    await app.close();
+  });
+
+  // ── Queues ─────────────────────────────────────────────────────────────────
+
+  it('awaitingMe returns only what the caller can sign next', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { phone: '+910000000093' });
+
+    const adminQ = await app.inject({ method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(adminToken) });
+    expect((adminQ.json() as { data: WireChange[] }).data.some((c) => c.id === req.id)).toBe(true);
+
+    // Officers approve nothing — an empty queue, not a 403 on a readable list.
+    const officerQ = await app.inject({ method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(officerToken) });
+    expect(officerQ.statusCode).toBe(200);
+    expect((officerQ.json() as { total: number }).total).toBe(0);
+
+    // Once admin signs, it leaves the admin queue.
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    const adminQ2 = await app.inject({ method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(adminToken) });
+    expect((adminQ2.json() as { data: WireChange[] }).data.some((c) => c.id === req.id)).toBe(false);
+    await app.close();
+  });
+
+  it('submittedBy=me is how a submitter learns the outcome (no notifications exist)', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { phone: '+910000000092' });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    await app.inject({
+      method: 'POST', url: `/api/v1/changes/${req.id}/reject`, headers: auth(superToken),
+      payload: { reason: 'दस्तावेज़ अपूर्ण' },
+    });
+
+    const mine = await app.inject({ method: 'GET', url: '/api/v1/changes?submittedBy=me&pageSize=50', headers: auth(officerToken) });
+    const row = (mine.json() as { data: WireChange[] }).data.find((c) => c.id === req.id)!;
+    expect(row.status).toBe('rejected');
+    expect(row.decidedReason).toBe('दस्तावेज़ अपूर्ण');
+    await app.close();
+  });
+
+  // ── The hardcopy checkbox — the second consumer ─────────────────────────────
+
+  it('hardcopyDocsExist rides the same chain as any other cadre fact', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { hardcopyDocsExist: true });
+    expect(req.changes.hardcopyDocsExist).toEqual({ old: false, new: true });
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).hardcopyDocsExist).toBe(false);
+
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).hardcopyDocsExist).toBe(true);
+    await app.close();
+  });
+
+  it('a multi-field submission applies as one unit', async () => {
+    const app = await makeApp();
+    const req = await submit(app, officerToken, { phone: '+910000000091', currentAddress: 'दोनों' });
+    expect(Object.keys(req.changes).sort()).toEqual(['currentAddress', 'phone']);
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });
+    await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(superToken) });
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(c.phone).toBe('+910000000091');
+    expect(c.currentAddress).toBe('दोनों');
+    await app.close();
+  });
+
+  // ── Direct writes ──────────────────────────────────────────────────────────
+
+  it('PATCH /cadres/:id writes tags/aliases immediately, no approval', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: 'तत्काल', aliases: ['बब्बू'] },
+    });
+    expect(res.statusCode).toBe(204);
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(c.alertTag).toBe('तत्काल');
+    expect(c.aliases).toEqual(['बब्बू']);
+    // No approval was created — these are outside the chain by design.
+    expect(await prisma.cadreChangeRequest.count({ where: { cadreId } })).toBe(0);
+    await app.close();
+  });
+
+  it('PATCH rejects an approval-gated field instead of silently ignoring it', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { phone: '+910000000090' },
+    });
+    // A 204 here with no phone change would be a write that lies about succeeding.
+    expect(res.statusCode).toBe(400);
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).phone).toBe(ORIGINAL_PHONE);
+    await app.close();
+  });
+
+  it('PATCH is refused for viewers (403)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(viewerToken), payload: { alertTag: 'x' },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+});

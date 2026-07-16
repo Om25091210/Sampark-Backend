@@ -15,6 +15,7 @@ import authPlugin from './plugins/auth.js';
 import { healthRoutes } from './modules/health/health.routes.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
 import { cadresRoutes } from './modules/cadres/cadres.routes.js';
+import { cadreChangesRoutes } from './modules/cadre-changes/cadre-changes.routes.js';
 import { officersRoutes } from './modules/officers/officers.routes.js';
 import { reportsRoutes } from './modules/reports/reports.routes.js';
 import { reportsMediaRoutes } from './modules/reports-media/reports-media.routes.js';
@@ -111,6 +112,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
     async (api) => {
       await api.register(authRoutes);
       await api.register(cadresRoutes);
+      await api.register(cadreChangesRoutes); // ADR-026
       await api.register(officersRoutes);
       await api.register(reportsRoutes);
       await api.register(reportsMediaRoutes);

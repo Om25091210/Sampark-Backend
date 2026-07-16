@@ -50,6 +50,19 @@ enum SurrenderOrigin {
   other    // another district or state
 }
 
+// ADR-026. Lifecycle of an officer/admin-proposed edit to a cadre record.
+// `applied` is terminal and means the change is live on the cadre; `approved`
+// is never a resting state (approval and application happen in one transaction),
+// so it is deliberately absent — a request that says "approved" but whose value
+// is not on the cadre would be the exact class of lie this project keeps undoing.
+enum ChangeRequestStatus {
+  pending
+  applied
+  rejected
+  cancelled  // withdrawn by the submitter before it was decided
+  stale      // the underlying value moved after submission; never applied
+}
+
 enum ReportingPlace {
   thana
   village
@@ -81,6 +94,12 @@ model User {
   reports        Report[]       @relation("ReportReporter")
   assignedCadres Cadre[]        @relation("CadreAssignedOfficer")
   refreshTokens  RefreshToken[]
+
+  // ADR-026
+  submittedChanges       CadreChangeRequest[] @relation("ChangeSubmitter")
+  adminApprovedChanges   CadreChangeRequest[] @relation("ChangeAdminApprover")
+  superApprovedChanges   CadreChangeRequest[] @relation("ChangeSuperAdminApprover")
+  decidedChanges         CadreChangeRequest[] @relation("ChangeDecider")
 
   @@map("users")
 }
@@ -120,13 +139,20 @@ model Cadre {
   regiment           String?
   familyGroupInfo    String?        @map("family_group_info")
   subDivision        String?        @map("sub_division")
+  // ADR-026. "आधार, बैंक खाता, AB प्रोफार्मा और अनुबंध पत्र" — whether the physical
+  // paperwork exists on file. Goes through the approval chain like any other cadre
+  // fact: an officer ticking it is asserting the documents exist, which is a claim
+  // someone above them signs off on. Defaults false = "not confirmed present",
+  // never null: a tri-state checkbox nobody asked for.
+  hardcopyDocsExist  Boolean        @default(false) @map("hardcopy_docs_exist")
   assignedOfficerId  Int?           @map("assigned_officer_id")
   deletedAt          DateTime?      @map("deleted_at")
   createdAt          DateTime       @default(now()) @map("created_at")
   updatedAt          DateTime       @updatedAt @map("updated_at")
 
-  assignedOfficer User?    @relation("CadreAssignedOfficer", fields: [assignedOfficerId], references: [id])
+  assignedOfficer User?                @relation("CadreAssignedOfficer", fields: [assignedOfficerId], references: [id])
   reports         Report[]
+  changeRequests  CadreChangeRequest[] // ADR-026
 
   @@index([category])
   @@index([alertLevel])
@@ -171,6 +197,72 @@ model Report {
   @@index([cadreId])
   @@index([reportedById])
   @@map("reports")
+}
+
+// ─── Cadre change requests (ADR-026) ───────────────────────────────────────────
+//
+// An officer/admin-proposed edit to a CADRE record, held until everyone above the
+// submitter has signed off. Scope is deliberately the cadre, not the user account:
+// officers do not edit their own profile through this.
+//
+// The approval ladder is "every role above you must approve":
+//   officer      -> admin -> super_admin   (needsAdmin + needsSuperAdmin)
+//   admin        -> super_admin            (needsSuperAdmin)
+//   super_admin  -> applied immediately    (never reaches this table)
+//   viewer       -> cannot submit
+//
+// The two required-flags are frozen ONTO THE ROW at submission time rather than
+// re-derived from the submitter's current role on each read: if an officer is
+// promoted to admin while their change sits pending, the change must still need
+// the approvals it needed when it was made. Re-deriving would silently shorten
+// the chain retroactively.
+model CadreChangeRequest {
+  id      Int @id @default(autoincrement())
+  cadreId Int @map("cadre_id")
+
+  // One request = one logical submission = a SET of field changes, applied or
+  // rejected as a unit. Shape: { "<cadreField>": { "old": <json>, "new": <json> } }.
+  // Not one row per field: a profile edit touches several at once, and per-field
+  // rows let an approver half-approve an edit into a state the submitter never
+  // proposed. `old` is the value read at submission time and is re-checked before
+  // apply — an approval two days later must not clobber someone else's newer edit.
+  changes Json
+
+  submittedById Int      @map("submitted_by_id")
+  submittedAt   DateTime @default(now()) @map("submitted_at")
+  // Free-text reason from the field ("नंबर बदल गया है"). Optional.
+  note          String?
+
+  status ChangeRequestStatus @default(pending)
+
+  needsAdmin      Boolean @default(true) @map("needs_admin")
+  needsSuperAdmin Boolean @default(true) @map("needs_super_admin")
+
+  adminApprovedById      Int?      @map("admin_approved_by_id")
+  adminApprovedAt        DateTime? @map("admin_approved_at")
+  superAdminApprovedById Int?      @map("super_admin_approved_by_id")
+  superAdminApprovedAt   DateTime? @map("super_admin_approved_at")
+
+  // Terminal outcomes. `decidedReason` carries a rejection reason — an officer who
+  // is told only "rejected" learns nothing and will just resubmit.
+  decidedAt     DateTime? @map("decided_at")
+  decidedById   Int?      @map("decided_by_id")
+  decidedReason String?   @map("decided_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  cadre                Cadre @relation(fields: [cadreId], references: [id])
+  submittedBy          User  @relation("ChangeSubmitter", fields: [submittedById], references: [id])
+  adminApprovedBy      User? @relation("ChangeAdminApprover", fields: [adminApprovedById], references: [id])
+  superAdminApprovedBy User? @relation("ChangeSuperAdminApprover", fields: [superAdminApprovedById], references: [id])
+  decidedBy            User? @relation("ChangeDecider", fields: [decidedById], references: [id])
+
+  // The approver queue reads pending-first, newest-first.
+  @@index([status, submittedAt])
+  @@index([cadreId])
+  @@index([submittedById])
+  @@map("cadre_change_requests")
 }
 
 // ─── Auth support ──────────────────────────────────────────────────────────────
