@@ -190,6 +190,12 @@ async function seedCadre(c: SeedCadre, assignedOfficerId: number, reportedById: 
     familyGroupInfo: c.familyGroupInfo ?? null,
     incident: c.incident ?? null,
     assignedOfficerId,
+    // ADR-027. Re-seeding must produce a KNOWN state, and "who last touched this"
+    // is part of it. Without this, a re-seed leaves whoever last edited a cadre
+    // still credited on a record whose values it just overwrote — the profile reads
+    // "अंतिम बदलाव — एडमिन" next to data the admin never entered.
+    lastEditedAt: null,
+    lastEditedById: null,
   };
 
   const existing = await prisma.cadre.findFirst({ where: { name: c.name, phone: c.phone } });
