@@ -50,7 +50,18 @@ data "aws_iam_policy_document" "ecs_task_execution_secrets" {
     sid       = "ReadRuntimeSecret"
     effect    = "Allow"
     actions   = ["secretsmanager:GetSecretValue"]
-    resources = [aws_secretsmanager_secret.app.arn]
+    resources = [
+      aws_secretsmanager_secret.app.arn,
+      # ADR-034. The secret RDS owns, holding the rotating master password. Reading
+      # it here is what removes the hand-copy that broke staging on 2026-07-17
+      # (Backend#17).
+      #
+      # The kms:Decrypt reasoning above still holds: master_user_secret defaults to
+      # the same AWS-managed `aws/secretsmanager` key, so no grant is needed. If
+      # master_user_secret_kms_key_id is ever set to a CMK, this breaks at task
+      # start and needs one.
+      aws_db_instance.main.master_user_secret[0].secret_arn,
+    ]
   }
 }
 

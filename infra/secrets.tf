@@ -18,19 +18,27 @@ resource "aws_secretsmanager_secret" "app" {
   tags = { Name = "${var.project}/${var.environment}" }
 }
 
-# Placeholder values only. The real DATABASE_URL and JWT_SECRET are written by hand
-# after the first apply -- see infra/README.md.
+# Placeholder value only. The real JWT_SECRET is written by hand after the first
+# apply -- see infra/README.md.
+#
+# ADR-034: DATABASE_URL is NO LONGER HERE. It was a hand-assembled copy of the RDS
+# master password, which `manage_master_user_password` rotates every 7 days -- so it
+# was correct only until the first rotation, and staging died at 11:40 IST on
+# 2026-07-17, exactly 7 days after it was written (Backend#17). The task definition
+# now reads DB_PASSWORD straight from the secret RDS owns and composes the URL at
+# container start. There is no copy left to go stale.
+#
+# JWT_SECRET stays: it is a real static secret with no rotating source to read from.
 #
 # ignore_changes on secret_string is load-bearing, not decorative. Without it, the
-# next `terraform apply` would diff the live (rotated) value against the placeholder
-# below and quietly overwrite the real credentials, breaking the running service.
-# Terraform must create this secret version once and never look at it again.
+# next `terraform apply` would diff the live value against the placeholder below and
+# quietly overwrite the real credential, breaking the running service. Terraform
+# must create this secret version once and never look at it again.
 resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
 
   secret_string = jsonencode({
-    DATABASE_URL = "placeholder"
-    JWT_SECRET   = "placeholder"
+    JWT_SECRET = "placeholder"
   })
 
   lifecycle {

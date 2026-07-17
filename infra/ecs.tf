@@ -76,6 +76,17 @@ resource "aws_ecs_task_definition" "backend" {
         # environment == "production", so production cannot enable it by omission
         # OR by accident.
         { name = "MOCK_OTP_ECHO", value = tostring(var.mock_otp_echo) },
+
+        # ADR-034. The non-secret half of the connection string. docker-entrypoint.sh
+        # composes DATABASE_URL from these plus DB_PASSWORD below.
+        #
+        # A hostname is not a secret, and putting it in Secrets Manager would freeze
+        # it under that resource's ignore_changes guard -- the same reasoning as
+        # S3_BUCKET above.
+        { name = "DB_HOST", value = aws_db_instance.main.address },
+        { name = "DB_PORT", value = tostring(aws_db_instance.main.port) },
+        { name = "DB_USER", value = aws_db_instance.main.username },
+        { name = "DB_NAME", value = aws_db_instance.main.db_name },
       ]
 
       # Resolved by the EXECUTION role at container start and injected as ordinary
@@ -85,9 +96,19 @@ resource "aws_ecs_task_definition" "backend" {
       # ECS injects the entire JSON blob as the value, and the failure surfaces at
       # task start, not at plan time.
       secrets = [
+        # ADR-034. Straight from the secret RDS owns and rotates -- NOT a copy.
+        #
+        # DATABASE_URL used to live in sampark/staging as a hand-assembled string
+        # containing this password. `sampark_app` IS the RDS master user and
+        # manage_master_user_password rotates it every 7 days, so the copy was
+        # guaranteed to go stale. It did, on 2026-07-17, exactly 7 days after it was
+        # written (Backend#17).
+        #
+        # Referenced through the resource attribute, never a hardcoded ARN: the
+        # secret is created by RDS, and its name carries a generated suffix.
         {
-          name      = "DATABASE_URL"
-          valueFrom = "${aws_secretsmanager_secret.app.arn}:DATABASE_URL::"
+          name      = "DB_PASSWORD"
+          valueFrom = "${aws_db_instance.main.master_user_secret[0].secret_arn}:password::"
         },
         {
           name      = "JWT_SECRET"
