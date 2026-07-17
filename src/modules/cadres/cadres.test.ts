@@ -12,6 +12,7 @@ const PHONES = ['+919000000010', '+919000000011', '+919000000012'];
 const PAGE_TOKEN = 'PGNFIXTURE';
 const ORIGIN_TOKEN = 'ORGFIXTURE';
 const ALERT_TOKEN = 'ALTFIXTURE';
+const FACET_TOKEN = 'FCTFIXTURE';
 const DUE_NAME = 'TEST CADRE DUE';
 // A cadre reporting on this date is next due 30 days later (ADR-022).
 const DUE_REPORT_AT = new Date('2026-06-01T00:00:00.000Z');
@@ -101,6 +102,24 @@ beforeAll(async () => {
     })),
   });
 
+  // Thana/designation facet fixture (ADR-033). Shaped like the real roster, which is
+  // what the old hardcoded sheet got wrong: thanas are compound ("बीजापुर / गंगालूर",
+  // so equality on "बीजापुर" misses it) and designations are Devanagari, never the
+  // Latin rank acronyms the sheet used to offer.
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: FACET_TOKEN } } });
+  await prisma.cadre.createMany({
+    data: [
+      { n: 1, thana: `${FACET_TOKEN} बीजापुर / गंगालूर`, designation: `${FACET_TOKEN} दस्ते का सदस्य` },
+      { n: 2, thana: `${FACET_TOKEN} दंतेवाड़ा`, designation: `${FACET_TOKEN} सीनियर कैडर` },
+      { n: 3, thana: `${FACET_TOKEN} बीजापुर / गंगालूर`, designation: `${FACET_TOKEN} सीनियर कैडर` },
+    ].map((c) => ({
+      name: `${FACET_TOKEN}-${c.n}`, phone: `+91000000030${c.n}`,
+      thana: c.thana, designation: c.designation,
+      currentAddress: 'Facet fixture', category: 'surrendered' as const,
+      alertLevel: 'normal' as const, aliases: [],
+    })),
+  });
+
   // Reporting-deadline fixture (ADR-022): a cadre with TWO reports. nextReportingDueAt
   // must be computed from the NEWEST (DUE_REPORT_AT), not the older one, + 30 days.
   await prisma.cadre.deleteMany({ where: { name: DUE_NAME } });
@@ -138,6 +157,7 @@ afterAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: PAGE_TOKEN } } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: ORIGIN_TOKEN } } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: ALERT_TOKEN } } });
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: FACET_TOKEN } } });
   await prisma.report.deleteMany({ where: { cadreId: dueCadreId } });
   await prisma.cadre.deleteMany({ where: { name: DUE_NAME } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
@@ -263,6 +283,97 @@ describe('cadres', () => {
     const body = res.json() as ListBody;
     expect(body.total).toBe(1); // only the -C row, not -W or -N
     expect(body.data.every((c) => (c as { alertLevel?: string }).alertLevel === 'critical')).toBe(true);
+    await app.close();
+  });
+
+  // ── ADR-033: multi-value facets, resolved server-side ──────────────────────
+  //
+  // These used to be narrowed client-side over ONE fetched page, so anyone past
+  // page 1 silently vanished from a filtered list.
+
+  it('alertLevel accepts several values at once (critical OR warning)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?search=${ALERT_TOKEN}&alertLevel=critical&alertLevel=warning&pageSize=50`,
+      headers: auth(officerToken),
+    });
+    const body = res.json() as ListBody;
+    expect(body.total).toBe(2); // -C and -W, never -N
+    expect(body.data.map((c) => (c as { alertLevel?: string }).alertLevel).sort())
+      .toEqual(['critical', 'warning']);
+    await app.close();
+  });
+
+  it('thana matches as a substring — "गंगालूर" finds "बीजापुर / गंगालूर"', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?search=${FACET_TOKEN}&thana=${encodeURIComponent('गंगालूर')}&pageSize=50`,
+      headers: auth(officerToken),
+    });
+    const body = res.json() as ListBody;
+    // An equality match would return 0 here — that was the old sheet's bug.
+    expect(body.total).toBe(2);
+    await app.close();
+  });
+
+  it('designation filters on the real Devanagari value, not a Latin acronym', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?search=${FACET_TOKEN}&designation=${encodeURIComponent('सीनियर')}&pageSize=50`,
+      headers: auth(officerToken),
+    });
+    const body = res.json() as ListBody;
+    expect(body.total).toBe(2);
+    await app.close();
+  });
+
+  it('facets AND together, values within a facet OR', async () => {
+    const app = await makeApp();
+    const url =
+      `/api/v1/cadres?search=${FACET_TOKEN}` +
+      `&thana=${encodeURIComponent('गंगालूर')}` +
+      `&designation=${encodeURIComponent('सीनियर')}&pageSize=50`;
+    const res = await app.inject({ method: 'GET', url, headers: auth(officerToken) });
+    const body = res.json() as ListBody;
+    // Only -3 is both in गंगालूर AND a सीनियर कैडर.
+    expect(body.total).toBe(1);
+    expect(body.data[0]!.name).toBe(`${FACET_TOKEN}-3`);
+    await app.close();
+  });
+
+  it('search NARROWS a facet filter rather than widening it', async () => {
+    const app = await makeApp();
+    // If thana were written into the top-level OR that search owns, these would
+    // widen each other and this would return every गंगालूर cadre in the table.
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?search=${FACET_TOKEN}-2&thana=${encodeURIComponent('गंगालूर')}&pageSize=50`,
+      headers: auth(officerToken),
+    });
+    const body = res.json() as ListBody;
+    expect(body.total).toBe(0); // -2 is in दंतेवाड़ा, so the AND is empty
+    await app.close();
+  });
+
+  it('GET /cadres/facets returns distinct real values, and requires auth', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/cadres/facets' })).statusCode).toBe(401);
+
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/cadres/facets', headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { thanas: string[]; designations: string[] };
+
+    // Distinct: two cadres share this thana, it must appear once.
+    const mine = body.thanas.filter((t) => t.startsWith(FACET_TOKEN));
+    expect(mine).toEqual([`${FACET_TOKEN} दंतेवाड़ा`, `${FACET_TOKEN} बीजापुर / गंगालूर`]);
+
+    const desigs = body.designations.filter((d) => d.startsWith(FACET_TOKEN));
+    expect(desigs.sort()).toEqual([`${FACET_TOKEN} दस्ते का सदस्य`, `${FACET_TOKEN} सीनियर कैडर`]);
     await app.close();
   });
 

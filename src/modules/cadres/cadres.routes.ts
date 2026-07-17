@@ -44,6 +44,31 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // Registered before `/cadres/:id`. find-my-way prefers a static segment over a
+  // parametric one regardless of order, but relying on that silently would be a
+  // trap for whoever adds the next route here.
+  app.get(
+    '/cadres/facets',
+    {
+      preHandler: app.authenticate,
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Distinct thana / designation values for the filter sheet',
+        description:
+          'ADR-033. The options the master filter sheet offers, taken from the rows that exist. ' +
+          'The sheet previously hardcoded them, and offered ranks that matched no cadre at all.',
+        security: bearerAuth,
+        response: {
+          200: jsonResponse('Filter facets', {
+            thanas: ['बीजापुर / गंगालूर', 'दंतेवाड़ा'],
+            designations: ['दस्ते का सदस्य', 'सीनियर कैडर'],
+          }),
+        },
+      },
+    },
+    async () => service.facets(),
+  );
+
   app.get(
     '/cadres/:id',
     {

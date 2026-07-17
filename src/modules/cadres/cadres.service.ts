@@ -23,8 +23,15 @@ export interface Paginated<T> {
   hasMore: boolean;
 }
 
+/** ADR-033. The filter sheet's options, taken from the rows that actually exist. */
+export interface CadreFacets {
+  thanas: string[];
+  designations: string[];
+}
+
 export interface CadresService {
   list(query: ResolvedListCadresQuery): Promise<Paginated<WireCadre>>;
+  facets(): Promise<CadreFacets>;
   getById(id: number): Promise<WireCadre>;
   transfer(cadreId: number, toOfficerId: number, actorId: number): Promise<void>;
 }
@@ -93,14 +100,38 @@ export function makeCadresService({ prisma, storage, mediaUrlTtlSeconds }: Cadre
     async list(query) {
       // Soft-delete filter applies to every read.
       const where: Prisma.CadreWhereInput = { deletedAt: null };
-      if (query.category !== undefined && query.category !== 'all') where.category = query.category;
+
+      // ADR-033: multi-valued facets. `all` is the client's "no filter" sentinel, so
+      // its presence anywhere in the selection widens to everything rather than
+      // narrowing to a category literally named "all".
+      const cats = query.category?.filter((c) => c !== 'all');
+      if (cats !== undefined && cats.length > 0 && !query.category!.includes('all')) {
+        where.category = { in: cats as ('surrendered' | 'jail' | 'thana')[] };
+      }
       if (query.filter !== undefined && query.filter !== 'All') where.filter = query.filter;
       // ADR-018: the route has already resolved `me` to a concrete officer id.
       if (query.assignedTo !== undefined) where.assignedOfficerId = query.assignedTo;
       // ADR-019: the two surrendered dashboard tiles differ only by this.
       if (query.surrenderOrigin !== undefined) where.surrenderOrigin = query.surrenderOrigin;
-      // ADR-020: the "सक्रिय अलर्ट" tile drills into critical cadres.
-      if (query.alertLevel !== undefined) where.alertLevel = query.alertLevel;
+      // ADR-020/033: the "सक्रिय अलर्ट" tile drills into critical cadres; the sheet can
+      // select several levels at once.
+      if (query.alertLevel !== undefined) where.alertLevel = { in: query.alertLevel };
+
+      // ADR-033: thana/designation match as substrings, so several chips OR together
+      // within a facet while the facets themselves AND. Kept in `AND` rather than the
+      // top-level `OR`, which text search already owns — writing to `where.OR` here
+      // would make a search term and a thana chip widen each other instead of both
+      // applying.
+      const and: Prisma.CadreWhereInput[] = [];
+      if (query.thana !== undefined) {
+        and.push({ OR: query.thana.map((t) => ({ thana: { contains: t, mode: 'insensitive' as const } })) });
+      }
+      if (query.designation !== undefined) {
+        and.push({
+          OR: query.designation.map((d) => ({ designation: { contains: d, mode: 'insensitive' as const } })),
+        });
+      }
+      if (and.length > 0) where.AND = and;
 
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search.trim();
@@ -146,6 +177,39 @@ export function makeCadresService({ prisma, storage, mediaUrlTtlSeconds }: Cadre
         page: query.page,
         pageSize: query.pageSize,
         hasMore: query.page * query.pageSize < total,
+      };
+    },
+
+    /**
+     * ADR-033. The filter sheet used to offer a hardcoded list of four thanas and
+     * five Latin rank acronyms. Against the real roster the rank chips matched
+     * NOTHING (every designation is Devanagari) and two of the four thana chips
+     * matched nothing either — a filter that always returns zero rows.
+     *
+     * These come from the data instead. Distinct + non-null over the live rows, so
+     * the sheet cannot offer an option that finds nobody, and Design-Docs#7's ~1,790
+     * imported cadres populate it without a code change.
+     */
+    async facets() {
+      const [thanas, designations] = await prisma.$transaction([
+        prisma.cadre.findMany({
+          where: { deletedAt: null },
+          distinct: ['thana'],
+          select: { thana: true },
+          orderBy: { thana: 'asc' },
+        }),
+        prisma.cadre.findMany({
+          where: { deletedAt: null },
+          distinct: ['designation'],
+          select: { designation: true },
+          orderBy: { designation: 'asc' },
+        }),
+      ]);
+      // Both columns are non-nullable, but a blank string is still not an option
+      // worth offering.
+      return {
+        thanas: thanas.map((r) => r.thana).filter((t) => t !== ''),
+        designations: designations.map((r) => r.designation).filter((d) => d !== ''),
       };
     },
 

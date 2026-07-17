@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ALERT_TAGS } from '../../lib/alert-tags.js';
 import { APPROVAL_FIELDS } from './cadre-changes.policy.js';
 
 // ─── Cadre change requests (ADR-026) ──────────────────────────────────────────
@@ -92,7 +93,10 @@ export type ResolvedListChangesQuery = Omit<ListChangesQuery, 'submittedBy'> & {
 // sent here must 400 and say so.
 export const patchCadreBody = z
   .object({
-    alertTag: z.string().trim().max(100).nullable(),
+    // ADR-033: constrained to the catalogue, not a free string. `alertLevel` is
+    // derived from this value, so an unrecognised tag would silently land as
+    // `normal` — a red-looking badge filed under "no alert". Reject it at the edge.
+    alertTag: z.enum(ALERT_TAGS).nullable(),
     aliases: z.array(z.string().trim().min(1).max(100)).max(20),
   })
   .partial()

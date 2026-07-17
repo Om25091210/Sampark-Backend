@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
-import { Prisma, type PrismaClient, type Role, type CadreChangeRequest } from '@prisma/client';
+import { Prisma, type PrismaClient, type Role, type CadreChangeRequest, type AlertLevel } from '@prisma/client';
+import { tagToLevel } from '../../lib/alert-tags.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
@@ -534,15 +535,23 @@ export function makeCadreChangesService({
       const cadre = await prisma.cadre.findFirst({ where: { id: cadreId, deletedAt: null } });
       if (cadre === null) throw notFound('Cadre not found');
 
-      const before = { alertTag: cadre.alertTag, aliases: cadre.aliases, alertDate: cadre.alertDate };
+      const before = {
+        alertTag: cadre.alertTag,
+        aliases: cadre.aliases,
+        alertDate: cadre.alertDate,
+        alertLevel: cadre.alertLevel,
+      };
 
-      // ADR-032: `alertDate` is derived from the tag write, never sent by the client.
-      // It answers "when was this alert recorded", so only a tag change moves it; an
-      // alias-only write must leave it alone. Clearing the tag clears the date — a
-      // cadre with no alert has no alert date.
-      const data: PatchCadreBody & { alertDate?: Date | null } = { ...body };
+      // ADR-032/033: both of these are DERIVED from the tag write, never sent by the
+      // client. `alertDate` answers "when was this alert recorded"; `alertLevel` is
+      // what the tag *means*. Only a tag change moves either — an alias-only write
+      // must leave both alone. Clearing the tag clears the date and drops the level
+      // to `normal`: a cadre with no alert has no alert date and no severity.
+      const data: PatchCadreBody & { alertDate?: Date | null; alertLevel?: AlertLevel } = { ...body };
       if ('alertTag' in body) {
-        data.alertDate = body.alertTag ? new Date() : null;
+        const tag = body.alertTag ?? null;
+        data.alertDate = tag ? new Date() : null;
+        data.alertLevel = tagToLevel(tag);
       }
 
       await prisma.$transaction(async (tx) => {

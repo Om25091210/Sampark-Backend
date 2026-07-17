@@ -57,8 +57,8 @@ async function resetCadre(): Promise<void> {
       hasAadhaar: false, hasBankAccount: false, hasAbProforma: false, hasAgreementLetter: false,
       avatarKey: null,
       aliases: [], alertTag: null,
-      // ADR-032 — derived from alertTag, so it has to reset with it.
-      alertDate: null,
+      // ADR-032/033 — both derived from alertTag, so they reset with it.
+      alertDate: null, alertLevel: 'normal',
       // ADR-027 — reset too, or an earlier test's editor bleeds into the next one's
       // assertion and the suite passes for the wrong reason.
       lastEditedAt: null, lastEditedById: null,
@@ -621,6 +621,52 @@ describe('cadre change requests (ADR-026)', () => {
     await app.close();
   });
 
+  // ── ADR-033: alertLevel is derived from the tag ────────────────────────────
+
+  it('PATCH derives alertLevel from the tag — a critical tag cannot sit on a normal cadre', async () => {
+    const app = await makeApp();
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: 'तत्काल' }, // CRITICAL_TAGS
+    });
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).alertLevel).toBe('critical');
+
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: 'निगरानी' }, // WARNING_TAGS
+    });
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).alertLevel).toBe('warning');
+    await app.close();
+  });
+
+  it('PATCH drops alertLevel to normal when the tag is cleared', async () => {
+    const app = await makeApp();
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: 'तत्काल' },
+    });
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: null },
+    });
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(c.alertLevel).toBe('normal');
+    expect(c.alertTag).toBeNull();
+    await app.close();
+  });
+
+  it('PATCH rejects a tag outside the catalogue — it would silently become normal', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: 'बहुत ज़रूरी' }, // plausible, but not in the catalogue
+    });
+    expect(res.statusCode).toBe(400);
+    // Unchanged: a rejected write must not have moved the level either.
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).alertLevel).toBe('normal');
+    await app.close();
+  });
+
   it('PATCH rejects an approval-gated field instead of silently ignoring it', async () => {
     const app = await makeApp();
     const res = await app.inject({
@@ -636,7 +682,10 @@ describe('cadre change requests (ADR-026)', () => {
   it('PATCH is refused for viewers (403)', async () => {
     const app = await makeApp();
     const res = await app.inject({
-      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(viewerToken), payload: { alertTag: 'x' },
+      // A VALID tag on purpose (ADR-033 made the field an enum): an invalid one
+      // would 400 at the schema before the role check ever runs, and the test would
+      // pass while proving nothing about viewers.
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(viewerToken), payload: { alertTag: 'तत्काल' },
     });
     expect(res.statusCode).toBe(403);
     await app.close();
