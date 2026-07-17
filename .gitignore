@@ -20,3 +20,4 @@ infra/crash.log
 
 # NOT ignored, and committed on purpose:
 #   infra/.terraform.lock.hcl   -- pins provider checksums; must be in git
+infra/.canary-build/

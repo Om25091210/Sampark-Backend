@@ -6,5 +6,12 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+    # ADR-035. Builds the readiness canary's zip from infra/canary/readyz.js, so the
+    # probe script is reviewable source in this repo rather than a blob uploaded by
+    # hand to S3.
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.4"
+    }
   }
 }

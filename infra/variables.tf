@@ -117,3 +117,19 @@ variable "github_branch" {
   type        = string
   default     = "main"
 }
+
+# ---------------------------------------------------------------------------
+# Alerting (ADR-035). Consumed by monitoring.tf.
+# ---------------------------------------------------------------------------
+
+variable "alert_email" {
+  description = "Address the readiness alarm notifies. AWS sends a one-time confirmation mail; until it is clicked the subscription delivers nothing."
+  type        = string
+
+  validation {
+    # An empty address would apply cleanly and page nobody -- the exact failure
+    # mode this alarm exists to end.
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email))
+    error_message = "alert_email must be a real address: the alarm is useless without a confirmed destination."
+  }
+}

@@ -139,5 +139,29 @@ jobs:
           wait-for-service-stability: true
           wait-for-minutes: 10
 
+      # ADR-035. `wait-for-service-stability` above proves the CONTAINERS started, not
+      # that the app can serve a request -- on 2026-07-17 it reported STABLE while
+      # every DB-backed route returned 500, because /healthz (liveness) stayed 200.
+      # Assert readiness before calling the deploy a success. `-f` fails on any non-2xx
+      # (the 503 that STABLE hid), and the body check catches a 200 that regressed into
+      # reporting not_ready.
+      - name: Assert /readyz after deploy
+        env:
+          ALB_DNS: sampark-staging-alb-2106262233.ap-south-1.elb.amazonaws.com
+        run: |
+          for i in 1 2 3 4 5; do
+            if body=$(curl -fsS "http://${ALB_DNS}/readyz"); then
+              echo "readyz: ${body}"
+              case "${body}" in
+                *'"status":"ready"'*) echo "readiness confirmed"; exit 0 ;;
+                *) echo "::error::/readyz returned 200 but not ready: ${body}"; exit 1 ;;
+              esac
+            fi
+            echo "readyz attempt ${i} failed; retrying in 15s"
+            sleep 15
+          done
+          echo "::error::/readyz did not become ready after deploy"
+          exit 1
+
       - name: Deployed image
         run: echo "Deployed ${ECR_REPOSITORY}:${{ steps.sha.outputs.short }} to ${ECS_SERVICE}"

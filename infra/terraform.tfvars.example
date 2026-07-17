@@ -35,3 +35,6 @@
 #   repo:Om25091210/Sampark-Backend:ref:refs/heads/*
 # github_repository = "Om25091210/Sampark-Backend"
 # github_branch     = "main"
+
+# ADR-035: where the readiness alarm shouts. Confirm the AWS subscription mail once.
+alert_email = "you@example.com"
