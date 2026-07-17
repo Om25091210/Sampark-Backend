@@ -534,14 +534,23 @@ export function makeCadreChangesService({
       const cadre = await prisma.cadre.findFirst({ where: { id: cadreId, deletedAt: null } });
       if (cadre === null) throw notFound('Cadre not found');
 
-      const before = { alertTag: cadre.alertTag, aliases: cadre.aliases };
+      const before = { alertTag: cadre.alertTag, aliases: cadre.aliases, alertDate: cadre.alertDate };
+
+      // ADR-032: `alertDate` is derived from the tag write, never sent by the client.
+      // It answers "when was this alert recorded", so only a tag change moves it; an
+      // alias-only write must leave it alone. Clearing the tag clears the date — a
+      // cadre with no alert has no alert date.
+      const data: PatchCadreBody & { alertDate?: Date | null } = { ...body };
+      if ('alertTag' in body) {
+        data.alertDate = body.alertTag ? new Date() : null;
+      }
 
       await prisma.$transaction(async (tx) => {
         // A tag/alias write is still someone touching the record (ADR-027) — an
         // officer checking "who last edited this" should see it.
         await tx.cadre.update({
           where: { id: cadreId },
-          data: { ...body, lastEditedAt: new Date(), lastEditedById: actor.id },
+          data: { ...data, lastEditedAt: new Date(), lastEditedById: actor.id },
         });
         await writeAuditLog(tx, {
           actorId: actor.id,
@@ -549,13 +558,13 @@ export function makeCadreChangesService({
           entityType: 'cadre',
           entityId: String(cadreId),
           before,
-          after: body,
+          after: data,
         });
         await writeOutboxEvent(tx, {
           aggregateType: 'cadre',
           aggregateId: String(cadreId),
           eventType: 'cadre.updated',
-          payload: { cadreId, fields: Object.keys(body), actorId: actor.id },
+          payload: { cadreId, fields: Object.keys(data), actorId: actor.id },
         });
       });
     },

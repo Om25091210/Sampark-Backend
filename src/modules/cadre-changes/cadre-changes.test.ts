@@ -57,6 +57,8 @@ async function resetCadre(): Promise<void> {
       hasAadhaar: false, hasBankAccount: false, hasAbProforma: false, hasAgreementLetter: false,
       avatarKey: null,
       aliases: [], alertTag: null,
+      // ADR-032 — derived from alertTag, so it has to reset with it.
+      alertDate: null,
       // ADR-027 — reset too, or an earlier test's editor bleeds into the next one's
       // assertion and the suite passes for the wrong reason.
       lastEditedAt: null, lastEditedById: null,
@@ -563,6 +565,59 @@ describe('cadre change requests (ADR-026)', () => {
     expect(c.aliases).toEqual(['बब्बू']);
     // No approval was created — these are outside the chain by design.
     expect(await prisma.cadreChangeRequest.count({ where: { cadreId } })).toBe(0);
+    await app.close();
+  });
+
+  // ── ADR-032: alertDate is derived from the tag write ───────────────────────
+  //
+  // The card labels this date "अलर्ट दर्ज होने की तारीख". Before ADR-032 nothing
+  // wrote the column at all, so the label would have described a seed value that
+  // never moved — a claim the app could not honour (Sampark-Mobile#6).
+
+  it('PATCH stamps alertDate when a tag is set', async () => {
+    const app = await makeApp();
+    const before = Date.now();
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: 'तत्काल' },
+    });
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(c.alertDate).not.toBeNull();
+    expect(c.alertDate!.getTime()).toBeGreaterThanOrEqual(before);
+    await app.close();
+  });
+
+  it('PATCH clears alertDate when the tag is cleared — no alert, no alert date', async () => {
+    const app = await makeApp();
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: 'तत्काल' },
+    });
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: null },
+    });
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(c.alertTag).toBeNull();
+    expect(c.alertDate).toBeNull();
+    await app.close();
+  });
+
+  it('PATCH leaves alertDate untouched on an alias-only write', async () => {
+    const app = await makeApp();
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { alertTag: 'तत्काल' },
+    });
+    const stamped = (await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).alertDate;
+
+    await app.inject({
+      method: 'PATCH', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken),
+      payload: { aliases: ['बब्बू'] },
+    });
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    // Renaming someone is not re-recording their alert.
+    expect(c.alertDate).toEqual(stamped);
     await app.close();
   });
 

@@ -52,7 +52,11 @@ interface SeedCadre {
   designation: string;
   category: 'surrendered' | 'jail' | 'thana';
   alertLevel: 'critical' | 'warning' | 'normal';
-  alertDate: string;
+  // ADR-032. `alertTag` and `alertDate` are a pair: both set, or neither. Seed used
+  // to write a date while leaving the tag null, so every seeded row carried an alert
+  // date for an alert that did not exist. A `normal` cadre has no alert, so neither.
+  alertTag?: string;
+  alertDate?: string;
   aliases: string[];
   verificationOffice: string;
   supervisoryOffice: string;
@@ -76,7 +80,7 @@ const CADRES: SeedCadre[] = [
     currentAddress: 'मझीवाडा थाना गंगालूर जिला बीजापुर छ०ग०',
     permanentAddress: 'मझीवाडा गंगालूर जिला बीजापुर',
     designation: 'पश्चिम बस्तर डीवीजन डीएचसीएम (प्लाटून न०12 कमांडर)',
-    category: 'surrendered', alertLevel: 'critical', alertDate: '2026-05-16',
+    category: 'surrendered', alertLevel: 'critical', alertTag: 'सक्रिय अलर्ट', alertDate: '2026-05-16',
     aliases: ['बब्बू', 'माडू', 'B-12 कमांडर'],
     verificationOffice: 'पुलिस अधीक्षक बीजापुर',
     supervisoryOffice: 'पुलिस अधीक्षक बीजापुर',
@@ -98,7 +102,7 @@ const CADRES: SeedCadre[] = [
     currentAddress: 'ग्राम धनोरा, थाना नारायणपुर, जिला नारायणपुर',
     permanentAddress: 'ग्राम धनोरा, जिला नारायणपुर, छत्तीसगढ़',
     designation: 'दस्ते का सदस्य',
-    category: 'thana', alertLevel: 'normal', alertDate: '2026-06-02',
+    category: 'thana', alertLevel: 'normal',
     aliases: [],
     verificationOffice: 'पुलिस अधीक्षक नारायणपुर',
     supervisoryOffice: 'पुलिस अधीक्षक नारायणपुर',
@@ -117,7 +121,7 @@ const CADRES: SeedCadre[] = [
     currentAddress: 'ग्राम गोमपाड, थाना दंतेवाड़ा, जिला दंतेवाड़ा',
     permanentAddress: 'ग्राम गोमपाड, जिला दंतेवाड़ा, छत्तीसगढ़',
     designation: 'महिला संगठन सदस्य',
-    category: 'surrendered', alertLevel: 'warning', alertDate: '2026-05-28',
+    category: 'surrendered', alertLevel: 'warning', alertTag: 'नज़र रखें', alertDate: '2026-05-28',
     aliases: [],
     verificationOffice: 'पुलिस अधीक्षक दंतेवाड़ा',
     supervisoryOffice: 'पुलिस अधीक्षक दंतेवाड़ा',
@@ -137,7 +141,7 @@ const CADRES: SeedCadre[] = [
     currentAddress: 'ग्राम छिंदगढ़, थाना सुकमा, जिला सुकमा',
     permanentAddress: 'ग्राम छिंदगढ़, जिला सुकमा, छत्तीसगढ़',
     designation: 'सीनियर कैडर',
-    category: 'jail', alertLevel: 'critical', alertDate: '2026-06-10',
+    category: 'jail', alertLevel: 'critical', alertTag: 'सक्रिय अलर्ट', alertDate: '2026-06-10',
     aliases: [],
     verificationOffice: 'पुलिस अधीक्षक सुकमा',
     supervisoryOffice: 'पुलिस अधीक्षक सुकमा',
@@ -172,7 +176,8 @@ async function seedCadre(c: SeedCadre, assignedOfficerId: number, reportedById: 
     designation: c.designation,
     category: c.category,
     alertLevel: c.alertLevel,
-    alertDate: new Date(c.alertDate),
+    alertTag: c.alertTag ?? null,
+    alertDate: c.alertDate ? new Date(c.alertDate) : null,
     aliases: [...c.aliases],
     verificationOffice: c.verificationOffice,
     supervisoryOffice: c.supervisoryOffice,
