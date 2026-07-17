@@ -234,19 +234,27 @@ resource "aws_cloudwatch_metric_alarm" "readyz_failed" {
       3. Did the RDS password rotate? ADR-034 should make that a non-event.
   EOT
 
+  # SuccessPercent, NOT Failed. This distinction is load-bearing and was found by
+  # watching the live metric: Synthetics emits `Failed` ONLY on a failing run and
+  # nothing on success, so an alarm on `Failed` with treat_missing_data=breaching
+  # sticks in ALARM forever on a HEALTHY canary -- a permanently-red alarm, which
+  # trains everyone to ignore it and rebuilds the "signal nobody reads" failure this
+  # file exists to end. `SuccessPercent` is emitted on EVERY run (0 on failure, 100
+  # on success), so it distinguishes healthy from failing from missing.
   namespace   = "CloudWatchSynthetics"
-  metric_name = "Failed"
+  metric_name = "SuccessPercent"
   dimensions  = { CanaryName = aws_synthetics_canary.readyz.name }
 
-  statistic           = "Sum"
+  statistic           = "Average"
   period              = 900 # matches the 15-minute schedule: one run per period
   evaluation_periods  = 2   # ~30 min. Two consecutive failures, not one blip.
   datapoints_to_alarm = 2
-  threshold           = 1
-  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = 100
+  comparison_operator = "LessThanThreshold" # < 100% success = a run failed
 
-  # A canary that stops reporting is ALSO a failure. The default ("missing") would
-  # treat a dead prober as fine -- rebuilding, exactly, the blind spot this replaces.
+  # A canary that stops reporting is ALSO a failure -- SuccessPercent goes absent
+  # when the prober dies. The default ("missing") would treat a dead prober as fine,
+  # rebuilding exactly the blind spot this replaces.
   treat_missing_data = "breaching"
 
   alarm_actions = [aws_sns_topic.alerts.arn]
