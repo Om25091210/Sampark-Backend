@@ -221,6 +221,31 @@ describe('cadres', () => {
     await app.close();
   });
 
+  it('search matches the register serial number (BE#15)', async () => {
+    const app = await makeApp();
+    // Self-contained: ALPHA must stay serial-less for the "absent when unset" test,
+    // so this makes its own row and cleans it up.
+    const serial = 'SNTEST/2026/0001';
+    const c = await prisma.cadre.create({
+      data: {
+        name: 'SN SEARCH FIXTURE', phone: '+910000000555', thana: 'x',
+        currentAddress: 'x', designation: 'x', category: 'thana', alertLevel: 'normal',
+        aliases: [], serialNumber: serial,
+      },
+    });
+    try {
+      // A fragment of the serial must find it — an officer reads a partial off the register.
+      const res = await app.inject({
+        method: 'GET', url: '/api/v1/cadres?search=SNTEST&pageSize=50', headers: auth(officerToken),
+      });
+      const body = res.json() as ListBody;
+      expect(body.data.some((r) => (r as { serialNumber?: string }).serialNumber === serial)).toBe(true);
+    } finally {
+      await prisma.cadre.delete({ where: { id: c.id } });
+      await app.close();
+    }
+  });
+
   it('paginates (pageSize=2) over its own fixture, not the whole table', async () => {
     const app = await makeApp();
 

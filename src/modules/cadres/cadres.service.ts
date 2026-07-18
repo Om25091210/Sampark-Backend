@@ -144,6 +144,9 @@ export function makeCadresService({ prisma, storage, mediaUrlTtlSeconds }: Cadre
             { name: { contains: raw, mode: 'insensitive' } },
             { thana: { contains: raw, mode: 'insensitive' } },
             { designation: { contains: raw, mode: 'insensitive' } },
+            // BE#15. The register serial (ADR-025) is what an officer reads off the
+            // paper record — searching "BJP/2025/0001" or just "0001" must find it.
+            { serialNumber: { contains: raw, mode: 'insensitive' } },
           ];
         }
       }
