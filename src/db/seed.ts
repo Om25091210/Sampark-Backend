@@ -1,5 +1,16 @@
 import { PrismaClient } from '@prisma/client';
 import { createQueue } from './queue.js';
+import { composeDatabaseUrl } from '../scripts/print-database-url.js';
+
+// ADR-034/036. An `ecs execute-command` session inherits the task's DB_* parts but
+// NOT the DATABASE_URL the entrypoint composed into the main process — so a manual
+// re-seed inside the container would fail on a missing URL. Compose it here from the
+// parts when absent, before PrismaClient connects (it reads the env lazily, on the
+// first query), so `node dist/db/seed.js` just works with no quoting gymnastics.
+// A literal DATABASE_URL still wins: local dev and CI are untouched.
+if (!process.env.DATABASE_URL && process.env.DB_PASSWORD) {
+  process.env.DATABASE_URL = composeDatabaseUrl();
+}
 
 // Idempotent seed — safe to re-run. Users are upserted by their unique phone;
 // cadres by (name, phone); reports by their idempotency key. This is the single
