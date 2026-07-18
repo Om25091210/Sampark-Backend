@@ -64,7 +64,9 @@ function toColumn(field: string, v: JsonValue): unknown {
   return v;
 }
 
-const DATE_FIELDS = new Set(['surrenderDate']);
+// ADR-036: dateOfBirth joins surrenderDate here — both arrive as ISO strings in the
+// change JSON and must become Date objects before Prisma writes the column.
+const DATE_FIELDS = new Set(['surrenderDate', 'dateOfBirth']);
 
 function sameValue(a: JsonValue, b: JsonValue): boolean {
   return JSON.stringify(a) === JSON.stringify(b);

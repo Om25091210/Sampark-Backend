@@ -36,6 +36,15 @@ const fieldValue = {
   // a path the client invents: an unchecked string here would let a caller point a
   // cadre's photo at any object in the bucket.
   avatarKey: z.string().trim().min(1).max(1024).nullable(),
+  // ADR-036. An ISO datetime like surrenderDate; the service coerces it to a Date
+  // (DATE_FIELDS) and the column is `@db.Date`, so only the date part is stored.
+  // A future birth date is not validated here — it is nonsensical but harmless, and
+  // the register may carry a bad value the import must round-trip faithfully rather
+  // than reject.
+  dateOfBirth: z.string().datetime({ offset: true }).nullable(),
+  fatherName: z.string().trim().max(200).nullable(),
+  motherName: z.string().trim().max(200).nullable(),
+  spouseName: z.string().trim().max(200).nullable(),
 } as const satisfies Record<(typeof APPROVAL_FIELDS)[number], z.ZodTypeAny>;
 
 export const changeableFieldsSchema = z.object(fieldValue).partial();

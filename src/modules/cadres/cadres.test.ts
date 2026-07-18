@@ -52,6 +52,9 @@ beforeAll(async () => {
       name: 'TEST CADRE ALPHA', phone: '+910000000000', thana: 'बीजापुर सदर',
       currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
       alertLevel: 'normal', aliases: ['alpha-x'], assignedOfficerId: officerAId,
+      // ADR-036. A fixed birth date so the derived age is assertable, plus relations.
+      dateOfBirth: new Date('1990-06-15'), fatherName: 'पिता आल्फा',
+      motherName: 'माता आल्फा', spouseName: 'जीवनसाथी आल्फा',
     },
   });
   cadreId = cadre.id;
@@ -163,6 +166,15 @@ afterAll(async () => {
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });
+
+// ADR-036. True if today (UTC) is before June 15 — i.e. the 06-15 birthday has not
+// happened yet this year, so the derived age is one less than the year difference.
+// Mirrors deriveAge's own comparison so the assertion stays correct on any run date.
+function isBeforeJun15Today(): boolean {
+  const now = new Date();
+  const m = now.getUTCMonth();
+  return m < 5 || (m === 5 && now.getUTCDate() < 15);
+}
 
 interface ListBody {
   data: Array<{ id: number; category: string; surrenderOrigin?: string } & Record<string, unknown>>;
@@ -409,6 +421,35 @@ describe('cadres', () => {
     const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ id: cadreId, name: 'TEST CADRE ALPHA', category: 'surrendered' });
+    await app.close();
+  });
+
+  it('serves dateOfBirth, derived age, and the relation names (ADR-036)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const c = res.json() as {
+      dateOfBirth?: string; age?: number; fatherName?: string; motherName?: string; spouseName?: string;
+    };
+    // Date part only — no spurious time component on the wire.
+    expect(c.dateOfBirth).toBe('1990-06-15');
+    // Derived, not stored: whole years from 1990-06-15 to today.
+    const expected = new Date().getUTCFullYear() - 1990 - (isBeforeJun15Today() ? 1 : 0);
+    expect(c.age).toBe(expected);
+    expect(c.fatherName).toBe('पिता आल्फा');
+    expect(c.motherName).toBe('माता आल्फा');
+    expect(c.spouseName).toBe('जीवनसाथी आल्फा');
+    await app.close();
+  });
+
+  it('a cadre with no birth date has neither dateOfBirth nor age (ADR-036)', async () => {
+    const app = await makeApp();
+    // The ALERT fixtures carry no dateOfBirth.
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/cadres?search=${ALERT_TOKEN}&pageSize=1`, headers: auth(officerToken),
+    });
+    const row = (res.json() as ListBody).data[0] as { dateOfBirth?: string; age?: number };
+    expect(row.dateOfBirth).toBeUndefined();
+    expect(row.age).toBeUndefined();
     await app.close();
   });
 

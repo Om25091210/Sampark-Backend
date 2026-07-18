@@ -56,6 +56,8 @@ async function resetCadre(): Promise<void> {
       phone: ORIGINAL_PHONE, currentAddress: ORIGINAL_ADDRESS,
       hasAadhaar: false, hasBankAccount: false, hasAbProforma: false, hasAgreementLetter: false,
       avatarKey: null,
+      // ADR-036 — reset or a prior test's DOB/relations bleed into the next assertion.
+      dateOfBirth: null, fatherName: null, motherName: null, spouseName: null,
       aliases: [], alertTag: null,
       // ADR-032/033 — both derived from alertTag, so they reset with it.
       alertDate: null, alertLevel: 'normal',
@@ -182,6 +184,39 @@ describe('cadre change requests (ADR-026)', () => {
     // The row exists even though nobody approved it — an unapproved-but-applied
     // edit still belongs in history.
     expect(await prisma.cadreChangeRequest.count({ where: { id: req.id } })).toBe(1);
+    await app.close();
+  });
+
+  // ── ADR-036: dateOfBirth + relations go through the approval chain ──────────
+
+  it('applies dateOfBirth (as a Date) and the three relation names', async () => {
+    const app = await makeApp();
+    const req = await submit(app, superToken, {
+      dateOfBirth: '1992-03-25T00:00:00.000Z',
+      fatherName: 'राम सिंह',
+      motherName: 'गीता देवी',
+      spouseName: 'सुनीता',
+    });
+    expect(req.status).toBe('applied');
+
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    // Coerced to a real Date (DATE_FIELDS), not left a string.
+    expect(c.dateOfBirth).toBeInstanceOf(Date);
+    expect(c.dateOfBirth?.toISOString().slice(0, 10)).toBe('1992-03-25');
+    expect(c.fatherName).toBe('राम सिंह');
+    expect(c.motherName).toBe('गीता देवी');
+    expect(c.spouseName).toBe('सुनीता');
+    await app.close();
+  });
+
+  it('rejects a non-datetime dateOfBirth at submit (before any approval)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/changes`, headers: auth(superToken),
+      payload: { changes: { dateOfBirth: '1992-03-25' } }, // date-only, not ISO datetime
+    });
+    // The schema wants an offset datetime; a bad value must fail at the edge, not at apply.
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 

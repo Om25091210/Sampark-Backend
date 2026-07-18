@@ -65,6 +65,14 @@ export interface WireCadre {
   regiment?: string;
   familyGroupInfo?: string;
   subDivision?: string;
+  // ADR-036. Date of birth (ISO date), and `age` DERIVED from it on read — never a
+  // stored int, which would be wrong the day after it was written. Both absent when
+  // no birth date is on file. `age` is read-only: the client edits `dateOfBirth`.
+  dateOfBirth?: string;
+  age?: number;
+  fatherName?: string;
+  motherName?: string;
+  spouseName?: string;
   // ADR-029. The four hardcopy documents, INDIVIDUALLY (ADR-026 shipped them as one
   // flag; the client asked for them apart, and "the paperwork exists" is
   // unanswerable when three of four are on file). Always present — NOT NULL
@@ -102,6 +110,21 @@ export interface WireCadre {
 // ADR-022. Fixed monthly reporting cadence. No per-category rules for now — the
 // simplest thing that works; revisit if it proves wrong.
 export const REPORTING_CADENCE_DAYS = 30;
+
+// ADR-036. Whole years from a birth date to today, in UTC. Age is derived on every
+// read so it can never go stale — a stored int is wrong the day after a birthday and
+// has no way to know. Returns undefined for no birth date, and for a birth date in
+// the future (a bad import value should not surface as a negative age).
+export function deriveAge(dateOfBirth: Date | null, now: Date = new Date()): number | undefined {
+  if (dateOfBirth === null) return undefined;
+  let age = now.getUTCFullYear() - dateOfBirth.getUTCFullYear();
+  const monthDelta = now.getUTCMonth() - dateOfBirth.getUTCMonth();
+  // Not had this year's birthday yet → subtract one.
+  if (monthDelta < 0 || (monthDelta === 0 && now.getUTCDate() < dateOfBirth.getUTCDate())) {
+    age -= 1;
+  }
+  return age < 0 ? undefined : age;
+}
 
 /** ADR-027. What the caller must supply so `pendingFields` / `lastEditedBy` are real. */
 export interface CadreEditContext {
@@ -165,6 +188,13 @@ export function toWireCadre(
     regiment: c.regiment ?? undefined,
     familyGroupInfo: c.familyGroupInfo ?? undefined,
     subDivision: c.subDivision ?? undefined,
+    // ADR-036. `@db.Date` stores midnight UTC; slice to the date part so the wire
+    // carries `1990-05-16`, not a spurious `T00:00:00.000Z` the client must trim.
+    dateOfBirth: c.dateOfBirth?.toISOString().slice(0, 10),
+    age: deriveAge(c.dateOfBirth),
+    fatherName: c.fatherName ?? undefined,
+    motherName: c.motherName ?? undefined,
+    spouseName: c.spouseName ?? undefined,
     hasAadhaar: c.hasAadhaar,
     hasBankAccount: c.hasBankAccount,
     hasAbProforma: c.hasAbProforma,

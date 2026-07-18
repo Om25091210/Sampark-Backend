@@ -53,6 +53,13 @@ export const APPROVAL_FIELDS = [
   // proposed). Approval-gated for the same reason as the name: it is a claim about
   // who this person IS, and the approver is shown the proposed image to judge it.
   'avatarKey',
+  // ADR-036. Date of birth and immediate family. Facts of record about a person,
+  // signed off like the name — a wrong birth date or parent's name is exactly the
+  // kind of identity claim the approval chain exists to catch.
+  'dateOfBirth',
+  'fatherName',
+  'motherName',
+  'spouseName',
 ] as const;
 
 export type DirectField = (typeof DIRECT_FIELDS)[number];

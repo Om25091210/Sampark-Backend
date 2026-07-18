@@ -140,6 +140,20 @@ model Cadre {
   regiment           String?
   familyGroupInfo    String?        @map("family_group_info")
   subDivision        String?        @map("sub_division")
+  // ADR-036. Date of birth, stored — age is DERIVED from it on read, never stored.
+  // A stored age is wrong the day after it is written and has no way to know it;
+  // a birth date is a fact that does not rot. Nullable: existing rows predate it and
+  // the ~1,790-row import supplies it later. Manually enterable now (BE#6), not
+  // gated on the import.
+  dateOfBirth        DateTime?      @map("date_of_birth") @db.Date
+  // ADR-036. Immediate family, as three plain columns (BE#7). Deliberately NOT a
+  // child table or a repeatable relation list: the register records exactly these
+  // three names, and a `cadre_relations` table would be schema weight for a
+  // fixed-arity fact. `familyGroupInfo` above stays — it is the free-text
+  // "who they live with" note, a different thing from a parent's name.
+  fatherName         String?        @map("father_name")
+  motherName         String?        @map("mother_name")
+  spouseName         String?        @map("spouse_name")
   // ADR-029. The four hardcopy documents, tracked INDIVIDUALLY. ADR-026 shipped
   // these as one `hardcopyDocsExist` boolean; the client asked for them separately,
   // and they were right — "the paperwork exists" is unanswerable when the Aadhaar

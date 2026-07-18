@@ -70,6 +70,11 @@ interface SeedCadre {
   subDivision?: string;
   familyGroupInfo?: string;
   incident?: string;
+  // ADR-036. YYYY-MM-DD. Manually enterable; the import fills the rest.
+  dateOfBirth?: string;
+  fatherName?: string;
+  motherName?: string;
+  spouseName?: string;
   reports: SeedReport[];
 }
 
@@ -81,6 +86,7 @@ const CADRES: SeedCadre[] = [
     permanentAddress: 'मझीवाडा गंगालूर जिला बीजापुर',
     designation: 'पश्चिम बस्तर डीवीजन डीएचसीएम (प्लाटून न०12 कमांडर)',
     category: 'surrendered', alertLevel: 'critical', alertTag: 'सक्रिय अलर्ट', alertDate: '2026-05-16',
+    dateOfBirth: '1989-07-14', fatherName: 'सुखराम माडवी', motherName: 'सुकमती माडवी', spouseName: 'ललिता माडवी',
     aliases: ['बब्बू', 'माडू', 'B-12 कमांडर'],
     verificationOffice: 'पुलिस अधीक्षक बीजापुर',
     supervisoryOffice: 'पुलिस अधीक्षक बीजापुर',
@@ -122,6 +128,7 @@ const CADRES: SeedCadre[] = [
     permanentAddress: 'ग्राम गोमपाड, जिला दंतेवाड़ा, छत्तीसगढ़',
     designation: 'महिला संगठन सदस्य',
     category: 'surrendered', alertLevel: 'warning', alertTag: 'नज़र रखें', alertDate: '2026-05-28',
+    dateOfBirth: '1995-11-02', fatherName: 'रामधर नेताम', motherName: 'फूलबाई नेताम', spouseName: 'सुरेश नेताम',
     aliases: [],
     verificationOffice: 'पुलिस अधीक्षक दंतेवाड़ा',
     supervisoryOffice: 'पुलिस अधीक्षक दंतेवाड़ा',
@@ -189,6 +196,12 @@ async function seedCadre(c: SeedCadre, assignedOfficerId: number, reportedById: 
     subDivision: c.subDivision ?? null,
     familyGroupInfo: c.familyGroupInfo ?? null,
     incident: c.incident ?? null,
+    // ADR-036. `@db.Date` — a bare YYYY-MM-DD becomes midnight UTC, which is what
+    // we want (no time component to drift across zones).
+    dateOfBirth: c.dateOfBirth ? new Date(c.dateOfBirth) : null,
+    fatherName: c.fatherName ?? null,
+    motherName: c.motherName ?? null,
+    spouseName: c.spouseName ?? null,
     assignedOfficerId,
     // ADR-027. Re-seeding must produce a KNOWN state, and "who last touched this"
     // is part of it. Without this, a re-seed leaves whoever last edited a cadre
