@@ -7,7 +7,12 @@ import { signAccessToken } from '../../lib/tokens.js';
 
 const prisma = new PrismaClient();
 const config = testConfig();
-const PHONES = ['+919000000010', '+919000000011', '+919000000012'];
+const PHONES = ['+919000000010', '+919000000011', '+919000000012', '+919000000013'];
+// ADR-038 import fixtures: unique name + serial prefixes so cleanup and search scope
+// to this file's own rows (tests share one DB, run in parallel).
+const IMPORT_TOKEN = 'IMPFIXTURE';
+// SDR-007 machine key used by the import tests (>= 32 chars, like a real one).
+const IMPORT_KEY = 'import-test-key-that-is-32-plus-characters-long';
 // Unique, searchable name prefixes for this file's own fixtures — see beforeAll.
 const PAGE_TOKEN = 'PGNFIXTURE';
 const ORIGIN_TOKEN = 'ORGFIXTURE';
@@ -21,10 +26,12 @@ const DUE_EXPECTED = new Date('2026-07-01T00:00:00.000Z').toISOString();
 let adminId = 0;
 let officerAId = 0;
 let officerBId = 0;
+let superAdminId = 0;
 let cadreId = 0;
 let dueCadreId = 0;
 let adminToken = '';
 let officerToken = '';
+let superAdminToken = '';
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 const makeApp = (): Promise<FastifyInstance> => buildApp({ config, prisma, logger: false });
@@ -42,9 +49,14 @@ beforeAll(async () => {
     where: { phone: PHONES[2] }, update: { deletedAt: null, role: 'officer', name: 'Test Officer B' },
     create: { phone: PHONES[2]!, name: 'Test Officer B', role: 'officer' },
   });
+  const superAdmin = await prisma.user.upsert({
+    where: { phone: PHONES[3] }, update: { deletedAt: null, role: 'super_admin', name: 'Test Super Admin' },
+    create: { phone: PHONES[3]!, name: 'Test Super Admin', role: 'super_admin' },
+  });
   adminId = admin.id;
   officerAId = officerA.id;
   officerBId = officerB.id;
+  superAdminId = superAdmin.id;
 
   await prisma.cadre.deleteMany({ where: { name: 'TEST CADRE ALPHA' } });
   const cadre = await prisma.cadre.create({
@@ -144,6 +156,7 @@ beforeAll(async () => {
 
   adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
   officerToken = await signAccessToken({ sub: officerAId, role: 'officer' }, config.jwtSecret, '15m');
+  superAdminToken = await signAccessToken({ sub: superAdminId, role: 'super_admin' }, config.jwtSecret, '15m');
 });
 
 afterEach(async () => {
@@ -163,6 +176,14 @@ afterAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: FACET_TOKEN } } });
   await prisma.report.deleteMany({ where: { cadreId: dueCadreId } });
   await prisma.cadre.deleteMany({ where: { name: DUE_NAME } });
+  // ADR-038 import fixtures + their audit rows.
+  const imported = await prisma.cadre.findMany({
+    where: { name: { startsWith: IMPORT_TOKEN } }, select: { id: true },
+  });
+  await prisma.auditLog.deleteMany({
+    where: { entityType: 'cadre', entityId: { in: imported.map((c) => String(c.id)) } },
+  });
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: IMPORT_TOKEN } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });
@@ -618,6 +639,236 @@ describe('cadres', () => {
     });
     expect(res.statusCode).toBe(400);
     expect((res.json() as { error: { code: string } }).error.code).toBe('INVALID_OFFICER');
+    await app.close();
+  });
+});
+
+// ── Bulk historical import (ADR-038 / SDR-007) ────────────────────────────────
+describe('cadres import (ADR-038)', () => {
+  // An app whose config carries the SDR-007 machine key, so the key path is live.
+  const keyedApp = (): Promise<FastifyInstance> =>
+    buildApp({ config: testConfig({ importApiKey: IMPORT_KEY }), prisma, logger: false });
+  const importAuth = { 'x-sampark-import-key': IMPORT_KEY };
+  const url = '/api/v1/cadres/import';
+
+  // A row exercising every column, so the GET-verify can prove each landed.
+  const fullRow = (serialNumber: string, name: string) => ({
+    serialNumber,
+    name,
+    phone: '9812300001',
+    thana: 'भोपालपटनम',
+    currentAddress: 'अस्पतालपारा बीजापुर',
+    permanentAddress: 'बन्देपारा',
+    designation: 'एसीएम sector member',
+    category: 'surrendered',
+    alertLevel: 'normal',
+    filter: 'ACM',
+    surrenderDate: '2009-03-22',
+    surrenderLocation: 'मद्देड़ जिला बीजापुर',
+    surrenderOrigin: 'district',
+    surrenderYear: '2009',
+    regiment: 'मद्देड़ क्षेत्र एलओएस',
+    subDivision: 'भोपालपटनम',
+    fatherName: 'मुण्डैया मिच्चा',
+    motherName: null,
+    spouseName: null,
+    incident: '(सुधार नोट)',
+    gender: 'male',
+    caste: 'मुरिया',
+    dateOfBirth: '1982-01-15',
+    aliases: ['उपनाम एक'],
+  });
+
+  interface ImportResp {
+    results: Array<{ serialNumber: string | null; status: string; cadreId?: number; error?: string }>;
+  }
+
+  it('rejects an unauthenticated call (no key, no token) with 401', async () => {
+    const app = await keyedApp();
+    const res = await app.inject({ method: 'POST', url, payload: { cadres: [fullRow(`${IMPORT_TOKEN}-U1`, `${IMPORT_TOKEN} u1`)] } });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('rejects an officer JWT with 403 (not super_admin)', async () => {
+    const app = await keyedApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(officerToken),
+      payload: { cadres: [fullRow(`${IMPORT_TOKEN}-U2`, `${IMPORT_TOKEN} u2`)] },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('rejects an admin JWT with 403 (import is super_admin-tier)', async () => {
+    const app = await keyedApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(adminToken),
+      payload: { cadres: [fullRow(`${IMPORT_TOKEN}-U3`, `${IMPORT_TOKEN} u3`)] },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('rejects a wrong machine key with 401 (no fall-through to JWT)', async () => {
+    const app = await keyedApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: { 'x-sampark-import-key': 'the-wrong-key-entirely-but-long-enough' },
+      payload: { cadres: [fullRow(`${IMPORT_TOKEN}-U4`, `${IMPORT_TOKEN} u4`)] },
+    });
+    expect(res.statusCode).toBe(401);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('INVALID_IMPORT_KEY');
+    await app.close();
+  });
+
+  it('machine key: imports a batch, persisting EVERY field (verified via GET), audited to a null actor', async () => {
+    const app = await keyedApp();
+    const serial = `${IMPORT_TOKEN}-1`;
+    const res = await app.inject({
+      method: 'POST', url, headers: importAuth,
+      payload: { cadres: [fullRow(serial, `${IMPORT_TOKEN} पूर्ण एक`)] },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as ImportResp;
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0]).toMatchObject({ serialNumber: serial, status: 'created' });
+    const cadreId = body.results[0]!.cadreId!;
+    expect(typeof cadreId).toBe('number');
+
+    // Verify field-by-field via GET — not just that a 200 came back (ADR-019/020/021 standard).
+    const list = await app.inject({
+      method: 'GET', url: `/api/v1/cadres?search=${IMPORT_TOKEN}&pageSize=50`, headers: auth(officerToken),
+    });
+    const row = (list.json() as ListBody).data.find(
+      (c) => (c as { serialNumber?: string }).serialNumber === serial,
+    ) as Record<string, unknown> | undefined;
+    expect(row).toBeDefined();
+    expect(row).toMatchObject({
+      serialNumber: serial,
+      name: `${IMPORT_TOKEN} पूर्ण एक`,
+      phone: '9812300001',
+      thana: 'भोपालपटनम',
+      currentAddress: 'अस्पतालपारा बीजापुर',
+      permanentAddress: 'बन्देपारा',
+      designation: 'एसीएम sector member',
+      category: 'surrendered',
+      alertLevel: 'normal',
+      filter: 'ACM',
+      surrenderLocation: 'मद्देड़ जिला बीजापुर',
+      surrenderOrigin: 'district',
+      surrenderYear: '2009',
+      regiment: 'मद्देड़ क्षेत्र एलओएस',
+      subDivision: 'भोपालपटनम',
+      fatherName: 'मुण्डैया मिच्चा',
+      incident: '(सुधार नोट)',
+      // ADR-038 — the two new columns.
+      gender: 'male',
+      caste: 'मुरिया',
+      // ADR-036 — date-only on the wire, age derived.
+      dateOfBirth: '1982-01-15',
+      aliases: ['उपनाम एक'],
+    });
+    // Dates: surrenderDate is a full timestamp column, DOB is date-only.
+    expect(row!.surrenderDate).toBe('2009-03-22T00:00:00.000Z');
+    expect(typeof row!.age).toBe('number');
+
+    // Audit: a null-actor `cadre.import` row (the machine credential is not a user).
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(cadreId), action: 'cadre.import' },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit?.actorId).toBeNull();
+    await app.close();
+  });
+
+  it('super_admin JWT imports without the machine key, audited to that super_admin', async () => {
+    // No key on this app's config — only the JWT path is available.
+    const app = await buildApp({ config, prisma, logger: false });
+    const serial = `${IMPORT_TOKEN}-2`;
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { cadres: [fullRow(serial, `${IMPORT_TOKEN} सुपर एडमिन`)] },
+    });
+    expect(res.statusCode).toBe(200);
+    const cadreId = (res.json() as ImportResp).results[0]!.cadreId!;
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(cadreId), action: 'cadre.import' },
+    });
+    expect(audit?.actorId).toBe(superAdminId);
+    await app.close();
+  });
+
+  it('upserts by serialNumber — a re-sent serial is skipped_duplicate, never a second row', async () => {
+    const app = await keyedApp();
+    const serial = `${IMPORT_TOKEN}-3`;
+    const first = await app.inject({
+      method: 'POST', url, headers: importAuth,
+      payload: { cadres: [fullRow(serial, `${IMPORT_TOKEN} मूल`)] },
+    });
+    const firstId = (first.json() as ImportResp).results[0]!.cadreId!;
+
+    // Same serial, different name — must NOT create a second row or overwrite the first.
+    const second = await app.inject({
+      method: 'POST', url, headers: importAuth,
+      payload: { cadres: [fullRow(serial, `${IMPORT_TOKEN} डुप्लिकेट`)] },
+    });
+    const r = (second.json() as ImportResp).results[0]!;
+    expect(r.status).toBe('skipped_duplicate');
+    expect(r.cadreId).toBe(firstId);
+
+    expect(await prisma.cadre.count({ where: { serialNumber: serial } })).toBe(1);
+    const kept = await prisma.cadre.findFirstOrThrow({ where: { serialNumber: serial } });
+    expect(kept.name).toBe(`${IMPORT_TOKEN} मूल`); // untouched — skip, not update
+    await app.close();
+  });
+
+  it('a duplicate WITHIN one batch: first created, second skipped', async () => {
+    const app = await keyedApp();
+    const serial = `${IMPORT_TOKEN}-4`;
+    const res = await app.inject({
+      method: 'POST', url, headers: importAuth,
+      payload: { cadres: [fullRow(serial, `${IMPORT_TOKEN} इंट्रा-1`), fullRow(serial, `${IMPORT_TOKEN} इंट्रा-2`)] },
+    });
+    const results = (res.json() as ImportResp).results;
+    expect(results[0]!.status).toBe('created');
+    expect(results[1]!.status).toBe('skipped_duplicate');
+    expect(await prisma.cadre.count({ where: { serialNumber: serial } })).toBe(1);
+    await app.close();
+  });
+
+  it('reports a bad row as `error` (with the field) without failing the rest of the batch', async () => {
+    const app = await keyedApp();
+    const good1 = fullRow(`${IMPORT_TOKEN}-5`, `${IMPORT_TOKEN} अच्छा एक`);
+    const bad = { ...fullRow(`${IMPORT_TOKEN}-6`, `${IMPORT_TOKEN} खराब`), currentAddress: '' };
+    const good2 = fullRow(`${IMPORT_TOKEN}-7`, `${IMPORT_TOKEN} अच्छा दो`);
+    const res = await app.inject({ method: 'POST', url, headers: importAuth, payload: { cadres: [good1, bad, good2] } });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as ImportResp).results;
+    expect(results[0]!.status).toBe('created');
+    expect(results[1]!.status).toBe('error');
+    expect(results[1]!.serialNumber).toBe(`${IMPORT_TOKEN}-6`);
+    expect(results[1]!.error).toContain('currentAddress');
+    expect(results[2]!.status).toBe('created');
+    // The bad row created nothing; the two good ones persisted.
+    expect(await prisma.cadre.count({ where: { serialNumber: `${IMPORT_TOKEN}-6` } })).toBe(0);
+    expect(await prisma.cadre.count({ where: { serialNumber: `${IMPORT_TOKEN}-5` } })).toBe(1);
+    expect(await prisma.cadre.count({ where: { serialNumber: `${IMPORT_TOKEN}-7` } })).toBe(1);
+    await app.close();
+  });
+
+  it('rejects a batch over 200 rows with 400 (envelope validation)', async () => {
+    const app = await keyedApp();
+    const cadres = Array.from({ length: 201 }, () => ({}));
+    const res = await app.inject({ method: 'POST', url, headers: importAuth, payload: { cadres } });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+    await app.close();
+  });
+
+  it('rejects an empty cadres array with 400', async () => {
+    const app = await keyedApp();
+    const res = await app.inject({ method: 'POST', url, headers: importAuth, payload: { cadres: [] } });
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 });

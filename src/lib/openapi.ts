@@ -90,6 +90,16 @@ export function examplePage(item: unknown): Record<string, unknown> {
   return { data: [item], total: 42, page: 1, pageSize: 15, hasMore: true };
 }
 
+// ADR-038. Per-row outcome of the bulk historical import — one entry per submitted
+// row, keyed by serialNumber so the Apps Script can write it back into the sheet.
+export const EXAMPLE_IMPORT_RESULT = {
+  results: [
+    { serialNumber: '1', status: 'created', cadreId: 1801 },
+    { serialNumber: '2', status: 'skipped_duplicate', cadreId: 1802 },
+    { serialNumber: '3', status: 'error', error: 'currentAddress: currentAddress is required' },
+  ],
+};
+
 export const EXAMPLE_TOKEN_PAIR = {
   access_token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
   refresh_token: '9f1c2b7e6a4d…',

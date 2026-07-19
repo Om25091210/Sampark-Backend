@@ -73,6 +73,11 @@ export interface WireCadre {
   fatherName?: string;
   motherName?: string;
   spouseName?: string;
+  // ADR-038. Demographic facts from the paper register, supplied by the one-time
+  // historical import. Both absent when null (`gender` is male|female; `caste` is
+  // free text). Non-sensitive — same visibility as every other cadre field.
+  gender?: NonNullable<Cadre['gender']>;
+  caste?: string;
   // ADR-029. The four hardcopy documents, INDIVIDUALLY (ADR-026 shipped them as one
   // flag; the client asked for them apart, and "the paperwork exists" is
   // unanswerable when three of four are on file). Always present — NOT NULL
@@ -195,6 +200,8 @@ export function toWireCadre(
     fatherName: c.fatherName ?? undefined,
     motherName: c.motherName ?? undefined,
     spouseName: c.spouseName ?? undefined,
+    gender: c.gender ?? undefined,
+    caste: c.caste ?? undefined,
     hasAadhaar: c.hasAadhaar,
     hasBankAccount: c.hasBankAccount,
     hasAbProforma: c.hasAbProforma,

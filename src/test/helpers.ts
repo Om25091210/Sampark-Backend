@@ -6,6 +6,9 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     nodeEnv: 'test',
     jwtSecret: 'test-secret-that-is-at-least-32-characters-long',
+    // SDR-007. Import machine key is off by default in tests (super_admin JWT path);
+    // the import tests that exercise the key path pass their own via overrides.
+    importApiKey: undefined,
     accessTokenTtl: '15m',
     refreshTokenTtlDays: 30,
     otpTtlSeconds: 300,

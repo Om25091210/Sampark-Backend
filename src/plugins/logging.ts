@@ -4,6 +4,8 @@ import type { FastifyServerOptions } from 'fastify';
 const REDACT_PATHS = [
   'req.headers.authorization',
   'req.headers.cookie',
+  // SDR-007. The import machine credential travels in this header — never log it.
+  'req.headers["x-sampark-import-key"]',
   '*.password',
   '*.passwordHash',
   '*.totpSecret',

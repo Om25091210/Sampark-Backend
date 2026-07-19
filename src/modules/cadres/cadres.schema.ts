@@ -44,6 +44,95 @@ export const listCadresQuery = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(15),
 });
 
+// ─── Bulk historical import (ADR-038) ──────────────────────────────────────────
+//
+// One-time backfill of the ~1,478-row paper surrender register, pushed from an
+// unattended Apps Script (Design-Docs#7). Deliberately OUTSIDE the CadreChangeRequest
+// approval ladder (ADR-026): that workflow edits cadres that already exist, and these
+// are brand-new rows with no record to attach a request to — the same way a
+// super_admin's direct writes already skip the ladder.
+//
+// Row fields are camelCase, MIRRORING the Cadre wire entity the Apps Script already
+// maps to — a deliberate, documented deviation from the snake_case request-body
+// convention. This is a bulk entity load performed by a machine/super-admin tool, not
+// a mobile-client operation, so it follows the entity's casing, not the client's.
+
+/** A repeated round-trip cap: bounds request size and honours Apps Script's 6-min limit. */
+export const MAX_IMPORT_BATCH = 200;
+
+// Optional free-text field: accepts a string, or null/undefined/"" as "absent".
+// Apps Script sends null for an empty sheet cell; all three normalise to undefined.
+const optText = z
+  .string()
+  .trim()
+  .nullish()
+  .transform((v) => (v === null || v === '' ? undefined : v));
+
+// Optional ISO date (the sheet's ~29 malformed dates are cleaned upstream — we expect
+// clean ISO here, per the spec). null/"" → undefined; a bad date string fails the row.
+const optDate = z.preprocess(
+  (v) => (v === null || v === '' ? undefined : v),
+  z.coerce.date().optional(),
+);
+
+// One register row. Required fields mirror the NOT-NULL Cadre columns; everything
+// else is nullable in the source and optional here. Parsed per-row (safeParse) by the
+// service so ONE bad row becomes that row's `error` result, never a failed batch.
+export const importCadreRow = z.object({
+  // The natural idempotency key (ADR-025) — clean + unique 1..1478 in the source.
+  serialNumber: z.string().trim().min(1, 'serialNumber is required'),
+  name: z.string().trim().min(1, 'name is required'),
+  // Required but MAY be empty (decided): a cadre with no phone sends "", not null.
+  phone: z.string(),
+  thana: z.string().trim().min(1, 'thana is required'),
+  currentAddress: z.string().trim().min(1, 'currentAddress is required'),
+  designation: z.string().trim().min(1, 'designation is required'),
+  category: z.enum(['surrendered', 'jail', 'thana']),
+  alertLevel: z.enum(['critical', 'warning', 'normal']),
+  // Optional — only DVCM/ACM/PM rows carry a filter; the other ~30 designations leave it null.
+  filter: z
+    .enum(['DVCM', 'ACM', 'PM'])
+    .nullish()
+    .transform((v) => v ?? undefined),
+  permanentAddress: optText,
+  surrenderDate: optDate,
+  surrenderLocation: optText,
+  surrenderOrigin: z
+    .enum(['district', 'other'])
+    .nullish()
+    .transform((v) => v ?? undefined),
+  surrenderYear: optText,
+  regiment: optText,
+  subDivision: optText,
+  fatherName: optText,
+  motherName: optText,
+  spouseName: optText,
+  incident: optText,
+  // ADR-038. New demographic columns.
+  gender: z
+    .enum(['male', 'female'])
+    .nullish()
+    .transform((v) => v ?? undefined),
+  caste: optText,
+  dateOfBirth: optDate,
+  // Alias + otherAliasNote fold into the string[] column. Absent/null → [].
+  aliases: z
+    .array(z.string().trim().min(1))
+    .nullish()
+    .transform((v) => v ?? []),
+});
+
+// The batch envelope. Rows arrive as unknowns so a single malformed row cannot fail
+// the whole parse here — the service validates each with importCadreRow and reports
+// per-row. The envelope itself IS Zod-validated: an object with a bounded, non-empty
+// `cadres` array.
+export const importCadresBody = z.object({
+  cadres: z.array(z.unknown()).min(1, 'cadres must be a non-empty array').max(MAX_IMPORT_BATCH),
+});
+
+export type ImportCadreRow = z.infer<typeof importCadreRow>;
+export type ImportCadresBody = z.infer<typeof importCadresBody>;
+
 export const cadreIdParam = z.object({ id: z.coerce.number().int().positive() });
 export const transferParams = z.object({ cadreId: z.coerce.number().int().positive() });
 

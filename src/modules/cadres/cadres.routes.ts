@@ -1,6 +1,14 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { timingSafeEqual } from 'node:crypto';
 import { makeCadresService } from './cadres.service.js';
-import { cadreIdParam, listCadresQuery, transferBody, transferParams } from './cadres.schema.js';
+import {
+  cadreIdParam,
+  importCadresBody,
+  listCadresQuery,
+  transferBody,
+  transferParams,
+} from './cadres.schema.js';
+import { forbidden, unauthorized } from '../../lib/errors.js';
 import {
   bearerAuth,
   emptyResponse,
@@ -8,6 +16,7 @@ import {
   jsonResponse,
   zodToJson,
   EXAMPLE_CADRE,
+  EXAMPLE_IMPORT_RESULT,
 } from '../../lib/openapi.js';
 
 // Cadre records. All routes require authentication; transfer is admin+.
@@ -19,6 +28,65 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     storage: app.storage,
     mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
   });
+
+  // SDR-007. Auth for the bulk historical import, LOCAL to this one route — never a
+  // general capability. Two ways in, nothing else:
+  //   1. The scoped machine credential in `X-Sampark-Import-Key` (the unattended Apps
+  //      Script path). It authorizes THIS route only and yields no session — the
+  //      caller becomes no user (`authUser` stays null; the write is audited with a
+  //      null actor + action `cadre.import`).
+  //   2. An interactive super_admin Bearer JWT (a human running it by hand).
+  // Anything else — no credential, a wrong key, or a non-super_admin JWT — is refused.
+  async function authenticateImport(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const provided = req.headers['x-sampark-import-key'];
+    const expected = app.config.importApiKey;
+    if (typeof provided === 'string' && expected !== undefined) {
+      const a = Buffer.from(provided);
+      const b = Buffer.from(expected);
+      // Length-guard first: timingSafeEqual throws on a length mismatch. A
+      // wrong-length or wrong-value key is a 401 — it does NOT fall through to the
+      // JWT path (presenting a key is a claim to the machine path).
+      const ok = a.length === b.length && timingSafeEqual(a, b);
+      if (ok) {
+        req.authUser = null;
+        return;
+      }
+      throw unauthorized('Invalid import key', 'INVALID_IMPORT_KEY');
+    }
+    // No key header → require an interactive super_admin JWT.
+    await app.authenticate(req, reply);
+    if (req.authUser === null || req.authUser.role !== 'super_admin') {
+      throw forbidden('Import requires super_admin');
+    }
+  }
+
+  app.post(
+    '/cadres/import',
+    {
+      preHandler: authenticateImport,
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Bulk historical import (super_admin or scoped machine key)',
+        description:
+          'ADR-038. One-time backfill of the paper surrender register from an unattended ' +
+          'Apps Script. Auth (SDR-007): the scoped `X-Sampark-Import-Key` machine credential, ' +
+          'OR an interactive super_admin Bearer JWT — nothing else. Accepts a batch of up to ' +
+          '200 cadres; UPSERTS by `serialNumber` (an existing serial is skipped, never ' +
+          'duplicated). Bypasses the ADR-026 change-request ladder. Returns a per-row result ' +
+          'array — one bad row is reported as `error`, it does not fail the batch. Row fields ' +
+          'are camelCase, mirroring the Cadre entity.',
+        security: bearerAuth,
+        body: zodToJson(importCadresBody),
+        response: { 200: jsonResponse('Per-row import results', EXAMPLE_IMPORT_RESULT) },
+      },
+    },
+    async (request) => {
+      const { cadres } = importCadresBody.parse(request.body);
+      // Machine-key path → null actor; interactive super_admin → their id.
+      const actorId = request.authUser?.sub ?? null;
+      return service.importCadres(cadres, actorId);
+    },
+  );
 
   app.get(
     '/cadres',

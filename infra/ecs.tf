@@ -114,6 +114,25 @@ resource "aws_ecs_task_definition" "backend" {
           name      = "JWT_SECRET"
           valueFrom = "${aws_secretsmanager_secret.app.arn}:JWT_SECRET::"
         },
+        # ADR-038 / SDR-007. Scoped machine credential for POST /cadres/import. Like
+        # JWT_SECRET, the VALUE is written by hand into the sampark/<env> JSON (the
+        # secret_version's secret_string is under ignore_changes); this only wires the
+        # reference. The IMPORT_API_KEY JSON key MUST exist in the secret before a task
+        # referencing it starts, or ECS fails to resolve it at container start.
+        #
+        # Deploy ordering (the service has ignore_changes on task_definition, so a
+        # `terraform apply` alone will NOT move the running service onto the new
+        # revision): 1) put IMPORT_API_KEY into the secret; 2) `terraform apply` to
+        # register a task-def revision carrying this reference; 3) point the service at
+        # that revision once (`aws ecs update-service --task-definition <fam>:<N>
+        # --force-new-deployment`). Thereafter CI's download-live-taskdef→swap-image
+        # preserves it, exactly as it preserves JWT_SECRET. Env.ts treats the key as
+        # OPTIONAL, so until this lands the import route simply falls back to
+        # super_admin-JWT-only and nothing else breaks.
+        {
+          name      = "IMPORT_API_KEY"
+          valueFrom = "${aws_secretsmanager_secret.app.arn}:IMPORT_API_KEY::"
+        },
       ]
 
       # The log group is declared in logs.tf rather than auto-created here, so its

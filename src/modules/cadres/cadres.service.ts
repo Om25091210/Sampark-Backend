@@ -1,11 +1,16 @@
 import type { FastifyBaseLogger } from 'fastify';
-import type { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import { toWireCadre, type WireCadre } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import type { StorageProvider } from '../../lib/storage.js';
-import type { ResolvedListCadresQuery } from './cadres.schema.js';
+import {
+  importCadreRow,
+  type ImportCadreRow,
+  type ResolvedListCadresQuery,
+} from './cadres.schema.js';
 
 export interface CadresDeps {
   prisma: PrismaClient;
@@ -29,11 +34,85 @@ export interface CadreFacets {
   designations: string[];
 }
 
+// ADR-038. Per-row outcome of the bulk historical import. Keyed by serialNumber so the
+// calling Apps Script can write the result straight back into the sheet row.
+// `serialNumber` is nullable because a row that fails validation may not carry a usable
+// one — the sheet still needs SOMETHING to key on, so we echo whatever was provided.
+export interface ImportRowResult {
+  serialNumber: string | null;
+  status: 'created' | 'skipped_duplicate' | 'error';
+  cadreId?: number;
+  error?: string;
+}
+
+export interface ImportResult {
+  results: ImportRowResult[];
+}
+
 export interface CadresService {
   list(query: ResolvedListCadresQuery): Promise<Paginated<WireCadre>>;
   facets(): Promise<CadreFacets>;
   getById(id: number): Promise<WireCadre>;
   transfer(cadreId: number, toOfficerId: number, actorId: number): Promise<void>;
+  // ADR-038. Bulk historical import. `actorId` is the super_admin's id for an
+  // interactive call, or null when authenticated by the SDR-007 machine key.
+  importCadres(rows: unknown[], actorId: number | null): Promise<ImportResult>;
+}
+
+// Echoes whatever serialNumber a raw (possibly invalid) row carried, so a row that
+// fails validation is still reportable by serial to the sheet.
+function rawSerial(raw: unknown): string | null {
+  if (raw !== null && typeof raw === 'object' && 'serialNumber' in raw) {
+    const s = (raw as Record<string, unknown>).serialNumber;
+    if (typeof s === 'string' && s.trim() !== '') return s.trim();
+    if (typeof s === 'number') return String(s);
+  }
+  return null;
+}
+
+// Compact, per-row validation message: "field: reason; field: reason".
+function formatIssues(error: Prisma.PrismaClientKnownRequestError | { issues: { path: (string | number)[]; message: string }[] }): string {
+  return 'issues' in error
+    ? error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')
+    : error.message;
+}
+
+// ADR-038. An import row → the Cadre create payload. A straight field map; undefined
+// values are simply not set (Prisma leaves them null/default).
+function toCreateData(row: ImportCadreRow): Prisma.CadreCreateInput {
+  return {
+    serialNumber: row.serialNumber,
+    name: row.name,
+    phone: row.phone,
+    thana: row.thana,
+    currentAddress: row.currentAddress,
+    designation: row.designation,
+    category: row.category,
+    alertLevel: row.alertLevel,
+    filter: row.filter,
+    permanentAddress: row.permanentAddress,
+    surrenderDate: row.surrenderDate,
+    surrenderLocation: row.surrenderLocation,
+    surrenderOrigin: row.surrenderOrigin,
+    surrenderYear: row.surrenderYear,
+    regiment: row.regiment,
+    subDivision: row.subDivision,
+    fatherName: row.fatherName,
+    motherName: row.motherName,
+    spouseName: row.spouseName,
+    incident: row.incident,
+    gender: row.gender,
+    caste: row.caste,
+    dateOfBirth: row.dateOfBirth,
+    aliases: row.aliases,
+  };
+}
+
+// The unique constraint on cadres is serial_number (id aside). A P2002 on a create
+// therefore means the serial already exists — the concurrent-batch race the pre-check
+// map cannot see.
+function isDuplicateSerial(err: unknown): boolean {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 }
 
 // The cadre's most recent non-deleted report date only (ADR-022) — nothing else
@@ -49,7 +128,7 @@ const LATEST_REPORT = {
   lastEditedBy: { select: { id: true, name: true } },
 } as const satisfies Prisma.CadreInclude;
 
-export function makeCadresService({ prisma, storage, mediaUrlTtlSeconds }: CadresDeps): CadresService {
+export function makeCadresService({ prisma, log, storage, mediaUrlTtlSeconds }: CadresDeps): CadresService {
   /**
    * ADR-029. Signs each row's `avatarKey` into a fresh GET URL. Only rows that
    * actually carry a key cost an S3 call, so a page of cadres with no photos costs
@@ -259,6 +338,87 @@ export function makeCadresService({ prisma, storage, mediaUrlTtlSeconds }: Cadre
           payload: { cadreId, fromOfficerId, toOfficerId, actorId },
         });
       });
+    },
+
+    async importCadres(rows, actorId) {
+      // Phase 1: validate every row up front (safeParse — one bad row must not fail the
+      // batch). Results is a dense array aligned to the input order, so the caller's
+      // sheet can map row-for-row.
+      const results: ImportRowResult[] = new Array(rows.length);
+      const valid: { index: number; row: ImportCadreRow }[] = [];
+      rows.forEach((raw, index) => {
+        const parsed = importCadreRow.safeParse(raw);
+        if (!parsed.success) {
+          results[index] = {
+            serialNumber: rawSerial(raw),
+            status: 'error',
+            error: formatIssues(parsed.error),
+          };
+        } else {
+          valid.push({ index, row: parsed.data });
+        }
+      });
+
+      // Phase 2: one query for every serial already on file (across ALL rows, including
+      // soft-deleted — the unique constraint spans them), so the duplicate check is a
+      // map lookup per row rather than a query per row.
+      const serials = valid.map((v) => v.row.serialNumber);
+      const existing =
+        serials.length > 0
+          ? await prisma.cadre.findMany({
+              where: { serialNumber: { in: serials } },
+              select: { id: true, serialNumber: true },
+            })
+          : [];
+      const idBySerial = new Map<string, number>();
+      for (const e of existing) if (e.serialNumber !== null) idBySerial.set(e.serialNumber, e.id);
+
+      // Phase 3: create the new rows, each in its OWN transaction (create + audit),
+      // so a failure on one row neither rolls back the rows before it nor aborts the
+      // rows after. This is the "partial success, report per row" contract — it is
+      // why the batch is not one all-or-nothing transaction. Bypasses the ADR-026
+      // change-request ladder entirely: these are new rows, not edits to existing ones.
+      for (const { index, row } of valid) {
+        const dupId = idBySerial.get(row.serialNumber);
+        if (dupId !== undefined) {
+          results[index] = { serialNumber: row.serialNumber, status: 'skipped_duplicate', cadreId: dupId };
+          continue;
+        }
+        try {
+          const created = await prisma.$transaction(async (tx) => {
+            const c = await tx.cadre.create({ data: toCreateData(row) });
+            await writeAuditLog(tx, {
+              actorId,
+              action: 'cadre.import',
+              entityType: 'cadre',
+              entityId: String(c.id),
+              // No `before` — the row did not exist. `after` is a compact identity,
+              // not the whole record (the row itself is the source of truth).
+              after: { serialNumber: row.serialNumber, name: row.name, category: row.category },
+            });
+            return c;
+          });
+          // Guard the case of the SAME serial appearing twice within one batch: the
+          // second occurrence now sees the first as a duplicate.
+          idBySerial.set(row.serialNumber, created.id);
+          results[index] = { serialNumber: row.serialNumber, status: 'created', cadreId: created.id };
+        } catch (err) {
+          if (isDuplicateSerial(err)) {
+            // Lost a race with a concurrent batch — the row exists, so this is a skip,
+            // not an error (idempotent by serialNumber, same as ADR-013's key).
+            results[index] = { serialNumber: row.serialNumber, status: 'skipped_duplicate' };
+          } else {
+            log.error({ err, serialNumber: row.serialNumber }, 'cadre import row failed');
+            results[index] = {
+              serialNumber: row.serialNumber,
+              status: 'error',
+              error: 'internal error creating cadre',
+            };
+          }
+        }
+      }
+
+      return { results };
     },
   };
 }

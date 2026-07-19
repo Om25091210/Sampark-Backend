@@ -73,6 +73,16 @@ enum PersonStatus {
   dead
 }
 
+// ADR-038. The register's लिंग column, exactly two clean values. Lowercase to
+// serialize verbatim on the wire (CLAUDE.md rule 10), like every other enum here.
+// Caste is deliberately NOT an enum: it is free text with dozens of open-ended
+// values, and freezing it into an enum would reject the next spelling the register
+// records.
+enum Gender {
+  male
+  female
+}
+
 // ─── Users (officers + admins) ─────────────────────────────────────────────────
 
 model User {
@@ -154,6 +164,13 @@ model Cadre {
   fatherName         String?        @map("father_name")
   motherName         String?        @map("mother_name")
   spouseName         String?        @map("spouse_name")
+  // ADR-038. Demographic facts carried over from the paper register by the one-time
+  // historical import (Design-Docs#7). Both nullable for the same reason
+  // serialNumber and dateOfBirth are: existing rows predate the import that supplies
+  // them, and caste is only ~82% filled in the source. `gender` is a two-value enum
+  // (पुरूष/महिला); `caste` is free text (जाति), never an enum — see the Gender enum note.
+  gender             Gender?        @map("gender")
+  caste              String?        @map("caste")
   // ADR-029. The four hardcopy documents, tracked INDIVIDUALLY. ADR-026 shipped
   // these as one `hardcopyDocsExist` boolean; the client asked for them separately,
   // and they were right — "the paperwork exists" is unanswerable when the Aadhaar

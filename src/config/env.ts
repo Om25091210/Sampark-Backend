@@ -16,6 +16,13 @@ const EnvSchema = z.object({
   ACCESS_TOKEN_TTL: z.string().min(1).default('15m'),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
 
+  // ADR-038 / SDR-007. Scoped machine credential for the unattended historical-import
+  // job (Apps Script → POST /cadres/import). NOT a super_admin session: presenting it
+  // authorizes that one route and nothing else. OPTIONAL — when unset, the key path is
+  // simply disabled and the route accepts only an interactive super_admin JWT (the
+  // dev/test path). Min length matches JWT_SECRET so a real key is never a weak string.
+  IMPORT_API_KEY: z.string().min(32, 'IMPORT_API_KEY must be at least 32 characters').optional(),
+
   // OTP
   OTP_TTL_SECONDS: z.coerce.number().int().positive().default(300),
   OTP_LENGTH: z.coerce.number().int().min(4).max(8).default(6),
@@ -63,6 +70,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
 export interface AppConfig {
   nodeEnv: Env['NODE_ENV'];
   jwtSecret: string;
+  // ADR-038 / SDR-007. Machine credential for POST /cadres/import; undefined disables
+  // the key path (super_admin JWT only). Redacted from logs like every other secret.
+  importApiKey?: string;
   accessTokenTtl: string;
   refreshTokenTtlDays: number;
   otpTtlSeconds: number;
@@ -81,6 +91,7 @@ export function toAppConfig(env: Env): AppConfig {
   return {
     nodeEnv: env.NODE_ENV,
     jwtSecret: env.JWT_SECRET,
+    importApiKey: env.IMPORT_API_KEY,
     accessTokenTtl: env.ACCESS_TOKEN_TTL,
     refreshTokenTtlDays: env.REFRESH_TOKEN_TTL_DAYS,
     otpTtlSeconds: env.OTP_TTL_SECONDS,

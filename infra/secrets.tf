@@ -19,7 +19,16 @@ resource "aws_secretsmanager_secret" "app" {
 }
 
 # Placeholder value only. The real JWT_SECRET is written by hand after the first
-# apply -- see infra/README.md.
+# apply -- see infra/README.md. IMPORT_API_KEY (ADR-038 / SDR-007) is added to the
+# SAME JSON blob the same way: a high-entropy string (>= 32 chars), set by hand /
+# CLI, never committed. Rotation is symmetric to issuance -- overwrite the JSON key
+# and force a new ECS deployment; the old value dies the instant the new task starts,
+# since the route does a stateless constant-time compare with no key store to purge.
+#   aws secretsmanager put-secret-value --secret-id sampark/staging \
+#     --secret-string "$(aws secretsmanager get-secret-value --secret-id sampark/staging \
+#       --query SecretString --output text | jq -c \
+#       --arg k "$(openssl rand -base64 36 | tr -d '/+=' )" '. + {IMPORT_API_KEY:$k}')" \
+#     --profile sampark-admin
 #
 # ADR-034: DATABASE_URL is NO LONGER HERE. It was a hand-assembled copy of the RDS
 # master password, which `manage_master_user_password` rotates every 7 days -- so it
