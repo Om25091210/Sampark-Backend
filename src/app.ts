@@ -18,6 +18,7 @@ import { officersRoutes } from './modules/officers/officers.routes.js';
 import { reportsRoutes } from './modules/reports/reports.routes.js';
 import { reportsMediaRoutes } from './modules/reports-media/reports-media.routes.js';
 import { statsRoutes } from './modules/stats/stats.routes.js';
+import { usersRoutes } from './modules/users/users.routes.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -111,6 +112,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       await api.register(reportsRoutes);
       await api.register(reportsMediaRoutes);
       await api.register(statsRoutes);
+      await api.register(usersRoutes); // Phase B: account provisioning (super_admin)
     },
     { prefix: '/api/v1' },
   );

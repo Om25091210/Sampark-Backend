@@ -359,6 +359,24 @@ model CadreChangeRequest {
 // is removed entirely in favour of email+password, so the challenge table has no
 // remaining reader or writer and the migration drops it. Nothing referenced it by FK.
 
+// SDR-002. Account-level brute-force lockout.
+//
+// Keyed on the SUBMITTED EMAIL STRING, deliberately NOT on a user row. If only real
+// accounts could lock, a 423 would itself answer "does this account exist?" — and with
+// IDs guessable by construction (SHOGNGL01…10) that is a free enumeration oracle. An
+// unknown email locks exactly the same way, so 423 reveals nothing while still telling a
+// genuinely locked-out officer the truth instead of leaving them retyping a correct
+// password against a generic 401.
+model LoginAttempt {
+  email        String    @id
+  failedCount  Int       @default(0) @map("failed_count")
+  lastFailedAt DateTime  @default(now()) @map("last_failed_at")
+  // Null = not locked. Set when failedCount crosses the threshold.
+  lockedUntil  DateTime? @map("locked_until")
+
+  @@map("login_attempts")
+}
+
 model RefreshToken {
   id        Int       @id @default(autoincrement())
   userId    Int       @map("user_id")

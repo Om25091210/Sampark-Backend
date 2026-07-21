@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { PrismaClient, User } from '@prisma/client';
 import type { AppConfig } from '../../config/env.js';
 import { toWireUser, type WireUser } from '../../lib/serialize.js';
-import { unauthorized } from '../../lib/errors.js';
+import { locked, unauthorized } from '../../lib/errors.js';
 import { verifyPassword } from '../../lib/password.js';
 import { generateTotpSecret, totpProvisioningUri, verifyTotp } from '../../lib/totp.js';
 import {
@@ -69,6 +69,15 @@ const TOTP_ROLES = new Set(['admin', 'super_admin']);
 /** The 2FA challenge's lifetime. Short: it is a hop between two steps, not a session. */
 const CHALLENGE_TTL_SECONDS = 300;
 
+// SDR-002. Account-level brute-force lockout, keyed on the SUBMITTED EMAIL (see the
+// LoginAttempt model) so an unknown address locks identically and the 423 leaks nothing.
+// Five attempts is enough to absorb ordinary fat-fingering — these are shared field
+// accounts typing a long password on a phone — while still ending an online guessing run
+// quickly. Fifteen minutes is a delay, not a denial: it costs a real officer one coffee
+// and costs an attacker three attempts an hour.
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_MINUTES = 15;
+
 export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService {
   async function issueTokens(user: User): Promise<TokenPair> {
     const access = await signAccessToken(
@@ -100,6 +109,38 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
 
   return {
     async login(email, password) {
+      // SDR-002. Check the lock BEFORE touching the user or the hash. Keyed on the
+      // submitted string, so this path is identical for a real and an unknown address.
+      const attempt = await prisma.loginAttempt.findUnique({ where: { email } });
+      if (attempt?.lockedUntil != null && attempt.lockedUntil > new Date()) {
+        const seconds = Math.ceil((attempt.lockedUntil.getTime() - Date.now()) / 1000);
+        log.warn({ email }, 'login attempt against a locked account');
+        throw locked(`Too many failed attempts. Try again in ${Math.ceil(seconds / 60)} minute(s).`);
+      }
+
+      // Record a failure and lock once the threshold is crossed. Runs for unknown emails
+      // too — that is what keeps the 423 free of information.
+      const registerFailure = async (): Promise<void> => {
+        const prior = attempt?.lockedUntil != null && attempt.lockedUntil <= new Date() ? 0 : attempt?.failedCount ?? 0;
+        const next = prior + 1;
+        const lock = next >= MAX_FAILED_ATTEMPTS;
+        await prisma.loginAttempt.upsert({
+          where: { email },
+          create: {
+            email,
+            failedCount: lock ? 0 : next,
+            lockedUntil: lock ? new Date(Date.now() + LOCKOUT_MINUTES * 60_000) : null,
+          },
+          update: {
+            // Reset the counter when locking, so the next window starts clean rather than
+            // re-locking on the first attempt after expiry.
+            failedCount: lock ? 0 : next,
+            lastFailedAt: new Date(),
+            lockedUntil: lock ? new Date(Date.now() + LOCKOUT_MINUTES * 60_000) : null,
+          },
+        });
+      };
+
       const user = await prisma.user.findUnique({ where: { email } });
 
       // ONE generic failure for "no such email", "soft-deleted", "no password set" and
@@ -108,7 +149,8 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
       // different threat surface — distinguishing the cases here would turn the login
       // into an account-enumeration oracle for a system whose IDs are guessable by
       // construction (SHOGNGL01, SHOGNGL02, …).
-      const invalid = (): never => {
+      const invalid = async (): Promise<never> => {
+        await registerFailure();
         throw unauthorized('Invalid email or password', 'INVALID_CREDENTIALS');
       };
 
@@ -124,6 +166,10 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
         log.warn({ userId: user.id }, 'login attempt with an incorrect password');
         return invalid();
       }
+
+      // Success clears the counter — a correct password should not leave a partial streak
+      // that locks the account on some unrelated typo next week.
+      if (attempt !== null) await prisma.loginAttempt.deleteMany({ where: { email } });
 
       // Officers finish here — one factor, by design.
       //

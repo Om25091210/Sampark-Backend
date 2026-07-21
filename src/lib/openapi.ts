@@ -90,6 +90,16 @@ export function examplePage(item: unknown): Record<string, unknown> {
   return { data: [item], total: 42, page: 1, pageSize: 15, hasMore: true };
 }
 
+// Phase B. Per-row outcome of the bulk ACCOUNT import — same shape as the cadre one,
+// keyed by `name` (the institutional ID) instead of `serialNumber`.
+export const EXAMPLE_USER_IMPORT_RESULT = {
+  results: [
+    { name: 'SHOGNGL01', status: 'created', userId: 12 },
+    { name: 'SDOPBJR', status: 'skipped_duplicate', userId: 6 },
+    { name: 'SHOBRMG02', status: 'error', error: 'role=officer requires thana (its station scope)' },
+  ],
+};
+
 // ADR-038. Per-row outcome of the bulk historical import — one entry per submitted
 // row, keyed by serialNumber so the Apps Script can write it back into the sheet.
 export const EXAMPLE_IMPORT_RESULT = {

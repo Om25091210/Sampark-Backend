@@ -24,3 +24,10 @@ export const notFound = (message = 'Not found', code = 'NOT_FOUND'): AppError =>
 // 400: the client did nothing wrong, it just lost a race.
 export const conflict = (message = 'Conflict', code = 'CONFLICT'): AppError =>
   new AppError(409, code, message);
+// SDR-002. The credential is not being judged — the account is temporarily locked after
+// repeated failures. Deliberately DISTINGUISHABLE from the generic 401: because the
+// lockout is keyed on the submitted email (see LoginAttempt), an unknown address locks
+// identically, so a 423 leaks nothing about whether the account exists. Telling a locked
+// officer the truth beats leaving them retyping a correct password.
+export const locked = (message = 'Account temporarily locked', code = 'ACCOUNT_LOCKED'): AppError =>
+  new AppError(423, code, message);
