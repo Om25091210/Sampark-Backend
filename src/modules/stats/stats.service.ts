@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { Prisma, type PrismaClient } from '@prisma/client';
+import { REPORTING_CADENCE_DAYS } from '../../lib/serialize.js';
 import type { DashboardStats, OfficerStats } from './stats.schema.js';
 
 export interface StatsDeps {
@@ -36,7 +37,13 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
     async dashboard() {
       const now = Date.now();
       const weekAgo = new Date(now - 7 * DAY_MS);
-      const monthAgo = new Date(now - 30 * DAY_MS);
+      // ADR-041. Recency boundaries as multiples of the reporting cadence, so the
+      // dashboard tiers can never drift from the card's (CadreCard) or the /cadres
+      // `recency` filter's — they all step off the same 30-day constant.
+      const cadence = REPORTING_CADENCE_DAYS;
+      const monthAgo = new Date(now - cadence * DAY_MS); // 30d — pendingReporting + tier boundary
+      const twoMonthsAgo = new Date(now - cadence * 2 * DAY_MS); // 60d
+      const threeMonthsAgo = new Date(now - cadence * 3 * DAY_MS); // 90d
 
       const live = { deletedAt: null };
 
@@ -53,6 +60,10 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         activeAlerts,
         reportsThisWeek,
         pendingReporting,
+        rcCurrent,
+        rcOverdue1m,
+        rcOverdue2m,
+        rcOverdue3m,
       ] = await prisma.$transaction([
         prisma.cadre.count({ where: { ...live, category: 'surrendered' } }),
         prisma.cadre.count({ where: { ...live, category: 'surrendered', surrenderOrigin: 'district' } }),
@@ -66,6 +77,36 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         prisma.cadre.count({
           where: { ...live, reports: { none: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
         }),
+        // ADR-041. The four recency tiers — disjoint windows, so each live cadre falls
+        // in exactly one and the four sum to totalCadres.
+        // सामान्य: reported within 30d.
+        prisma.cadre.count({
+          where: { ...live, reports: { some: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
+        }),
+        // सतर्क: latest report in [60d, 30d) — some within 60d, none within 30d.
+        prisma.cadre.count({
+          where: {
+            ...live,
+            AND: [
+              { reports: { some: { deletedAt: null, reportedAt: { gte: twoMonthsAgo } } } },
+              { reports: { none: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
+            ],
+          },
+        }),
+        // जोखिम: latest report in [90d, 60d).
+        prisma.cadre.count({
+          where: {
+            ...live,
+            AND: [
+              { reports: { some: { deletedAt: null, reportedAt: { gte: threeMonthsAgo } } } },
+              { reports: { none: { deletedAt: null, reportedAt: { gte: twoMonthsAgo } } } },
+            ],
+          },
+        }),
+        // उच्च जोखिम: nothing within 90d (includes never-reported — no grace, ADR-031).
+        prisma.cadre.count({
+          where: { ...live, reports: { none: { deletedAt: null, reportedAt: { gte: threeMonthsAgo } } } },
+        }),
       ]);
 
       return {
@@ -74,6 +115,12 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         activeAlerts,
         reportsThisWeek,
         pendingReporting,
+        reportingRecency: {
+          current: rcCurrent,
+          overdue1m: rcOverdue1m,
+          overdue2m: rcOverdue2m,
+          overdue3m: rcOverdue3m,
+        },
         byCategory: {
           // A surrendered cadre with a NULL origin (ADR-019) is invisible to both
           // tiles: it counts toward `total` but neither `district` nor `other`, so the

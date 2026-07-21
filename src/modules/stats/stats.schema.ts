@@ -16,6 +16,16 @@ export const dashboardStatsResponse = z.object({
   reportsThisWeek: z.number().int(),
   // Cadres with NO report in the last 30 days (includes never-reported).
   pendingReporting: z.number().int(),
+  // ADR-041. The 4 reporting-recency tiers (ADR-039's card system) as counts that
+  // PARTITION every live cadre by days since their latest report. Thresholds are
+  // multiples of the 30-day cadence (≤30 / 30-60 / 60-90 / >90); `overdue3m` includes
+  // never-reported (no-grace, ADR-031). The four sum to `totalCadres`.
+  reportingRecency: z.object({
+    current: z.number().int(),    // सामान्य
+    overdue1m: z.number().int(),  // सतर्क
+    overdue2m: z.number().int(),  // जोखिम
+    overdue3m: z.number().int(),  // उच्च जोखिम
+  }),
   // Per-category counts backing the dashboard grid tiles. `surrendered` splits on
   // surrenderOrigin (ADR-019) because the dashboard shows the two as separate tiles.
   byCategory: z.object({

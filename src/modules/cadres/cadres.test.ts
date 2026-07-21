@@ -539,6 +539,55 @@ describe('cadres', () => {
     await app.close();
   });
 
+  // ── ADR-041: reporting-recency tier filter ──────────────────────────────────
+
+  it('recency filter buckets a cadre by days since its last report (सतर्क)', async () => {
+    const app = await makeApp();
+    // A dedicated fixture reporting 45 days ago → always सतर्क (30–60d), whatever the run date.
+    const c = await prisma.cadre.create({
+      data: {
+        name: 'RECENCY FIXTURE', phone: '+910000000777', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    await prisma.report.create({
+      data: {
+        cadreId: c.id, reportedById: officerAId, reportingPlace: 'thana', specificLocation: 'x',
+        personStatus: 'alive', currentPhone: '+910', currentActivity: 'y',
+        reportedAt: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000),
+      },
+    });
+    try {
+      const inTier = async (tier: string): Promise<boolean> => {
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/v1/cadres?search=${encodeURIComponent('RECENCY FIXTURE')}&recency=${tier}&pageSize=50`,
+          headers: auth(officerToken),
+        });
+        return (res.json() as ListBody).data.some((r) => r.id === c.id);
+      };
+      expect(await inTier('overdue1m')).toBe(true); // 45d → सतर्क
+      expect(await inTier('current')).toBe(false); // not सामान्य
+      expect(await inTier('overdue3m')).toBe(false); // not उच्च जोखिम
+    } finally {
+      await prisma.report.deleteMany({ where: { cadreId: c.id } });
+      await prisma.cadre.delete({ where: { id: c.id } });
+      await app.close();
+    }
+  });
+
+  it('recency=overdue3m includes a never-reported cadre (no grace, ADR-031/041)', async () => {
+    const app = await makeApp();
+    // The ALPHA fixture has no reports → most overdue.
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?recency=overdue3m&search=${encodeURIComponent('TEST CADRE ALPHA')}&pageSize=50`,
+      headers: auth(officerToken),
+    });
+    expect((res.json() as ListBody).data.some((c) => c.id === cadreId)).toBe(true);
+    await app.close();
+  });
+
   it('serialNumber is absent when unset, and never falls back to id (ADR-025)', async () => {
     const app = await makeApp();
     const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });

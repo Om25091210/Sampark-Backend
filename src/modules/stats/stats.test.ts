@@ -34,6 +34,7 @@ interface Stats {
   activeAlerts: number;
   reportsThisWeek: number;
   pendingReporting: number;
+  reportingRecency: { current: number; overdue1m: number; overdue2m: number; overdue3m: number };
   byCategory: {
     surrendered: { district: number; other: number; total: number };
     thana: number;
@@ -274,6 +275,30 @@ describe('stats', () => {
     expect(s.reportsThisWeek).toBeGreaterThanOrEqual(1); // the 2-day-old report
     expect(s.pendingReporting).toBeGreaterThanOrEqual(2); // never-reported + 40-day-stale
     expect(s.totalCadres).toBeGreaterThanOrEqual(3);
+    await app.close();
+  });
+
+  // ── ADR-041: reporting-recency tiers ────────────────────────────────────────
+
+  it('reportingRecency partitions the total — four disjoint tiers sum to totalCadres', async () => {
+    const app = await makeApp();
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) })).json() as Stats;
+    const r = s.reportingRecency;
+    for (const n of [r.current, r.overdue1m, r.overdue2m, r.overdue3m]) {
+      expect(Number.isInteger(n)).toBe(true);
+      expect(n).toBeGreaterThanOrEqual(0);
+    }
+    // Exact invariant regardless of other files' rows: every live cadre is in exactly one tier.
+    expect(r.current + r.overdue1m + r.overdue2m + r.overdue3m).toBe(s.totalCadres);
+    await app.close();
+  });
+
+  it('each recency tier reflects its fixture (2-day → सामान्य, 40-day → सतर्क, never → उच्च जोखिम)', async () => {
+    const app = await makeApp();
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) })).json() as Stats;
+    expect(s.reportingRecency.current).toBeGreaterThanOrEqual(1);   // OTHER, 2 days ago
+    expect(s.reportingRecency.overdue1m).toBeGreaterThanOrEqual(1); // THANA, 40 days ago
+    expect(s.reportingRecency.overdue3m).toBeGreaterThanOrEqual(1); // ALERT, never
     await app.close();
   });
 });

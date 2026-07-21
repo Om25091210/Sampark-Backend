@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { Prisma } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
-import { toWireCadre, type WireCadre } from '../../lib/serialize.js';
+import { toWireCadre, REPORTING_CADENCE_DAYS, type WireCadre } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
@@ -116,6 +116,29 @@ function isDuplicateSerial(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 }
 
+// ADR-041. Reporting-recency tier → a where clause over report windows. Same 30/60/90
+// boundaries the dashboard counts use (multiples of the cadence), so a tile's count
+// equals the size of the list its drill-down opens.
+const RECENCY_DAY_MS = 86_400_000;
+function recencyWhere(
+  tier: 'current' | 'overdue1m' | 'overdue2m' | 'overdue3m',
+): Prisma.CadreWhereInput {
+  const now = Date.now();
+  const d = (mult: number) => new Date(now - REPORTING_CADENCE_DAYS * mult * RECENCY_DAY_MS);
+  const some = (gte: Date): Prisma.CadreWhereInput => ({ reports: { some: { deletedAt: null, reportedAt: { gte } } } });
+  const none = (gte: Date): Prisma.CadreWhereInput => ({ reports: { none: { deletedAt: null, reportedAt: { gte } } } });
+  switch (tier) {
+    case 'current':
+      return some(d(1)); // सामान्य — reported within 30d
+    case 'overdue1m':
+      return { AND: [some(d(2)), none(d(1))] }; // सतर्क — [60d, 30d)
+    case 'overdue2m':
+      return { AND: [some(d(3)), none(d(2))] }; // जोखिम — [90d, 60d)
+    case 'overdue3m':
+      return none(d(3)); // उच्च जोखिम — nothing within 90d (incl. never)
+  }
+}
+
 // The cadre's most recent non-deleted report date only (ADR-022) — nothing else
 // of the report is needed for nextReportingDueAt.
 const LATEST_REPORT = {
@@ -211,6 +234,8 @@ export function makeCadresService({ prisma, log, storage, mediaUrlTtlSeconds }: 
           OR: query.designation.map((d) => ({ designation: { contains: d, mode: 'insensitive' as const } })),
         });
       }
+      // ADR-041: reporting-recency tier — same windows as /stats/dashboard's tiles.
+      if (query.recency !== undefined) and.push(recencyWhere(query.recency));
       if (and.length > 0) where.AND = and;
 
       if (query.search !== undefined && query.search !== '') {

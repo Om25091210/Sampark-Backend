@@ -34,6 +34,10 @@ export const listCadresQuery = z.object({
   // ADR-033 widened it to multi-value; the dashboard's single-value drill-in still
   // works unchanged, since one value normalises to a one-element array.
   alertLevel: multi(z.enum(['critical', 'warning', 'normal'])),
+  // ADR-041. Reporting-recency tier filter — the dashboard's four recency tiles drill
+  // in here. Same 30/60/90-day windows as /stats/dashboard's reportingRecency counts,
+  // so a tile's count equals the length of the list it opens.
+  recency: z.enum(['current', 'overdue1m', 'overdue2m', 'overdue3m']).optional(),
   // ADR-018. Scopes the list to one officer's assigned cadres.
   //   assignedTo=me  -> the calling user (the officer's "मेरे कैडर" tile)
   //   assignedTo=<id> -> that officer (the admin roster view)
