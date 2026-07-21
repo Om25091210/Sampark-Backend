@@ -68,4 +68,30 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(204).send();
     },
   );
+
+  app.delete(
+    '/users/:userId',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Users'],
+        summary: 'Deactivate an account (super_admin)',
+        description:
+          'SOFT delete — sets `deletedAt` and revokes every live refresh token, so the ' +
+          'account stops working immediately rather than lasting until its tokens expire. ' +
+          'Never a hard delete: the id is referenced by reports, change requests and audit ' +
+          'rows, and "who filed this" must survive the account being retired. A deactivated ' +
+          'user disappears from GET /officers and from the scope model. Refuses ' +
+          'self-deactivation — super_admin is the only role that can restore accounts.',
+        security: bearerAuth,
+        params: zodToJson(userIdParam),
+        response: { 204: emptyResponse('Deactivated') },
+      },
+    },
+    async (request, reply) => {
+      const { userId } = userIdParam.parse(request.params);
+      await service.deactivate(userId, request.authUser!.sub);
+      return reply.code(204).send();
+    },
+  );
 }

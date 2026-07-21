@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { Prisma } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
 import { writeAuditLog } from '../../lib/audit.js';
-import { notFound } from '../../lib/errors.js';
+import { badRequest, notFound } from '../../lib/errors.js';
 import { hashPassword } from '../../lib/password.js';
 import { importUserRow, type ImportUserRow } from './users.schema.js';
 
@@ -26,6 +26,7 @@ export interface ImportUsersResult {
 export interface UsersService {
   importUsers(rows: unknown[], actorId: number): Promise<ImportUsersResult>;
   setPassword(userId: number, password: string, actorId: number): Promise<void>;
+  deactivate(userId: number, actorId: number): Promise<void>;
 }
 
 /** Echo whatever `name` a raw (possibly invalid) row carried, so the sheet can still key on it. */
@@ -167,6 +168,40 @@ export function makeUsersService({ prisma, log }: UsersDeps): UsersService {
           entityId: String(userId),
           // WHO was reset and BY WHOM — never the password itself.
           after: { name: user.name, sessionsRevoked: true },
+        });
+      });
+    },
+
+    async deactivate(userId, actorId) {
+      // SOFT delete. The account's id is referenced by reports, change requests and audit
+      // rows; hard-deleting would either orphan or destroy that history, and "who filed
+      // this report" must survive the account being retired.
+      //
+      // Refusing self-deactivation is a real guard, not ceremony: super_admin is the only
+      // role that can create or reactivate accounts, so an admin removing their own last
+      // session could lock the organisation out of its own user management.
+      if (userId === actorId) {
+        throw badRequest('You cannot deactivate your own account', 'CANNOT_DEACTIVATE_SELF');
+      }
+
+      const user = await prisma.user.findFirst({ where: { id: userId, deletedAt: null } });
+      if (user === null) throw notFound('User not found');
+
+      await prisma.$transaction(async (tx) => {
+        await tx.user.update({ where: { id: userId }, data: { deletedAt: new Date() } });
+        // A deactivated account must not keep a live session — otherwise "removed" means
+        // "removed in 15 minutes, or 30 days if they hold a refresh token".
+        await tx.refreshToken.updateMany({
+          where: { userId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        await writeAuditLog(tx, {
+          actorId,
+          action: 'user.deactivate',
+          entityType: 'user',
+          entityId: String(userId),
+          before: { name: user.name, role: user.role, deletedAt: null },
+          after: { name: user.name, deletedAt: new Date().toISOString(), sessionsRevoked: true },
         });
       });
     },

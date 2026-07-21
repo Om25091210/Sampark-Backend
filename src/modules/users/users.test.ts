@@ -309,6 +309,71 @@ describe('POST /users/:userId/password (Phase B)', () => {
   });
 });
 
+describe('DELETE /users/:userId — soft deactivate (Phase B)', () => {
+  it('is super_admin only', async () => {
+    const app = await makeApp();
+    for (const t of [officerToken, adminToken]) {
+      const res = await app.inject({ method: 'DELETE', url: `/api/v1/users/${offId}`, headers: auth(t) });
+      expect(res.statusCode).toBe(403);
+    }
+    await app.close();
+  });
+
+  it('refuses self-deactivation — super_admin is the only role that can restore accounts', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'DELETE', url: `/api/v1/users/${saId}`, headers: auth(saToken) });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('CANNOT_DEACTIVATE_SELF');
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: saId } })).deletedAt).toBeNull();
+    await app.close();
+  });
+
+  it('soft-deletes: row survives, login stops, sessions die, and it leaves the officer roster', async () => {
+    const app = await makeApp();
+    // Create a throwaway account, log it in, then deactivate it.
+    await app.inject({
+      method: 'POST', url: '/api/v1/users/import', headers: auth(saToken),
+      payload: { users: [row({ name: 'USRIMP_SHO02', email: 'usrimp_sho02@sampark.internal' })] },
+    });
+    const target = await prisma.user.findUniqueOrThrow({ where: { name: 'USRIMP_SHO02' } });
+    const session = await app.inject({
+      method: 'POST', url: '/api/v1/auth/login',
+      payload: { email: 'usrimp_sho02@sampark.internal', password: 'Sampark@USRIMP_SHO01' },
+    });
+    const refresh = (session.json() as { refresh_token: string }).refresh_token;
+
+    const before = (await app.inject({ method: 'GET', url: '/api/v1/officers?pageSize=50', headers: auth(adminToken) })).json() as { data: { id: number }[] };
+    expect(before.data.some((o) => o.id === target.id)).toBe(true);
+
+    const del = await app.inject({ method: 'DELETE', url: `/api/v1/users/${target.id}`, headers: auth(saToken) });
+    expect(del.statusCode).toBe(204);
+
+    // The ROW survives — history that references it must not be orphaned.
+    const still = await prisma.user.findUnique({ where: { id: target.id } });
+    expect(still).not.toBeNull();
+    expect(still!.deletedAt).not.toBeNull();
+
+    // But the account is inert: no login, no surviving session, not in the roster.
+    const relogin = await app.inject({
+      method: 'POST', url: '/api/v1/auth/login',
+      payload: { email: 'usrimp_sho02@sampark.internal', password: 'Sampark@USRIMP_SHO01' },
+    });
+    expect(relogin.statusCode).toBe(401);
+    const reuse = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: refresh } });
+    expect(reuse.statusCode).toBe(401);
+    const after = (await app.inject({ method: 'GET', url: '/api/v1/officers?pageSize=50', headers: auth(adminToken) })).json() as { data: { id: number }[] };
+    expect(after.data.some((o) => o.id === target.id)).toBe(false);
+
+    await app.close();
+  });
+
+  it('404 for unknown or already-deactivated', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'DELETE', url: '/api/v1/users/99999999', headers: auth(saToken) })).statusCode).toBe(404);
+    await app.close();
+  });
+});
+
 describe('SDR-002 lockout (email-keyed 423)', () => {
   const email = `${OFF_ID.toLowerCase()}@sampark.internal`;
 
