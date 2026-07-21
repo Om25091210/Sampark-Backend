@@ -28,7 +28,6 @@
 # Staging-only. Makes the mock SMS provider write OTPs to CloudWatch in plaintext,
 # which is the only way to complete a login in a deployed environment running
 # NODE_ENV=production. variables.tf rejects `true` when environment = "production".
-# mock_otp_echo = true
 
 # --- GitHub Actions OIDC --------------------------------------------------
 # The OIDC trust policy is scoped to branch pushes on this repo:

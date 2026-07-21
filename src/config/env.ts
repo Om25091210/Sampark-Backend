@@ -23,22 +23,10 @@ const EnvSchema = z.object({
   // dev/test path). Min length matches JWT_SECRET so a real key is never a weak string.
   IMPORT_API_KEY: z.string().min(32, 'IMPORT_API_KEY must be at least 32 characters').optional(),
 
-  // OTP
-  OTP_TTL_SECONDS: z.coerce.number().int().positive().default(300),
-  OTP_LENGTH: z.coerce.number().int().min(4).max(8).default(6),
-  OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
-
-  // SMS delivery. Only `mock` is implemented; `msg91` is a placeholder for a real
-  // India-resident gateway wired in later.
-  SMS_PROVIDER: z.enum(['mock', 'msg91']).default('mock'),
-
-  // Staging-only escape hatch: makes the mock provider log the OTP even when
-  // NODE_ENV is not `development`. Needed because a deployed environment must run
-  // NODE_ENV=production, which otherwise hides the code and leaves no way to
-  // complete a login. NEVER enable where real officers exist — the code lands in
-  // CloudWatch in plaintext. Terraform's `mock_otp_echo` variable defaults to
-  // false, so production cannot enable it by omission.
-  MOCK_OTP_ECHO: z.enum(['true', 'false']).default('false'),
+  // ADR-042. OTP_* / SMS_PROVIDER / MOCK_OTP_ECHO are GONE. The SMS-OTP login track is
+  // removed entirely in favour of email+password, so there is no OTP to size, no gateway
+  // to select, and no staging escape hatch to echo a code. Terraform's `mock_otp_echo`
+  // variable and its ECS env entry go with them.
 
   // Media storage (report photos + PDF exports). `mock` keeps objects in-process and
   // returns deterministic fake URLs (dev/test); `s3` uses AWS S3 in ap-south-1
@@ -75,11 +63,6 @@ export interface AppConfig {
   importApiKey?: string;
   accessTokenTtl: string;
   refreshTokenTtlDays: number;
-  otpTtlSeconds: number;
-  otpLength: number;
-  otpMaxAttempts: number;
-  smsProvider: Env['SMS_PROVIDER'];
-  mockOtpEcho: boolean;
   storageProvider: Env['STORAGE_PROVIDER'];
   s3Bucket?: string;
   s3Region: string;
@@ -94,11 +77,6 @@ export function toAppConfig(env: Env): AppConfig {
     importApiKey: env.IMPORT_API_KEY,
     accessTokenTtl: env.ACCESS_TOKEN_TTL,
     refreshTokenTtlDays: env.REFRESH_TOKEN_TTL_DAYS,
-    otpTtlSeconds: env.OTP_TTL_SECONDS,
-    otpLength: env.OTP_LENGTH,
-    otpMaxAttempts: env.OTP_MAX_ATTEMPTS,
-    smsProvider: env.SMS_PROVIDER,
-    mockOtpEcho: env.MOCK_OTP_ECHO === 'true',
     storageProvider: env.STORAGE_PROVIDER,
     s3Bucket: env.S3_BUCKET,
     s3Region: env.S3_REGION,

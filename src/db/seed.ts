@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { hashPassword } from '../lib/password.js';
 import { createQueue } from './queue.js';
 import { composeDatabaseUrl } from '../scripts/print-database-url.js';
 
@@ -27,13 +28,34 @@ function parseDMY(value: string | undefined): Date | null {
   return new Date(Date.UTC(y, m - 1, d));
 }
 
-const USERS = [
-  // Known test super-admin for exercising the OTP auth flow from a real device.
-  { name: 'सुपर एडमिन', phone: '+919999999999', role: 'super_admin' as const, designation: 'System Administrator', thana: 'बीजापुर सदर' },
-  { name: 'एडमिन', phone: '+919888888888', role: 'admin' as const, designation: 'आईटी सेल', thana: 'बीजापुर सदर' },
-  { name: 'राजेश कुमार सिंह', phone: '+919770000001', role: 'officer' as const, designation: 'सहायक उपनिरीक्षक', thana: 'बीजापुर सदर' },
-  { name: 'प्रिया वर्मा', phone: '+919770000002', role: 'officer' as const, designation: 'आरक्षक', thana: 'भैरमगढ़' },
-];
+// ADR-042. The fabricated officers (राजेश / प्रिया) are GONE — they were never real
+// people, and the migration removes them. The seed now provisions exactly ONE account:
+// the HQ bootstrap super_admin.
+//
+// Why only one, and why here: every Phase-B endpoint (POST /users/import, password
+// reset) requires a super_admin JWT, and no one can hold a JWT without a password — so
+// the very first password cannot come from the API that needs it. This seed is that
+// bootstrap, the same category of hand-provisioned credential as JWT_SECRET. The other
+// 73 accounts arrive through POST /users/import, which upserts by `name`, so re-seeding
+// never fights the import.
+//
+// The password comes from BOOTSTRAP_ADMIN_PASSWORD. There is a dev-only fallback; any
+// other environment MUST supply it (the seed refuses to invent a credential for a
+// deployed system). Rotate it via the Phase-B reset endpoint once real HQ accounts exist.
+const BOOTSTRAP_ID = 'SPBijapur';
+const BOOTSTRAP_EMAIL = 'spbijapur@sampark.internal';
+
+function bootstrapPassword(): string {
+  const fromEnv = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+  if (fromEnv !== undefined && fromEnv.trim() !== '') return fromEnv;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'BOOTSTRAP_ADMIN_PASSWORD must be set when seeding a deployed environment — ' +
+        'the seed will not invent a super_admin credential.',
+    );
+  }
+  return 'dev-bootstrap-password';
+}
 
 // One report the seed writes against a cadre. `reportedAt` is set explicitly so
 // the newest-first ordering in the mobile feed is deterministic.
@@ -173,17 +195,32 @@ const CADRES: SeedCadre[] = [
   },
 ];
 
+// ADR-042. Upserted by `name` (the institutional ID) — the same key POST /users/import
+// uses, so the two can never create a duplicate of each other. HQ scope is unrestricted:
+// thana AND subDivision both null.
 async function seedUsers(): Promise<void> {
-  for (const u of USERS) {
-    await prisma.user.upsert({
-      where: { phone: u.phone },
-      update: { name: u.name, role: u.role, designation: u.designation, thana: u.thana },
-      create: u,
-    });
-  }
+  const passwordHash = await hashPassword(bootstrapPassword());
+  await prisma.user.upsert({
+    where: { name: BOOTSTRAP_ID },
+    update: { email: BOOTSTRAP_EMAIL, role: 'super_admin', passwordHash },
+    create: {
+      name: BOOTSTRAP_ID,
+      email: BOOTSTRAP_EMAIL,
+      role: 'super_admin',
+      designation: 'HQ',
+      passwordHash,
+      thana: null,
+      subDivision: null,
+    },
+  });
 }
 
-async function seedCadre(c: SeedCadre, assignedOfficerId: number, reportedById: number): Promise<void> {
+// ADR-042. `assignedOfficerId` is now always null and NO reports are seeded. The two
+// fabricated officers who owned them are gone, and re-creating demo reports under the
+// real HQ bootstrap account would attribute invented field work to a live institutional
+// ID — exactly the kind of fiction this codebase keeps removing. The demo cadres remain
+// (unassigned) so the app has something to render before real assignment happens.
+async function seedCadre(c: SeedCadre): Promise<void> {
   const data = {
     serialNumber: c.serialNumber,
     name: c.name,
@@ -213,7 +250,7 @@ async function seedCadre(c: SeedCadre, assignedOfficerId: number, reportedById: 
     fatherName: c.fatherName ?? null,
     motherName: c.motherName ?? null,
     spouseName: c.spouseName ?? null,
-    assignedOfficerId,
+    assignedOfficerId: null,
     // ADR-027. Re-seeding must produce a KNOWN state, and "who last touched this"
     // is part of it. Without this, a re-seed leaves whoever last edited a cadre
     // still credited on a record whose values it just overwrote — the profile reads
@@ -227,26 +264,6 @@ async function seedCadre(c: SeedCadre, assignedOfficerId: number, reportedById: 
     ? await prisma.cadre.update({ where: { id: existing.id }, data })
     : await prisma.cadre.create({ data });
 
-  for (const r of c.reports) {
-    const fields = {
-      cadreId: cadre.id,
-      reportedById,
-      reportingPlace: r.reportingPlace,
-      specificLocation: c.thana,
-      personStatus: r.personStatus,
-      currentPhone: c.phone,
-      currentActivity: r.currentActivity,
-      isHomeAddress: r.isHomeAddress,
-      reportedAt: new Date(r.reportedAt),
-    };
-    // Reconcile existing rows to the canonical data on re-run (keeps the seed a
-    // true source of truth), then create when absent.
-    await prisma.report.upsert({
-      where: { idempotencyKey: r.idempotencyKey },
-      update: fields,
-      create: { ...fields, idempotencyKey: r.idempotencyKey },
-    });
-  }
 }
 
 async function initQueueSchema(databaseUrl: string): Promise<void> {
@@ -263,15 +280,14 @@ async function main(): Promise<void> {
   }
 
   await seedUsers();
-  const officer = await prisma.user.findUniqueOrThrow({ where: { phone: '+919770000001' } });
   for (const c of CADRES) {
-    await seedCadre(c, officer.id, officer.id);
+    await seedCadre(c);
   }
   await initQueueSchema(databaseUrl);
 
   process.stdout.write(
-    `Seed complete: ${USERS.length} users, ${CADRES.length} cadres, ` +
-      `${CADRES.reduce((n, c) => n + c.reports.length, 0)} reports, and pg-boss schema initialised.\n`,
+    `Seed complete: 1 bootstrap super_admin (${BOOTSTRAP_ID}), ${CADRES.length} unassigned cadres, ` +
+      `0 reports (ADR-042), and pg-boss schema initialised.\n`,
   );
 }
 

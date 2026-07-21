@@ -11,7 +11,7 @@ describe('prisma generated client', () => {
       expect(prisma.user).toBeDefined();
       expect(prisma.cadre).toBeDefined();
       expect(prisma.report).toBeDefined();
-      expect(prisma.otpChallenge).toBeDefined();
+      // ADR-042: otpChallenge removed with the SMS-OTP track.
       expect(prisma.refreshToken).toBeDefined();
       expect(prisma.auditLog).toBeDefined();
       expect(prisma.outboxEvent).toBeDefined();

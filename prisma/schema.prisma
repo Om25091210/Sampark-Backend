@@ -87,14 +87,42 @@ enum Gender {
 
 model User {
   id            Int       @id @default(autoincrement())
-  name          String
-  phone         String    @unique
+  // ADR-042. The INSTITUTIONAL ID — e.g. "SDOPKUTRU01", "SHOGNGL07" — NOT a person's
+  // name. Real names are deliberately not stored anywhere (client decision). Unique
+  // because it is the account's identity AND the upsert key for POST /users/import.
+  //
+  // Consequence, recorded here because it is easy to forget at a call site: every
+  // audit row, change request and report attributes to this ID, so accountability is
+  // only as granular as the ID. An ID held by several people resolves to the ID, never
+  // to the person. See ADR-042 Consequences.
+  name          String    @unique
+  // ADR-042. Nullable: the SMS-OTP track is gone and these institutional accounts have
+  // no phone. Kept (unique, nullable) rather than dropped so historical rows and any
+  // future contact use keep a home — Postgres allows many NULLs under a unique index.
+  phone         String?   @unique
+  // ADR-042. The login credential. `<id-lowercased>@sampark.internal` — a non-routable
+  // ICANN-reserved private TLD; these inboxes do not exist, which is WHY password
+  // reset is super_admin-driven (Phase B) and never self-service by email.
   email         String?   @unique
-  passwordHash  String?   @map("password_hash") // admin track (deferred build)
-  totpSecret    String?   @map("totp_secret")   // admin track (deferred build)
+  // ADR-042. scrypt (node:crypto) — see lib/password.ts. NULL means "no password set
+  // yet": an imported account cannot log in until a super_admin sets one (Phase B).
+  passwordHash  String?   @map("password_hash")
+  // ADR-042/SDR-001. TOTP applies to admin + super_admin ONLY (14 accounts), never the
+  // 60 field IDs. `totpConfirmedAt` distinguishes "secret generated, enrolment never
+  // completed" from "enrolled" — without it a half-finished enrolment locks the
+  // account out, because login would stop re-offering the provisioning URI.
+  totpSecret    String?   @map("totp_secret")
+  totpConfirmedAt DateTime? @map("totp_confirmed_at")
   role          Role      @default(officer)
   designation   String?
+  // ADR-042. Scope fields for the org hierarchy → Role mapping:
+  //   HQ         = super_admin, thana + subDivision BOTH null  -> unrestricted
+  //   SDOP       = admin,       subDivision set                -> that sub-division
+  //   Thana/SHO  = officer,     thana set                      -> that thana
+  // These are compared against Cadre.thana / Cadre.subDivision, so the values must
+  // match those columns EXACTLY — see Phase 0 normalisation (ADR-043).
   thana         String?
+  subDivision   String?   @map("sub_division")
   avatarUrl     String?   @map("avatar_url")
   badgeImageUrl String?   @map("badge_image_url")
   deletedAt     DateTime? @map("deleted_at")
@@ -327,18 +355,9 @@ model CadreChangeRequest {
 
 // ─── Auth support ──────────────────────────────────────────────────────────────
 
-model OtpChallenge {
-  id         Int       @id @default(autoincrement())
-  phone      String
-  codeHash   String    @map("code_hash")
-  expiresAt  DateTime  @map("expires_at")
-  consumedAt DateTime? @map("consumed_at")
-  attempts   Int       @default(0)
-  createdAt  DateTime  @default(now()) @map("created_at")
-
-  @@index([phone])
-  @@map("otp_challenges")
-}
+// ADR-042. `OtpChallenge` is GONE. SMS-OTP was the officer login track (ADR-012); it
+// is removed entirely in favour of email+password, so the challenge table has no
+// remaining reader or writer and the migration drops it. Nothing referenced it by FK.
 
 model RefreshToken {
   id        Int       @id @default(autoincrement())

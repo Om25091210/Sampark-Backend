@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { makeAuthService } from './auth.service.js';
-import { refreshBody, sendOtpBody, verifyOtpBody } from './auth.schema.js';
+import { loginBody, refreshBody, twoFactorVerifyBody } from './auth.schema.js';
 import {
   bearerAuth,
   emptyResponse,
@@ -10,47 +10,64 @@ import {
   EXAMPLE_TOKEN_PAIR,
 } from '../../lib/openapi.js';
 
-// Officer authentication (SMS-OTP track). Mounted under /api/v1.
-// Public: otp/send, otp/verify, refresh. Authenticated: me, logout.
+// ADR-042. Email+password authentication for EVERY account. The SMS-OTP track
+// (ADR-012) is removed entirely — there is no /auth/otp/* any more.
+// Public: login, 2fa/verify, refresh. Authenticated: me, logout.
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   const service = makeAuthService({
     prisma: app.prisma,
     config: app.config,
-    sms: app.sms,
     log: app.log,
   });
 
   app.post(
-    '/auth/otp/send',
+    '/auth/login',
     {
       schema: {
         tags: ['Auth'],
-        summary: 'Send an OTP to a provisioned officer phone',
-        description: 'Public. Unknown/inactive numbers → 403 PHONE_NOT_REGISTERED (closed roster).',
-        body: zodToJson(sendOtpBody),
-        response: { 200: jsonResponse('OTP dispatched', { message: 'OTP sent', expires_in: 300 }) },
+        summary: 'Log in with email + password',
+        description:
+          'Public. Officers receive a token pair directly (`status: "authenticated"`). ' +
+          'admin/super_admin receive a 2FA challenge: `status: "totp_required"` when already ' +
+          'enrolled, or `status: "totp_enrollment"` (carrying `totp_secret` + `totp_uri`) on ' +
+          'first login. Both are completed at POST /auth/2fa/verify. A bad email, an inactive ' +
+          'account, a password-less account and a wrong password all return the SAME ' +
+          '401 INVALID_CREDENTIALS — the IDs are guessable by construction, so the form must ' +
+          'not be an enumeration oracle.',
+        body: zodToJson(loginBody),
+        response: {
+          200: jsonResponse('Authenticated, or a 2FA challenge', {
+            status: 'authenticated',
+            ...EXAMPLE_TOKEN_PAIR,
+          }),
+        },
       },
     },
     async (request) => {
-      const { phone } = sendOtpBody.parse(request.body);
-      return service.sendOtp(phone);
+      const { email, password } = loginBody.parse(request.body);
+      return service.login(email, password);
     },
   );
 
   app.post(
-    '/auth/otp/verify',
+    '/auth/2fa/verify',
     {
       schema: {
         tags: ['Auth'],
-        summary: 'Verify an OTP and receive a token pair',
-        description: 'Public. Returns snake_case tokens + a camelCase `user` (AuthUser).',
-        body: zodToJson(verifyOtpBody),
-        response: { 200: jsonResponse('Authenticated', EXAMPLE_TOKEN_PAIR) },
+        summary: 'Complete an admin/super_admin login with a TOTP code',
+        description:
+          'Public (the challenge token is the credential). Also CONFIRMS enrolment: the first ' +
+          'valid code marks the secret confirmed, after which login demands a code instead of ' +
+          're-issuing a secret.',
+        body: zodToJson(twoFactorVerifyBody),
+        response: {
+          200: jsonResponse('Authenticated', { status: 'authenticated', ...EXAMPLE_TOKEN_PAIR }),
+        },
       },
     },
     async (request) => {
-      const { phone, otp } = verifyOtpBody.parse(request.body);
-      return service.verifyOtp(phone, otp);
+      const { challenge_token, otp } = twoFactorVerifyBody.parse(request.body);
+      return service.verifyTwoFactor(challenge_token, otp);
     },
   );
 

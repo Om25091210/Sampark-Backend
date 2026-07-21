@@ -1,6 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
 import type { AppConfig } from '../config/env.js';
-import type { SmsProvider } from '../lib/sms.js';
 
 export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -11,11 +10,7 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     importApiKey: undefined,
     accessTokenTtl: '15m',
     refreshTokenTtlDays: 30,
-    otpTtlSeconds: 300,
-    otpLength: 6,
-    otpMaxAttempts: 5,
-    smsProvider: 'mock',
-    mockOtpEcho: false,
+    // ADR-042: the OTP/SMS config is gone — auth is email+password everywhere.
     storageProvider: 'mock',
     s3Region: 'ap-south-1',
     mediaUrlTtlSeconds: 604800,
@@ -32,23 +27,4 @@ export function fakeDbProbe(queryImpl: () => Promise<unknown>): PrismaClient {
     $connect: async () => undefined,
     $disconnect: async () => undefined,
   } as unknown as PrismaClient;
-}
-
-// Captures OTP codes instead of sending SMS, so integration tests can complete
-// the send → verify flow deterministically.
-export class CapturingSmsProvider implements SmsProvider {
-  readonly name = 'capturing';
-  readonly sent: Array<{ phone: string; code: string }> = [];
-
-  async sendOtp(phone: string, code: string): Promise<void> {
-    this.sent.push({ phone, code });
-  }
-
-  last(phone: string): string | undefined {
-    for (let i = this.sent.length - 1; i >= 0; i -= 1) {
-      const entry = this.sent[i];
-      if (entry !== undefined && entry.phone === phone) return entry.code;
-    }
-    return undefined;
-  }
 }

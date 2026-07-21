@@ -63,19 +63,9 @@ resource "aws_ecs_task_definition" "backend" {
         { name = "S3_REGION", value = var.aws_region },
 
         # Explicit, though it is also the default.
-        { name = "SMS_PROVIDER", value = "mock" },
-
-        # Staging-only. `mock` normally prints the OTP only under
-        # NODE_ENV=development, and a deployed environment must run
-        # NODE_ENV=production -- which would leave no way to complete a login here.
-        # This flag reopens that path. It is a plain env var, not a Secrets Manager
-        # key: a feature flag is not a secret, and putting it in the secret would
-        # freeze it under that resource's ignore_changes guard.
-        #
-        # var.mock_otp_echo defaults to false and its validation rejects `true` when
-        # environment == "production", so production cannot enable it by omission
-        # OR by accident.
-        { name = "MOCK_OTP_ECHO", value = tostring(var.mock_otp_echo) },
+        # ADR-042. SMS_PROVIDER and MOCK_OTP_ECHO are GONE with the SMS-OTP login track.
+        # There is no OTP to echo and no gateway to select: every account now signs in
+        # with email+password, so the staging escape hatch has nothing left to reopen.
 
         # ADR-034. The non-secret half of the connection string. docker-entrypoint.sh
         # composes DATABASE_URL from these plus DB_PASSWORD below.

@@ -4,8 +4,6 @@ import multipart from '@fastify/multipart';
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
 import type { AppConfig } from './config/env.js';
-import type { SmsProvider } from './lib/sms.js';
-import { createSmsProvider } from './lib/sms.js';
 import type { StorageProvider } from './lib/storage.js';
 import { createStorageProvider } from './lib/storage.js';
 import { loggerOptions } from './plugins/logging.js';
@@ -24,7 +22,6 @@ import { statsRoutes } from './modules/stats/stats.routes.js';
 declare module 'fastify' {
   interface FastifyInstance {
     config: AppConfig;
-    sms: SmsProvider;
     storage: StorageProvider;
   }
 }
@@ -34,8 +31,6 @@ export interface BuildAppOptions {
   config: AppConfig;
   /** Injected Prisma client (tests supply a real or fake one). */
   prisma?: PrismaClient;
-  /** Injected SMS provider (tests capture OTPs); defaults from config. */
-  sms?: SmsProvider;
   /** Injected storage provider (tests capture uploads); defaults from config. */
   storage?: StorageProvider;
   /** Logger config; tests pass `false` to silence output. */
@@ -53,7 +48,6 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   });
 
   app.decorate('config', opts.config);
-  app.decorate('sms', opts.sms ?? createSmsProvider(opts.config, app.log));
   app.decorate('storage', opts.storage ?? createStorageProvider(opts.config, app.log));
 
   // Doc-only schemas: routes attach Zod-derived JSON Schema purely so @fastify/swagger

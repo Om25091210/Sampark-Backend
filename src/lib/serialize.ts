@@ -5,8 +5,10 @@ import type { Cadre, Report, User } from '@prisma/client';
 // Phase 1.5 and intentionally omitted, like `avatarSource` on cadres.
 export interface WireUser {
   id: number;
+  /** ADR-042. The INSTITUTIONAL ID (e.g. "SHOGNGL07"), never a person's name. */
   name: string;
-  phone: string;
+  /** ADR-042. Optional now — institutional accounts have no phone (SMS-OTP is gone). */
+  phone?: string;
   role: User['role'];
   designation?: string;
   thana?: string;
@@ -18,7 +20,7 @@ export function toWireUser(user: User): WireUser {
   return {
     id: user.id,
     name: user.name,
-    phone: user.phone,
+    phone: user.phone ?? undefined,
     role: user.role,
     // Optional fields: omit (undefined) when absent so the JSON matches the
     // client's optional-field shape rather than sending nulls.
