@@ -11,7 +11,12 @@ export interface WireUser {
   phone?: string;
   role: User['role'];
   designation?: string;
+  /** ADR-042. Org scope. Thana/SHO accounts carry `thana`; SDOP accounts carry
+   *  `subDivision`; HQ accounts carry neither (unrestricted). Both are returned so the
+   *  client can show an account its own scope — and so Phase C's scoping is inspectable
+   *  from the outside rather than only inferable from what data comes back. */
   thana?: string;
+  subDivision?: string;
   avatarUrl?: string;
   badgeImageUrl?: string;
 }
@@ -26,6 +31,7 @@ export function toWireUser(user: User): WireUser {
     // client's optional-field shape rather than sending nulls.
     designation: user.designation ?? undefined,
     thana: user.thana ?? undefined,
+    subDivision: user.subDivision ?? undefined,
     avatarUrl: user.avatarUrl ?? undefined,
     badgeImageUrl: user.badgeImageUrl ?? undefined,
   };
