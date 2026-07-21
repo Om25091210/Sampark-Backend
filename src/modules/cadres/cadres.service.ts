@@ -97,6 +97,7 @@ function toCreateData(row: ImportCadreRow): Prisma.CadreCreateInput {
     surrenderYear: row.surrenderYear,
     regiment: row.regiment,
     subDivision: row.subDivision,
+    district: row.district,
     fatherName: row.fatherName,
     motherName: row.motherName,
     spouseName: row.spouseName,

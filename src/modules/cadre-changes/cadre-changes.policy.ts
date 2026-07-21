@@ -43,6 +43,8 @@ export const APPROVAL_FIELDS = [
   'regiment',
   'familyGroupInfo',
   'subDivision',
+  // ADR-040. Home district (the 7 Bastar-region districts), a dropdown on the edit form.
+  'district',
   // ADR-029. The four hardcopy documents, individually. Each is a claim that a
   // physical document exists, so each is signed off like any other cadre fact.
   'hasAadhaar',

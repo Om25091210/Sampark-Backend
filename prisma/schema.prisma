@@ -150,6 +150,9 @@ model Cadre {
   regiment           String?
   familyGroupInfo    String?        @map("family_group_info")
   subDivision        String?        @map("sub_division")
+  // ADR-040. Home district (dropdown on the edit form: the 7 Bastar-region districts).
+  // Nullable like subDivision — existing rows predate it; the Apps Script backfills it.
+  district           String?        @map("district")
   // ADR-036. Date of birth, stored — age is DERIVED from it on read, never stored.
   // A stored age is wrong the day after it is written and has no way to know it;
   // a birth date is a fact that does not rot. Nullable: existing rows predate it and

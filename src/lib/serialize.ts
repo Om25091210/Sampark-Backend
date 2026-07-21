@@ -65,6 +65,8 @@ export interface WireCadre {
   regiment?: string;
   familyGroupInfo?: string;
   subDivision?: string;
+  // ADR-040. Home district — one of the 7 Bastar-region districts (dropdown on edit).
+  district?: string;
   // ADR-036. Date of birth (ISO date), and `age` DERIVED from it on read — never a
   // stored int, which would be wrong the day after it was written. Both absent when
   // no birth date is on file. `age` is read-only: the client edits `dateOfBirth`.
@@ -193,6 +195,7 @@ export function toWireCadre(
     regiment: c.regiment ?? undefined,
     familyGroupInfo: c.familyGroupInfo ?? undefined,
     subDivision: c.subDivision ?? undefined,
+    district: c.district ?? undefined,
     // ADR-036. `@db.Date` stores midnight UTC; slice to the date part so the wire
     // carries `1990-05-16`, not a spurious `T00:00:00.000Z` the client must trim.
     dateOfBirth: c.dateOfBirth?.toISOString().slice(0, 10),

@@ -28,6 +28,7 @@ const fieldValue = {
   regiment: z.string().trim().max(200).nullable(),
   familyGroupInfo: z.string().trim().max(2000).nullable(),
   subDivision: z.string().trim().max(200).nullable(),
+  district: z.string().trim().max(200).nullable(),
   hasAadhaar: z.boolean(),
   hasBankAccount: z.boolean(),
   hasAbProforma: z.boolean(),

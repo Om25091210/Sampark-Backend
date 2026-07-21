@@ -104,6 +104,8 @@ export const importCadreRow = z.object({
   surrenderYear: optText,
   regiment: optText,
   subDivision: optText,
+  // ADR-040. Home district — the Apps Script can push it on import.
+  district: optText,
   fatherName: optText,
   motherName: optText,
   spouseName: optText,
