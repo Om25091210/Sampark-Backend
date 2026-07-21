@@ -2,31 +2,59 @@
 -- authenticates by email+password. `User.name` becomes the unique institutional ID and
 -- User gains the org-hierarchy scope fields.
 
--- 1. Remove the two FABRICATED seed officers (राजेश / प्रिया). They are not real people.
---    Their cadre assignments are nulled (assigned_officer_id IS nullable, so those four
---    cadres simply become unassigned, to be given to a real ID later).
---    Their 9 fabricated seed reports are DELETED rather than orphaned: reports.reported_by_id
---    is NOT NULL, and making it nullable to accommodate fake rows would permanently weaken
---    the report→reporter link the audit trail rests on — precisely the accountability this
---    ADR already narrows by dropping real names.
+-- 1. Remove ALL FOUR fabricated seed accounts. None of them are real people and none are
+--    on the 74-account roster: सुपर एडमिन / एडमिन (demo admins, no credentials under the
+--    new scheme) and राजेश / प्रिया (demo officers).
+--
+--    Every foreign key into `users` is handled below. There are eight, and they were
+--    enumerated from the schema rather than guessed — a missed one fails the DELETE with
+--    an FK violation halfway through a production migration. Checked against staging:
+--    cadre 1 carries last_edited_by_id = 1, and 5 change requests reference these users,
+--    so three of these statements are load-bearing, not defensive boilerplate.
+--
+--    Nullable FKs are nulled (the row survives, unowned). NOT NULL FKs (reports,
+--    change-request submitter) mean the row cannot survive without its user, so those
+--    fabricated rows are deleted — rather than making the columns nullable, which would
+--    permanently weaken the report→reporter and request→submitter links that the audit
+--    model depends on.
+--
+--    audit_logs.actor_id is deliberately NOT touched: it has no FK constraint (it is a
+--    plain int on an append-only, hash-chained table), so the trail keeps its record of
+--    what these ids did even after the accounts are gone.
+
+-- 1a. Cadre back-references (both nullable → null them; the cadres survive, unassigned).
 UPDATE "cadres" SET "assigned_officer_id" = NULL
- WHERE "assigned_officer_id" IN (SELECT "id" FROM "users" WHERE "phone" IN ('+919770000001', '+919770000002'));
+ WHERE "assigned_officer_id" IN (SELECT "id" FROM "users"
+   WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002'));
 
+UPDATE "cadres" SET "last_edited_by_id" = NULL, "last_edited_at" = NULL
+ WHERE "last_edited_by_id" IN (SELECT "id" FROM "users"
+   WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002'));
+
+-- 1b. Change-request approver columns (all three nullable → null them).
 UPDATE "cadre_change_requests" SET "admin_approved_by_id" = NULL
- WHERE "admin_approved_by_id" IN (SELECT "id" FROM "users" WHERE "phone" IN ('+919770000001', '+919770000002'));
+ WHERE "admin_approved_by_id" IN (SELECT "id" FROM "users"
+   WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002'));
 UPDATE "cadre_change_requests" SET "super_admin_approved_by_id" = NULL
- WHERE "super_admin_approved_by_id" IN (SELECT "id" FROM "users" WHERE "phone" IN ('+919770000001', '+919770000002'));
+ WHERE "super_admin_approved_by_id" IN (SELECT "id" FROM "users"
+   WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002'));
 UPDATE "cadre_change_requests" SET "decided_by_id" = NULL
- WHERE "decided_by_id" IN (SELECT "id" FROM "users" WHERE "phone" IN ('+919770000001', '+919770000002'));
+ WHERE "decided_by_id" IN (SELECT "id" FROM "users"
+   WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002'));
 
+-- 1c. NOT NULL back-references → the fabricated rows go with their users.
 DELETE FROM "cadre_change_requests"
- WHERE "submitted_by_id" IN (SELECT "id" FROM "users" WHERE "phone" IN ('+919770000001', '+919770000002'));
+ WHERE "submitted_by_id" IN (SELECT "id" FROM "users"
+   WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002'));
 DELETE FROM "reports"
- WHERE "reported_by_id" IN (SELECT "id" FROM "users" WHERE "phone" IN ('+919770000001', '+919770000002'));
+ WHERE "reported_by_id" IN (SELECT "id" FROM "users"
+   WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002'));
 DELETE FROM "refresh_tokens"
- WHERE "user_id" IN (SELECT "id" FROM "users" WHERE "phone" IN ('+919770000001', '+919770000002'));
+ WHERE "user_id" IN (SELECT "id" FROM "users"
+   WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002'));
 
-DELETE FROM "users" WHERE "phone" IN ('+919770000001', '+919770000002');
+DELETE FROM "users"
+ WHERE "phone" IN ('+919999999999', '+919888888888', '+919770000001', '+919770000002');
 
 -- 2. The OTP challenge table has no remaining reader or writer. Nothing references it by FK.
 DROP TABLE IF EXISTS "otp_challenges";

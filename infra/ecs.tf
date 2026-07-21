@@ -123,6 +123,21 @@ resource "aws_ecs_task_definition" "backend" {
           name      = "IMPORT_API_KEY"
           valueFrom = "${aws_secretsmanager_secret.app.arn}:IMPORT_API_KEY::"
         },
+        # ADR-042. The bootstrap super_admin's initial password, read by `prisma db seed`
+        # (src/db/seed.ts) — NOT by the server, which never looks at it. It lives on the
+        # task so a one-off `node dist/db/seed.js` via ecs execute-command inherits it
+        # from the container environment instead of being typed onto a command line that
+        # ecs execute-command is known to mangle.
+        #
+        # This exists because Phase-B's endpoints require a super_admin JWT and nobody can
+        # hold a JWT without a password — the first credential cannot come from the API
+        # that needs it. Same hand-provisioned category as JWT_SECRET; rotate it through
+        # the Phase-B reset endpoint once real HQ accounts exist. Wiring/rotation follows
+        # the IMPORT_API_KEY runbook above.
+        {
+          name      = "BOOTSTRAP_ADMIN_PASSWORD"
+          valueFrom = "${aws_secretsmanager_secret.app.arn}:BOOTSTRAP_ADMIN_PASSWORD::"
+        },
       ]
 
       # The log group is declared in logs.tf rather than auto-created here, so its
