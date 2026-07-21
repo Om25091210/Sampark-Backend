@@ -26,6 +26,8 @@
  *   DATABASE_URL="$(node dist/scripts/print-database-url.js)" npx prisma migrate deploy
  */
 
+import { pathToFileURL } from 'node:url';
+
 function required(name: string, value: string | undefined): string {
   if (value === undefined || value === '') {
     // Fail loudly. A half-composed URL would surface as an authentication error
@@ -53,7 +55,17 @@ export function composeDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
   return `postgresql://${u}:${p}@${host}:${port}/${name}?sslmode=${sslmode}`;
 }
 
-// Only prints when executed directly, so importing it stays side-effect free.
-if (process.argv[1] !== undefined && import.meta.url.endsWith('print-database-url.js')) {
+// Only prints when this module IS the entry point, so importing it stays side-effect free.
+//
+// The previous guard tested `import.meta.url.endsWith('print-database-url.js')`, which is
+// a tautology: `import.meta.url` is always THIS module's own URL, so it ended with that
+// name whether the module was executed or merely imported. The effective condition was
+// `process.argv[1] !== undefined` — i.e. "always" — so every importer printed the
+// composed URL, RDS master password and all, to stdout. `src/db/seed.ts` imports it, so
+// every seed run leaked the credential into whatever was capturing that output (an
+// `ecs execute-command` session, and any exec logging configured behind it).
+//
+// The correct test compares this module's URL against the resolved ENTRY module.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   process.stdout.write(composeDatabaseUrl());
 }
