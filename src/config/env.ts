@@ -16,6 +16,18 @@ const EnvSchema = z.object({
   ACCESS_TOKEN_TTL: z.string().min(1).default('15m'),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
 
+  // ADR-042 (amended). TOTP second factor for admin + super_admin.
+  //
+  // Temporarily DEFAULTED OFF at the client's request: enrolling 14 authenticator apps
+  // was blocking the rollout, and they want every account on plain email+password until
+  // TOTP is done properly. The TOTP code paths are intact and still tested — re-enabling
+  // is this flag, not a rebuild. Flip the default back to 'true' (or set the env var)
+  // when the client is ready.
+  //
+  // While this is 'false', admin/super_admin are single-factor like everyone else. That
+  // is a real reduction in the control SDR-001 asked for; recorded in the ADR amendment.
+  TOTP_ENABLED: z.enum(['true', 'false']).default('false'),
+
   // ADR-038 / SDR-007. Scoped machine credential for the unattended historical-import
   // job (Apps Script → POST /cadres/import). NOT a super_admin session: presenting it
   // authorizes that one route and nothing else. OPTIONAL — when unset, the key path is
@@ -63,6 +75,8 @@ export interface AppConfig {
   importApiKey?: string;
   accessTokenTtl: string;
   refreshTokenTtlDays: number;
+  /** ADR-042 (amended). When false, admin/super_admin skip the TOTP step entirely. */
+  totpEnabled: boolean;
   storageProvider: Env['STORAGE_PROVIDER'];
   s3Bucket?: string;
   s3Region: string;
@@ -77,6 +91,7 @@ export function toAppConfig(env: Env): AppConfig {
     importApiKey: env.IMPORT_API_KEY,
     accessTokenTtl: env.ACCESS_TOKEN_TTL,
     refreshTokenTtlDays: env.REFRESH_TOKEN_TTL_DAYS,
+    totpEnabled: env.TOTP_ENABLED === 'true',
     storageProvider: env.STORAGE_PROVIDER,
     s3Bucket: env.S3_BUCKET,
     s3Region: env.S3_REGION,

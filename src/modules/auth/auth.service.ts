@@ -126,7 +126,12 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
       }
 
       // Officers finish here — one factor, by design.
-      if (!TOTP_ROLES.has(user.role)) return authed(user);
+      //
+      // ADR-042 (amended): when `totpEnabled` is false, EVERY role finishes here. The
+      // client turned the second factor off for now so all 74 accounts sign in with
+      // email+password alone; the branch below is intact and still tested, so restoring
+      // it is a config flip. While off, admin/super_admin carry no second factor.
+      if (!config.totpEnabled || !TOTP_ROLES.has(user.role)) return authed(user);
 
       const challenge_token = await signChallengeToken(user.id, config.jwtSecret);
 
@@ -158,6 +163,12 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
       try {
         userId = await verifyChallengeToken(challengeToken, config.jwtSecret);
       } catch {
+        throw unauthorized('Invalid or expired challenge', 'INVALID_CHALLENGE');
+      }
+
+      // With TOTP off, no challenge should ever have been issued — refuse rather than
+      // letting a stale challenge from before the flip act as a second way in.
+      if (!config.totpEnabled) {
         throw unauthorized('Invalid or expired challenge', 'INVALID_CHALLENGE');
       }
 

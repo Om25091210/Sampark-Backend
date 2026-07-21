@@ -25,7 +25,12 @@ const IDS = [OFFICER_ID, ADMIN_ID, NOPASS_ID];
 let officerId = 0;
 let adminId = 0;
 
+// TOTP off — the current production default (ADR-042 amended).
 const makeApp = (): Promise<FastifyInstance> => buildApp({ config, prisma, logger: false });
+// TOTP on — the ADR-042 design, kept fully covered so re-enabling is a config flip and
+// not a rediscovery of whether the second factor still works.
+const makeTotpApp = (): Promise<FastifyInstance> =>
+  buildApp({ config: testConfig({ totpEnabled: true }), prisma, logger: false });
 
 interface LoginRes {
   status: string;
@@ -142,7 +147,7 @@ describe('auth (ADR-042 — email + password)', () => {
   // ── admin/super_admin: TOTP enrolment then challenge ───────────────────────
 
   it('an admin’s FIRST login returns a TOTP enrolment (secret + provisioning URI), not tokens', async () => {
-    const app = await makeApp();
+    const app = await makeTotpApp();
     const { status, body } = await login(app, ADMIN_EMAIL);
     expect(status).toBe(200);
     expect(body.status).toBe('totp_enrollment');
@@ -155,7 +160,7 @@ describe('auth (ADR-042 — email + password)', () => {
   });
 
   it('a valid code completes enrolment and issues tokens; the next login then DEMANDS a code', async () => {
-    const app = await makeApp();
+    const app = await makeTotpApp();
     const first = await login(app, ADMIN_EMAIL);
     const secret = first.body.totp_secret!;
 
@@ -176,7 +181,7 @@ describe('auth (ADR-042 — email + password)', () => {
   });
 
   it('a wrong TOTP code is refused', async () => {
-    const app = await makeApp();
+    const app = await makeTotpApp();
     const first = await login(app, ADMIN_EMAIL);
     const res = await app.inject({
       method: 'POST', url: '/api/v1/auth/2fa/verify',
@@ -189,7 +194,7 @@ describe('auth (ADR-042 — email + password)', () => {
 
   // The two token kinds must not be interchangeable in either direction.
   it('a 2FA challenge token is NOT usable as an access token', async () => {
-    const app = await makeApp();
+    const app = await makeTotpApp();
     const first = await login(app, ADMIN_EMAIL);
     const res = await app.inject({
       method: 'GET', url: '/api/v1/auth/me',
@@ -200,11 +205,43 @@ describe('auth (ADR-042 — email + password)', () => {
   });
 
   it('an access token is NOT usable as a 2FA challenge', async () => {
-    const app = await makeApp();
+    const app = await makeTotpApp();
     const { body } = await login(app, OFFICER_EMAIL);
     const res = await app.inject({
       method: 'POST', url: '/api/v1/auth/2fa/verify',
       payload: { challenge_token: body.access_token, otp: '123456' },
+    });
+    expect(res.statusCode).toBe(401);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('INVALID_CHALLENGE');
+    await app.close();
+  });
+
+  // ── ADR-042 amended: TOTP disabled ─────────────────────────────────────────
+
+  it('with TOTP disabled, an admin logs in with email+password alone — no challenge', async () => {
+    const app = await makeApp(); // totpEnabled: false
+    const { status, body } = await login(app, ADMIN_EMAIL);
+    expect(status).toBe(200);
+    expect(body.status).toBe('authenticated');
+    expect(typeof body.access_token).toBe('string');
+    // No challenge, and crucially no secret handed out.
+    expect(body.challenge_token).toBeUndefined();
+    expect(body.totp_secret).toBeUndefined();
+    await app.close();
+  });
+
+  it('with TOTP disabled, /auth/2fa/verify refuses even a well-formed challenge', async () => {
+    // A challenge minted while the flag was on must not stay usable after it is off.
+    const totpApp = await makeTotpApp();
+    const enrol = await login(totpApp, ADMIN_EMAIL);
+    const challenge = enrol.body.challenge_token!;
+    const secret = enrol.body.totp_secret!;
+    await totpApp.close();
+
+    const app = await makeApp(); // flag now off
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/auth/2fa/verify',
+      payload: { challenge_token: challenge, otp: authenticator.generate(secret) },
     });
     expect(res.statusCode).toBe(401);
     expect((res.json() as { error: { code: string } }).error.code).toBe('INVALID_CHALLENGE');

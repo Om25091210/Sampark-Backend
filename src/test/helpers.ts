@@ -10,6 +10,9 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     importApiKey: undefined,
     accessTokenTtl: '15m',
     refreshTokenTtlDays: 30,
+    // ADR-042 (amended): mirrors the production default — off. The TOTP tests opt in
+    // explicitly via testConfig({ totpEnabled: true }) so both modes stay covered.
+    totpEnabled: false,
     // ADR-042: the OTP/SMS config is gone — auth is email+password everywhere.
     storageProvider: 'mock',
     s3Region: 'ap-south-1',
