@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { nfc } from '../../lib/text.js';
 
 // ─── Bulk account creation (Phase B) ──────────────────────────────────────────
 //
@@ -14,11 +15,14 @@ import { z } from 'zod';
 /** Bounds the request body; the client batches well under this. */
 export const MAX_USER_IMPORT_BATCH = 200;
 
+// Phase 0: NFC. `thana`/`subDivision` here ARE the account's authorisation scope, and
+// they are compared against the same fields on cadres. A canonically-equal but
+// byte-different spelling would under-scope the account with no visible symptom.
 const optText = z
   .string()
   .trim()
   .nullish()
-  .transform((v) => (v === null || v === '' ? undefined : v));
+  .transform((v) => (v === null || v === undefined || v === '' ? undefined : nfc(v)));
 
 export const importUserRow = z
   .object({

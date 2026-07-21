@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { nfc } from '../../lib/text.js';
 
 // ADR-033. A repeatable query param arrives as a string when sent once and an array
 // when sent more than once. Normalising here means the service always sees an array
@@ -21,7 +22,7 @@ export const listCadresQuery = z.object({
   // ADR-033. Real distinct values from the roster, offered by GET /cadres/facets —
   // never a hardcoded list. Matched as a substring, case-insensitively: a cadre's
   // thana reads "बीजापुर / गंगालूर", so an equality match on "बीजापुर" would miss it.
-  thana: multi(z.string().trim().min(1).max(100)),
+  thana: multi(z.string().trim().min(1).max(100).transform(nfc)),
   designation: multi(z.string().trim().min(1).max(200)),
   // ADR-019. Splits the surrendered cadres into the dashboard's two tiles:
   // `district` = surrendered in Bijapur, `other` = another district or state.
@@ -66,11 +67,15 @@ export const MAX_IMPORT_BATCH = 200;
 
 // Optional free-text field: accepts a string, or null/undefined/"" as "absent".
 // Apps Script sends null for an empty sheet cell; all three normalise to undefined.
+// Phase 0: also NFC — `subDivision` and `district` are compared against an account's
+// scope, and two canonically-equal spellings that are not byte-equal silently fail to
+// match. Applied to every optText field, not just the two: normalising at the boundary
+// closes the class, and NFC is idempotent, so it costs nothing on the rest.
 const optText = z
   .string()
   .trim()
   .nullish()
-  .transform((v) => (v === null || v === '' ? undefined : v));
+  .transform((v) => (v === null || v === undefined || v === '' ? undefined : nfc(v)));
 
 // Optional ISO date (the sheet's ~29 malformed dates are cleaned upstream — we expect
 // clean ISO here, per the spec). null/"" → undefined; a bad date string fails the row.
@@ -88,7 +93,7 @@ export const importCadreRow = z.object({
   name: z.string().trim().min(1, 'name is required'),
   // Required but MAY be empty (decided): a cadre with no phone sends "", not null.
   phone: z.string(),
-  thana: z.string().trim().min(1, 'thana is required'),
+  thana: z.string().trim().min(1, 'thana is required').transform(nfc),
   currentAddress: z.string().trim().min(1, 'currentAddress is required'),
   designation: z.string().trim().min(1, 'designation is required'),
   category: z.enum(['surrendered', 'jail', 'thana']),
