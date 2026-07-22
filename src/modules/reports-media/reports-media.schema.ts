@@ -4,13 +4,6 @@ import { z } from 'zod';
 export const mediaCadreParam = z.object({ cadreId: z.coerce.number().int().positive() });
 export type MediaCadreParam = z.infer<typeof mediaCadreParam>;
 
-// The mobile client uploads report photos as image/jpeg or image/png (see
-// report.service.ts uploadPhoto). Anything else is rejected at the edge.
-export const EXT_BY_TYPE: Record<string, string> = {
-  'image/jpeg': 'jpg',
-  'image/png': 'png',
-};
-
-export function isAllowedImageType(mimetype: string): boolean {
-  return mimetype in EXT_BY_TYPE;
-}
+// Image-type knowledge moved to lib/images.ts when the bulk avatar backfill needed it
+// too; re-exported here so the media routes' existing imports keep reading naturally.
+export { EXT_BY_TYPE, isAllowedImageType } from '../../lib/images.js';

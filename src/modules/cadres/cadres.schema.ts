@@ -144,6 +144,52 @@ export const importCadresBody = z.object({
 export type ImportCadreRow = z.infer<typeof importCadreRow>;
 export type ImportCadresBody = z.infer<typeof importCadresBody>;
 
+// ── Bulk avatar backfill (Design-Docs#8) ─────────────────────────────────────────
+// The photo half of the same historical register ADR-038 loaded the text of. Same
+// tooling, same per-row-result contract, same bypass of the ADR-026/029 ladder and
+// for the same reason: this is a backfill of historical fact onto rows that already
+// exist, not an officer proposing an edit. Auth is super_admin JWT ONLY — deliberately
+// not SDR-007's machine key, matching /users/import: this WRITES OVER existing records
+// rather than creating new ones, so the acting super_admin's id must be in the audit.
+
+/**
+ * Far smaller than MAX_IMPORT_BATCH (200). An import row is a handful of short
+ * strings; a backfill row carries a whole photo, so the batch is bounded by bytes in
+ * practice, not by row count. 20 rows × ~1 MB of base64 sits inside the body limit
+ * below with room to spare, and keeps ~1,478 photos to ~74 calls.
+ */
+export const MAX_AVATAR_BACKFILL_BATCH = 20;
+
+/**
+ * Per-route body limit. Fastify's DEFAULT is 1 MiB (app.ts builds the instance without
+ * a `bodyLimit`), which is about seven register photos — a 20-row batch would be
+ * rejected outright with the default in place. This is the limit that actually bounds
+ * a batch: 20 images of unknown size have no useful average, so the byte ceiling does
+ * the work the row count cannot.
+ */
+export const AVATAR_BACKFILL_BODY_LIMIT_BYTES = 20 * 1024 * 1024;
+
+// One photo row. `serialNumber` is a STRING here exactly as in importCadreRow — the
+// same Apps Script sends both, and one endpoint coercing numbers while the other
+// refuses them is a trap. `base64Image` is validated by DECODING it in the service,
+// not by a regex: the bytes either sniff as JPEG/PNG or the row fails.
+export const avatarBackfillRow = z.object({
+  serialNumber: z.string().trim().min(1, 'serialNumber is required'),
+  base64Image: z.string().trim().min(1, 'base64Image is required'),
+});
+
+// Same envelope discipline as importCadresBody: rows arrive as unknowns so one
+// malformed row cannot fail the whole parse.
+export const avatarBackfillBody = z.object({
+  avatars: z
+    .array(z.unknown())
+    .min(1, 'avatars must be a non-empty array')
+    .max(MAX_AVATAR_BACKFILL_BATCH),
+});
+
+export type AvatarBackfillRow = z.infer<typeof avatarBackfillRow>;
+export type AvatarBackfillBody = z.infer<typeof avatarBackfillBody>;
+
 export const cadreIdParam = z.object({ id: z.coerce.number().int().positive() });
 export const transferParams = z.object({ cadreId: z.coerce.number().int().positive() });
 

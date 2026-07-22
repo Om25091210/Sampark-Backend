@@ -110,6 +110,22 @@ export const EXAMPLE_IMPORT_RESULT = {
   ],
 };
 
+// Design-Docs#8. Per-row outcome of the bulk avatar backfill, keyed by serialNumber
+// like the import above so the Apps Script writes it straight back into the sheet.
+export const EXAMPLE_AVATAR_BACKFILL_RESULT = {
+  results: [
+    { serialNumber: '1', status: 'updated', cadreId: 1801, avatarKey: 'cadres/cadre-1801/avatar-9f1c….jpg' },
+    {
+      serialNumber: '2',
+      status: 'skipped_has_avatar',
+      cadreId: 1802,
+      avatarKey: 'cadres/cadre-1802/avatar-4b7e….jpg',
+    },
+    { serialNumber: '3', status: 'not_found' },
+    { serialNumber: '4', status: 'error', cadreId: 1804, error: 'image is neither JPEG nor PNG' },
+  ],
+};
+
 export const EXAMPLE_TOKEN_PAIR = {
   access_token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
   refresh_token: '9f1c2b7e6a4d…',

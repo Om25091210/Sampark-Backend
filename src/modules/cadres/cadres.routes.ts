@@ -2,11 +2,14 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
 import { makeCadresService } from './cadres.service.js';
 import {
+  avatarBackfillBody,
   cadreIdParam,
   importCadresBody,
   listCadresQuery,
   transferBody,
   transferParams,
+  AVATAR_BACKFILL_BODY_LIMIT_BYTES,
+  MAX_AVATAR_BACKFILL_BATCH,
 } from './cadres.schema.js';
 import { forbidden, unauthorized } from '../../lib/errors.js';
 import {
@@ -15,6 +18,7 @@ import {
   examplePage,
   jsonResponse,
   zodToJson,
+  EXAMPLE_AVATAR_BACKFILL_RESULT,
   EXAMPLE_CADRE,
   EXAMPLE_IMPORT_RESULT,
 } from '../../lib/openapi.js';
@@ -27,6 +31,9 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     // ADR-029: re-signs `avatarKey` on read, so a cadre photo never goes stale.
     storage: app.storage,
     mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+    // The bulk backfill holds each image to the same per-file ceiling the multipart
+    // upload route enforces, so one photo cannot arrive by a laxer path than another.
+    maxAvatarBytes: app.config.uploadMaxBytes,
   });
 
   // SDR-007. Auth for the bulk historical import, LOCAL to this one route — never a
@@ -85,6 +92,48 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
       // Machine-key path → null actor; interactive super_admin → their id.
       const actorId = request.authUser?.sub ?? null;
       return service.importCadres(cadres, actorId);
+    },
+  );
+
+  // Design-Docs#8. The photo half of the ADR-038 register backfill. Registered before
+  // `/cadres/:id` alongside the other static segments (see the note on /cadres/facets).
+  //
+  // Auth is a plain super_admin JWT — NOT `authenticateImport`. The machine key exists
+  // because an unattended script cannot complete a TOTP login to CREATE rows; this
+  // route WRITES OVER rows that already exist, which is the same accountability line
+  // /users/import draws when it refuses the key too.
+  app.post(
+    '/cadres/avatar-backfill',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      // Fastify's default body limit is 1 MiB — about seven register photos. Without
+      // this override a full batch is rejected before any handler sees it.
+      bodyLimit: AVATAR_BACKFILL_BODY_LIMIT_BYTES,
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Bulk avatar backfill by serialNumber (super_admin)',
+        description:
+          'Design-Docs#8. Sets cadre photos in bulk from the historical register, matching ' +
+          'EXISTING cadres by `serialNumber` (ADR-025). Body is an OBJECT with an `avatars` ' +
+          `array (max ${MAX_AVATAR_BACKFILL_BATCH} rows, ` +
+          `${AVATAR_BACKFILL_BODY_LIMIT_BYTES / (1024 * 1024)} MiB total). Each row is ` +
+          '`{ serialNumber, base64Image }`; a `data:` URI prefix is accepted and stripped. ' +
+          'The image type is SNIFFED from the decoded bytes (JPEG or PNG only) — no content ' +
+          'type is taken from the caller. Bypasses the ADR-026/029 change-request ladder and ' +
+          'writes `avatarKey` directly, exactly as ADR-038 bypasses it for the row import. ' +
+          'A cadre that ALREADY has an `avatarKey` is skipped, never overwritten, so a re-run ' +
+          'is idempotent. Returns a per-row result array in input order — one bad row is ' +
+          'reported, it does not fail the batch.',
+        security: bearerAuth,
+        body: zodToJson(avatarBackfillBody),
+        response: {
+          200: jsonResponse('Per-row backfill results', EXAMPLE_AVATAR_BACKFILL_RESULT),
+        },
+      },
+    },
+    async (request) => {
+      const { avatars } = avatarBackfillBody.parse(request.body);
+      return service.backfillAvatars(avatars, request.authUser!.sub);
     },
   );
 

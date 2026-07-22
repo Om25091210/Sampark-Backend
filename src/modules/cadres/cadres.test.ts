@@ -18,6 +18,8 @@ const PAGE_TOKEN = 'PGNFIXTURE';
 const ORIGIN_TOKEN = 'ORGFIXTURE';
 const ALERT_TOKEN = 'ALTFIXTURE';
 const FACET_TOKEN = 'FCTFIXTURE';
+// Design-Docs#8 avatar-backfill fixtures — own prefix, same cleanup discipline.
+const AVATAR_TOKEN = 'AVTFIXTURE';
 const DUE_NAME = 'TEST CADRE DUE';
 // A cadre reporting on this date is next due 30 days later (ADR-022).
 const DUE_REPORT_AT = new Date('2026-06-01T00:00:00.000Z');
@@ -189,6 +191,14 @@ afterAll(async () => {
     where: { entityType: 'cadre', entityId: { in: imported.map((c) => String(c.id)) } },
   });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: IMPORT_TOKEN } } });
+  // Design-Docs#8 avatar-backfill fixtures + their audit rows.
+  const backfilled = await prisma.cadre.findMany({
+    where: { name: { startsWith: AVATAR_TOKEN } }, select: { id: true },
+  });
+  await prisma.auditLog.deleteMany({
+    where: { entityType: 'cadre', entityId: { in: backfilled.map((c) => String(c.id)) } },
+  });
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: AVATAR_TOKEN } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });
@@ -923,6 +933,255 @@ describe('cadres import (ADR-038)', () => {
     const app = await keyedApp();
     const res = await app.inject({ method: 'POST', url, headers: importAuth, payload: { cadres: [] } });
     expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+});
+
+// ── Bulk avatar backfill (Design-Docs#8) ──────────────────────────────────────
+describe('cadres avatar backfill (Design-Docs#8)', () => {
+  const url = '/api/v1/cadres/avatar-backfill';
+  // A real 1x1 PNG — the type is sniffed from actual magic bytes, so a placeholder
+  // string would not survive it.
+  const PNG_B64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  // JPEG needs only its FF D8 FF start-of-image marker to be identified.
+  const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+
+  interface BackfillResp {
+    results: Array<{
+      serialNumber: string | null;
+      status: string;
+      cadreId?: number;
+      avatarKey?: string;
+      error?: string;
+    }>;
+  }
+
+  // A cadre that exists but has no photo yet — the backfill's actual target.
+  const makeTarget = async (suffix: string): Promise<{ id: number; serial: string }> => {
+    const serial = `${AVATAR_TOKEN}-${suffix}`;
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${AVATAR_TOKEN} ${suffix}`, phone: '+910000000001', thana: 'बीजापुर',
+        currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
+        alertLevel: 'normal', serialNumber: serial, subDivision: 'बीजापुर',
+      },
+    });
+    return { id: c.id, serial };
+  };
+
+  it('rejects an unauthenticated call with 401', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'POST', url, payload: { avatars: [] } });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('rejects an officer JWT with 403', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(officerToken),
+      payload: { avatars: [{ serialNumber: 'x', base64Image: PNG_B64 }] },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('rejects an admin JWT with 403 (backfill is super_admin-tier)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(adminToken),
+      payload: { avatars: [{ serialNumber: 'x', base64Image: PNG_B64 }] },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  // The distinguishing auth rule: unlike /cadres/import, the SDR-007 machine key is
+  // NOT a way in here, because this writes over records that already exist.
+  it('rejects the SDR-007 machine key with 401 — not accepted on this route', async () => {
+    const app = await buildApp({
+      config: testConfig({ importApiKey: IMPORT_KEY }), prisma, logger: false,
+    });
+    const res = await app.inject({
+      method: 'POST', url, headers: { 'x-sampark-import-key': IMPORT_KEY },
+      payload: { avatars: [{ serialNumber: 'x', base64Image: PNG_B64 }] },
+    });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('sets avatarKey directly, bypassing the ADR-026 ladder, and audits the super_admin', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('1');
+
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { avatars: [{ serialNumber: serial, base64Image: PNG_B64 }] },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as BackfillResp).results;
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ serialNumber: serial, status: 'updated', cadreId: id });
+    expect(results[0]!.avatarKey).toMatch(new RegExp(`^cadres/cadre-${id}/avatar-.*\\.png$`));
+
+    // The column is written directly — no change request was created.
+    const row = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(row.avatarKey).toBe(results[0]!.avatarKey);
+    expect(await prisma.cadreChangeRequest.count({ where: { cadreId: id } })).toBe(0);
+
+    // The photo is served as a signed URL, and the key itself never goes on the wire.
+    const get = await app.inject({
+      method: 'GET', url: `/api/v1/cadres/${id}`, headers: auth(superAdminToken),
+    });
+    const body = get.json() as Record<string, unknown>;
+    expect(body.avatarUrl).toContain('avatar-');
+    expect(body).not.toHaveProperty('avatarKey');
+
+    // Bypassing approval makes the audit row the only account of who did this.
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.avatar_backfill' },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit!.actorId).toBe(superAdminId);
+    await app.close();
+  });
+
+  it('skips a cadre that already has a photo — a re-run cannot clobber it', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('2');
+    const first = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { avatars: [{ serialNumber: serial, base64Image: PNG_B64 }] },
+    });
+    const originalKey = (first.json() as BackfillResp).results[0]!.avatarKey;
+
+    const second = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { avatars: [{ serialNumber: serial, base64Image: JPEG_B64 }] },
+    });
+    expect(second.statusCode).toBe(200);
+    expect((second.json() as BackfillResp).results[0]).toMatchObject({
+      serialNumber: serial, status: 'skipped_has_avatar', cadreId: id, avatarKey: originalKey,
+    });
+    // Unchanged on disk, and the skip wrote no second audit row.
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id } })).avatarKey).toBe(originalKey);
+    expect(await prisma.auditLog.count({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.avatar_backfill' },
+    })).toBe(1);
+    await app.close();
+  });
+
+  it('reports an unmatched serial as not_found without failing the batch', async () => {
+    const app = await makeApp();
+    const { serial } = await makeTarget('3');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: {
+        avatars: [
+          { serialNumber: `${AVATAR_TOKEN}-NOSUCHSERIAL`, base64Image: PNG_B64 },
+          { serialNumber: serial, base64Image: JPEG_B64 },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as BackfillResp).results;
+    expect(results[0]).toMatchObject({ status: 'not_found' });
+    expect(results[0]!.cadreId).toBeUndefined();
+    // Order is preserved and the good row still landed — as a .jpg, from its bytes.
+    expect(results[1]).toMatchObject({ serialNumber: serial, status: 'updated' });
+    expect(results[1]!.avatarKey).toMatch(/\.jpg$/);
+    await app.close();
+  });
+
+  it('rejects a non-image payload per-row, leaving the rest of the batch intact', async () => {
+    const app = await makeApp();
+    const good = await makeTarget('4');
+    const bad = await makeTarget('5');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: {
+        avatars: [
+          // Valid base64, but the bytes are a PDF header — not an image.
+          {
+            serialNumber: bad.serial,
+            base64Image: Buffer.from('%PDF-1.7 not an image').toString('base64'),
+          },
+          { serialNumber: good.serial, base64Image: PNG_B64 },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as BackfillResp).results;
+    expect(results[0]).toMatchObject({ serialNumber: bad.serial, status: 'error' });
+    expect(results[0]!.error).toContain('neither JPEG nor PNG');
+    expect(results[1]).toMatchObject({ serialNumber: good.serial, status: 'updated' });
+    // The rejected row stayed photoless.
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: bad.id } })).avatarKey).toBeNull();
+    await app.close();
+  });
+
+  it('accepts a data: URI prefix, since that is what an encoder often emits', async () => {
+    const app = await makeApp();
+    const { serial } = await makeTarget('6');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { avatars: [{ serialNumber: serial, base64Image: `data:image/png;base64,${PNG_B64}` }] },
+    });
+    expect((res.json() as BackfillResp).results[0]).toMatchObject({
+      serialNumber: serial, status: 'updated',
+    });
+    await app.close();
+  });
+
+  it('reports a row missing base64Image as that row error, not a failed batch', async () => {
+    const app = await makeApp();
+    const { serial } = await makeTarget('7');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { avatars: [{ serialNumber: serial }, { serialNumber: serial, base64Image: PNG_B64 }] },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as BackfillResp).results;
+    expect(results[0]).toMatchObject({ serialNumber: serial, status: 'error' });
+    expect(results[0]!.error).toContain('base64Image');
+    expect(results[1]).toMatchObject({ status: 'updated' });
+    await app.close();
+  });
+
+  it('rejects a batch over the row cap with 400 (envelope validation)', async () => {
+    const app = await makeApp();
+    const avatars = Array.from({ length: 21 }, () => ({}));
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken), payload: { avatars },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
+    await app.close();
+  });
+
+  it('rejects an empty avatars array with 400', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken), payload: { avatars: [] },
+    });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+
+  // The route raises Fastify's 1 MiB default; without that override a full batch of
+  // real photos would 413 before any handler ran.
+  it('accepts a body larger than the 1 MiB Fastify default', async () => {
+    const app = await makeApp();
+    const { serial } = await makeTarget('8');
+    // ~2 MiB of "JPEG": the SOI marker plus padding, so it still sniffs as one.
+    const big = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(2 * 1024 * 1024, 0x20)]);
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { avatars: [{ serialNumber: serial, base64Image: big.toString('base64') }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as BackfillResp).results[0]).toMatchObject({ status: 'updated' });
     await app.close();
   });
 });

@@ -7,8 +7,12 @@ import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import type { StorageProvider } from '../../lib/storage.js';
+import { randomUUID } from 'node:crypto';
+import { decodeBase64Image, sniffImageType, EXT_BY_TYPE } from '../../lib/images.js';
 import {
+  avatarBackfillRow,
   importCadreRow,
+  type AvatarBackfillRow,
   type ImportCadreRow,
   type ResolvedListCadresQuery,
 } from './cadres.schema.js';
@@ -19,6 +23,8 @@ export interface CadresDeps {
   // ADR-029. Re-signs `avatarKey` on read, exactly as reports do for photo keys.
   storage: StorageProvider;
   mediaUrlTtlSeconds: number;
+  /** Per-image ceiling for the bulk avatar backfill; the single-upload route's cap. */
+  maxAvatarBytes: number;
 }
 
 export interface Paginated<T> {
@@ -50,6 +56,26 @@ export interface ImportResult {
   results: ImportRowResult[];
 }
 
+// Design-Docs#8. Per-row outcome of the bulk avatar backfill, same contract as
+// ImportRowResult so the Apps Script writes it back into the sheet the same way.
+//
+// `not_found` is its own status rather than an `error`: a serial the register has but
+// the database does not is an expected, actionable gap in a backfill (the text import
+// skipped that row), not a malfunction. Collapsing it into `error` would bury it among
+// genuine failures in the sheet.
+export interface AvatarBackfillRowResult {
+  serialNumber: string | null;
+  status: 'updated' | 'skipped_has_avatar' | 'not_found' | 'error';
+  cadreId?: number;
+  /** The stored S3 key, on `updated` — so the sheet records what was written. */
+  avatarKey?: string;
+  error?: string;
+}
+
+export interface AvatarBackfillResult {
+  results: AvatarBackfillRowResult[];
+}
+
 export interface CadresService {
   // ADR-044. `scope` is the caller's row-level authorisation, resolved per request in the
   // auth plugin. It is a REQUIRED parameter, not an optional one: an optional scope is a
@@ -62,6 +88,11 @@ export interface CadresService {
   // ADR-038. Bulk historical import. `actorId` is the super_admin's id for an
   // interactive call, or null when authenticated by the SDR-007 machine key.
   importCadres(rows: unknown[], actorId: number | null): Promise<ImportResult>;
+  // Design-Docs#8. Bulk avatar backfill onto EXISTING rows, matched by serialNumber.
+  // No `scope` parameter, for the same reason importCadres has none: the route is
+  // super_admin-only, and a super_admin's scope is unrestricted by definition
+  // (ADR-044). `actorId` is NOT nullable here — there is no machine-key path.
+  backfillAvatars(rows: unknown[], actorId: number): Promise<AvatarBackfillResult>;
 }
 
 // Echoes whatever serialNumber a raw (possibly invalid) row carried, so a row that
@@ -157,7 +188,13 @@ const LATEST_REPORT = {
   lastEditedBy: { select: { id: true, name: true } },
 } as const satisfies Prisma.CadreInclude;
 
-export function makeCadresService({ prisma, log, storage, mediaUrlTtlSeconds }: CadresDeps): CadresService {
+export function makeCadresService({
+  prisma,
+  log,
+  storage,
+  mediaUrlTtlSeconds,
+  maxAvatarBytes,
+}: CadresDeps): CadresService {
   /**
    * ADR-029. Signs each row's `avatarKey` into a fresh GET URL. Only rows that
    * actually carry a key cost an S3 call, so a page of cadres with no photos costs
@@ -466,6 +503,148 @@ export function makeCadresService({ prisma, log, storage, mediaUrlTtlSeconds }: 
               error: 'internal error creating cadre',
             };
           }
+        }
+      }
+
+      return { results };
+    },
+
+    async backfillAvatars(rows, actorId) {
+      // Phase 1: validate every row up front (safeParse), same as importCadres — one
+      // unusable row becomes that row's result, never a failed batch.
+      const results: AvatarBackfillRowResult[] = new Array(rows.length);
+      const valid: { index: number; row: AvatarBackfillRow }[] = [];
+      rows.forEach((raw, index) => {
+        const parsed = avatarBackfillRow.safeParse(raw);
+        if (!parsed.success) {
+          results[index] = {
+            serialNumber: rawSerial(raw),
+            status: 'error',
+            error: formatIssues(parsed.error),
+          };
+        } else {
+          valid.push({ index, row: parsed.data });
+        }
+      });
+
+      // Phase 2: one query resolving every serial to its cadre, so the match is a map
+      // lookup per row rather than a query per row. `deletedAt: null` — a soft-deleted
+      // cadre is not a backfill target, and reports as `not_found` rather than being
+      // silently revived with a photo.
+      const serials = valid.map((v) => v.row.serialNumber);
+      const existing =
+        serials.length > 0
+          ? await prisma.cadre.findMany({
+              where: { serialNumber: { in: serials }, deletedAt: null },
+              select: { id: true, serialNumber: true, avatarKey: true },
+            })
+          : [];
+      const bySerial = new Map<string, { id: number; avatarKey: string | null }>();
+      for (const e of existing) {
+        if (e.serialNumber !== null) bySerial.set(e.serialNumber, { id: e.id, avatarKey: e.avatarKey });
+      }
+
+      // Phase 3: one row at a time — decode, verify, upload, then write. Sequential on
+      // purpose: each row holds a decoded image in memory, and a parallel batch of 20
+      // would multiply the peak on a single-server budget for no useful gain (the
+      // 6-minute Apps Script cap is spent on the round trip, not on our concurrency).
+      for (const { index, row } of valid) {
+        const match = bySerial.get(row.serialNumber);
+        if (match === undefined) {
+          results[index] = { serialNumber: row.serialNumber, status: 'not_found' };
+          continue;
+        }
+        // Already has a photo → skip, never overwrite. Same discipline as the two
+        // import endpoints (an existing serial/name is skipped, not rewritten), so a
+        // re-run of the script is idempotent and cannot clobber a photo an officer has
+        // since replaced through the ADR-026 ladder. NOTE: this checks `avatarKey`
+        // only — a row carrying just the LEGACY `avatarUrl` is still backfilled, which
+        // is the intended upgrade path.
+        if (match.avatarKey !== null) {
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'skipped_has_avatar',
+            cadreId: match.id,
+            avatarKey: match.avatarKey,
+          };
+          continue;
+        }
+
+        const buffer = decodeBase64Image(row.base64Image);
+        if (buffer === null) {
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'error',
+            cadreId: match.id,
+            error: 'base64Image is not decodable base64',
+          };
+          continue;
+        }
+        if (buffer.byteLength > maxAvatarBytes) {
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'error',
+            cadreId: match.id,
+            error: `image is ${buffer.byteLength} bytes, over the ${maxAvatarBytes}-byte limit`,
+          };
+          continue;
+        }
+        // The bytes are the only claim about type that cannot be wrong — the sheet
+        // extraction's idea of a content type is a guess. This doubles as the real
+        // base64 validation: garbage decodes to bytes that sniff as nothing.
+        const contentType = sniffImageType(buffer);
+        if (contentType === null) {
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'error',
+            cadreId: match.id,
+            error: 'image is neither JPEG nor PNG',
+          };
+          continue;
+        }
+
+        try {
+          // Same key convention as POST /cadres/:cadreId/avatar/upload, so the read
+          // path re-signs a backfilled photo exactly as it does an officer-uploaded one.
+          const key = `cadres/cadre-${match.id}/avatar-${randomUUID()}.${EXT_BY_TYPE[contentType] ?? 'bin'}`;
+          // S3 first, then the row. The put is outside the transaction because it
+          // cannot be rolled back by one; a failed write below leaves an unreferenced
+          // object, which is the same harmless outcome the upload route already
+          // produces every time a proposed photo is never approved.
+          await storage.put(key, buffer, contentType);
+
+          await prisma.$transaction(async (tx) => {
+            await tx.cadre.update({ where: { id: match.id }, data: { avatarKey: key } });
+            // Bypassing the ADR-026/029 approval ladder means the audit row is the
+            // ONLY record of who changed this photo — hence a non-null actor is
+            // required by the signature, and `before` carries the displaced value.
+            await writeAuditLog(tx, {
+              actorId,
+              action: 'cadre.avatar_backfill',
+              entityType: 'cadre',
+              entityId: String(match.id),
+              before: { avatarKey: null },
+              after: { serialNumber: row.serialNumber, avatarKey: key },
+            });
+          });
+
+          // Guard the same serial appearing twice in one batch: the second occurrence
+          // now sees a photo on file and skips, rather than uploading over the first.
+          bySerial.set(row.serialNumber, { id: match.id, avatarKey: key });
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'updated',
+            cadreId: match.id,
+            avatarKey: key,
+          };
+        } catch (err) {
+          log.error({ err, serialNumber: row.serialNumber }, 'cadre avatar backfill row failed');
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'error',
+            cadreId: match.id,
+            error: 'internal error storing avatar',
+          };
         }
       }
 
