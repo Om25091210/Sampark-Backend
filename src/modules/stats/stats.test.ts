@@ -16,12 +16,14 @@ const config = testConfig();
 // it is refused rather than merely hidden in the UI.
 const PHONE = '+919000000060';
 const ADMIN_PHONE = '+919000000061';
+const HQ_PHONE = '+919000000062';
 const TOKEN = 'STATFIXTURE';
 
 let officerId = 0;
 let officerToken = '';
 let adminId = 0;
 let adminToken = '';
+let hqToken = '';
 const cadreIds: number[] = [];
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
@@ -44,8 +46,10 @@ interface Stats {
 
 beforeAll(async () => {
   const officer = await prisma.user.upsert({
-    where: { phone: PHONE }, update: { deletedAt: null, role: 'officer', name: 'Stats Officer' },
-    create: { phone: PHONE, name: 'Stats Officer', role: 'officer' },
+    // ADR-044: posted to the fixture cadres' station.
+    where: { phone: PHONE },
+    update: { deletedAt: null, role: 'officer', name: 'Stats Officer', thana: 'स्टैट' },
+    create: { phone: PHONE, name: 'Stats Officer', role: 'officer', thana: 'स्टैट' },
   });
   officerId = officer.id;
   officerToken = await signAccessToken({ sub: officerId, role: 'officer' }, config.jwtSecret, '15m');
@@ -56,6 +60,19 @@ beforeAll(async () => {
   });
   adminId = admin.id;
   adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
+
+  // ADR-044. The dashboard assertions below are written against WHOLE-TABLE counts, which
+  // is an HQ view by definition — an SDOP's dashboard is deliberately their sub-division
+  // only. So the org-dashboard reads use a super_admin; the admin token stays for the
+  // role-gating assertions (officer -> 403), which is what it was really there to prove.
+  const hqId = (
+    await prisma.user.upsert({
+      where: { phone: HQ_PHONE },
+      update: { deletedAt: null, role: 'super_admin', name: 'Stats HQ' },
+      create: { phone: HQ_PHONE, name: 'Stats HQ', role: 'super_admin' },
+    })
+  ).id;
+  hqToken = await signAccessToken({ sub: hqId, role: 'super_admin' }, config.jwtSecret, '15m');
 
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
 
@@ -106,7 +123,7 @@ afterAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
   // Both fixture users — leaving the admin behind would let it drift into another
   // file's assertions (Sampark-Backend#3).
-  await prisma.user.deleteMany({ where: { phone: { in: [PHONE, ADMIN_PHONE] } } });
+  await prisma.user.deleteMany({ where: { phone: { in: [PHONE, ADMIN_PHONE, HQ_PHONE] } } });
   await prisma.$disconnect();
 });
 
@@ -240,7 +257,7 @@ describe('stats', () => {
 
   it('returns the full shape with integer counts', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(hqToken) });
     expect(res.statusCode).toBe(200);
     const s = res.json() as Stats;
     for (const n of [s.totalCadres, s.activeAlerts, s.reportsThisWeek, s.pendingReporting,
@@ -255,7 +272,7 @@ describe('stats', () => {
   it('the three categories partition the total, and origin is a subset of surrendered', async () => {
     // Exact invariants — true no matter what other test files have in the table.
     const app = await makeApp();
-    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) })).json() as Stats;
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(hqToken) })).json() as Stats;
     expect(s.totalCadres).toBe(s.byCategory.surrendered.total + s.byCategory.thana + s.byCategory.jail);
     // district + other ≤ total: a surrendered cadre may have a NULL origin (ADR-019),
     // so the two tiles need not sum to the surrendered total.
@@ -266,7 +283,7 @@ describe('stats', () => {
 
   it('each fixture row is reflected in its field (counts are live, not hardcoded)', async () => {
     const app = await makeApp();
-    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) })).json() as Stats;
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(hqToken) })).json() as Stats;
     // Lower bounds: my fixture contributes at least this much; parallel data only adds.
     expect(s.byCategory.surrendered.district).toBeGreaterThanOrEqual(1);
     expect(s.byCategory.surrendered.other).toBeGreaterThanOrEqual(1);
@@ -282,7 +299,7 @@ describe('stats', () => {
 
   it('reportingRecency partitions the total — four disjoint tiers sum to totalCadres', async () => {
     const app = await makeApp();
-    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) })).json() as Stats;
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(hqToken) })).json() as Stats;
     const r = s.reportingRecency;
     for (const n of [r.current, r.overdue1m, r.overdue2m, r.overdue3m]) {
       expect(Number.isInteger(n)).toBe(true);
@@ -295,7 +312,7 @@ describe('stats', () => {
 
   it('each recency tier reflects its fixture (2-day → सामान्य, 40-day → सतर्क, never → उच्च जोखिम)', async () => {
     const app = await makeApp();
-    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(adminToken) })).json() as Stats;
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(hqToken) })).json() as Stats;
     expect(s.reportingRecency.current).toBeGreaterThanOrEqual(1);   // OTHER, 2 days ago
     expect(s.reportingRecency.overdue1m).toBeGreaterThanOrEqual(1); // THANA, 40 days ago
     expect(s.reportingRecency.overdue3m).toBeGreaterThanOrEqual(1); // ALERT, never

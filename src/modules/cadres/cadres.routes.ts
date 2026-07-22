@@ -108,7 +108,7 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
       // Resolve the `me` sentinel here, where the caller is known, so the service
       // stays a pure query over a concrete officer id.
       const resolved = assignedTo === 'me' ? request.authUser!.sub : assignedTo;
-      return service.list({ ...rest, assignedTo: resolved });
+      return service.list({ ...rest, assignedTo: resolved }, request.scope!);
     },
   );
 
@@ -134,7 +134,7 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
         },
       },
     },
-    async () => service.facets(),
+    async (request) => service.facets(request.scope!),
   );
 
   app.get(
@@ -151,7 +151,7 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     },
     async (request) => {
       const { id } = cadreIdParam.parse(request.params);
-      return service.getById(id);
+      return service.getById(id, request.scope!);
     },
   );
 
@@ -171,7 +171,7 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const { cadreId } = transferParams.parse(request.params);
       const { to_officer_id } = transferBody.parse(request.body);
-      await service.transfer(cadreId, to_officer_id, request.authUser!.sub);
+      await service.transfer(cadreId, to_officer_id, request.authUser!.sub, request.scope!);
       return reply.code(204).send();
     },
   );

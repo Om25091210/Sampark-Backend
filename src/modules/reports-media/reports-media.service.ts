@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { cadreScopeWhere, type CadreScope } from '../../lib/scope.js';
 import type { FastifyBaseLogger } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
 import type { StorageProvider } from '../../lib/storage.js';
@@ -19,19 +20,24 @@ export interface UploadInput {
 }
 
 export interface ReportsMediaService {
-  uploadPhoto(cadreId: number, file: UploadInput): Promise<{ key: string; url: string }>;
+  // ADR-044. Scoped: the export is a PDF of a cadre's whole reporting history, and the
+  // uploads write evidence against a cadre record - both are cadre access by another name.
+  uploadPhoto(cadreId: number, file: UploadInput, scope: CadreScope): Promise<{ key: string; url: string }>;
   /** ADR-029. The cadre's portrait, as opposed to a report's evidence photo. */
-  uploadAvatar(cadreId: number, file: UploadInput): Promise<{ key: string; url: string }>;
-  exportReports(cadreId: number): Promise<{ download_url: string }>;
+  uploadAvatar(cadreId: number, file: UploadInput, scope: CadreScope): Promise<{ key: string; url: string }>;
+  exportReports(cadreId: number, scope: CadreScope): Promise<{ download_url: string }>;
 }
 
 export function makeReportsMediaService(deps: ReportsMediaDeps): ReportsMediaService {
   const { prisma, storage, mediaUrlTtlSeconds } = deps;
 
   // Confirms the cadre exists and is not soft-deleted; throws 404 otherwise.
-  async function assertCadre(cadreId: number): Promise<{ name: string; phone: string; thana: string }> {
+  async function assertCadre(
+    cadreId: number,
+    scope: CadreScope,
+  ): Promise<{ name: string; phone: string; thana: string }> {
     const cadre = await prisma.cadre.findFirst({
-      where: { id: cadreId, deletedAt: null },
+      where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(scope) },
       select: { name: true, phone: true, thana: true },
     });
     if (cadre === null) throw notFound('Cadre not found');
@@ -39,8 +45,8 @@ export function makeReportsMediaService(deps: ReportsMediaDeps): ReportsMediaSer
   }
 
   return {
-    async uploadPhoto(cadreId, file) {
-      await assertCadre(cadreId);
+    async uploadPhoto(cadreId, file, scope) {
+      await assertCadre(cadreId, scope);
 
       const ext = EXT_BY_TYPE[file.contentType] ?? 'bin';
       const key = `reports/cadre-${cadreId}/${randomUUID()}.${ext}`;
@@ -56,8 +62,8 @@ export function makeReportsMediaService(deps: ReportsMediaDeps): ReportsMediaSer
     // workflow), the `url` is a presigned preview for the picker only. A separate
     // key prefix from `reports/` so a cadre portrait and a report's evidence photo
     // never share a namespace.
-    async uploadAvatar(cadreId, file) {
-      await assertCadre(cadreId);
+    async uploadAvatar(cadreId, file, scope) {
+      await assertCadre(cadreId, scope);
 
       const ext = EXT_BY_TYPE[file.contentType] ?? 'bin';
       const key = `cadres/cadre-${cadreId}/avatar-${randomUUID()}.${ext}`;
@@ -66,8 +72,8 @@ export function makeReportsMediaService(deps: ReportsMediaDeps): ReportsMediaSer
       return { key, url };
     },
 
-    async exportReports(cadreId) {
-      const cadre = await assertCadre(cadreId);
+    async exportReports(cadreId, scope) {
+      const cadre = await assertCadre(cadreId, scope);
 
       // Soft-delete filter applies; chronological order reads best in a document.
       const reports = await prisma.report.findMany({

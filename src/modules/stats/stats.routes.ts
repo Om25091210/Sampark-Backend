@@ -70,7 +70,7 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
         response: { 200: jsonResponse('Dashboard stats', EXAMPLE_DASHBOARD_STATS) },
       },
     },
-    async () => service.dashboard(),
+    async (request) => service.dashboard(request.scope!),
   );
 
   // ADR-031. The caller's OWN numbers. No role gate beyond authentication: unlike
@@ -95,6 +95,6 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
         response: { 200: jsonResponse('Officer stats', EXAMPLE_OFFICER_STATS) },
       },
     },
-    async (request) => service.forOfficer(request.authUser!.sub),
+    async (request) => service.forOfficer(request.authUser!.sub, request.scope!),
   );
 }

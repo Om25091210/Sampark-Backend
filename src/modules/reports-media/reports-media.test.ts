@@ -53,12 +53,16 @@ const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 
 
 beforeAll(async () => {
   const officer = await prisma.user.upsert({
-    where: { phone: PHONES[0] }, update: { deletedAt: null, role: 'officer', name: 'Media Officer' },
-    create: { phone: PHONES[0]!, name: 'Media Officer', role: 'officer' },
+    // ADR-044: posted to the fixture cadre's station.
+    where: { phone: PHONES[0] },
+    update: { deletedAt: null, role: 'officer', name: 'Media Officer', thana: 'बीजापुर' },
+    create: { phone: PHONES[0]!, name: 'Media Officer', role: 'officer', thana: 'बीजापुर' },
   });
   const admin = await prisma.user.upsert({
-    where: { phone: PHONES[1] }, update: { deletedAt: null, role: 'admin', name: 'Media Admin' },
-    create: { phone: PHONES[1]!, name: 'Media Admin', role: 'admin' },
+    // ADR-044: the PDF export is a cadre read, so this SDOP needs the cadre's sub-division.
+    where: { phone: PHONES[1] },
+    update: { deletedAt: null, role: 'admin', name: 'Media Admin', subDivision: 'बीजापुर' },
+    create: { phone: PHONES[1]!, name: 'Media Admin', role: 'admin', subDivision: 'बीजापुर' },
   });
   const viewer = await prisma.user.upsert({
     where: { phone: PHONES[2] }, update: { deletedAt: null, role: 'viewer', name: 'Media Viewer' },
@@ -71,7 +75,7 @@ beforeAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: CADRE_NAME } });
   const cadre = await prisma.cadre.create({
     data: {
-      name: CADRE_NAME, phone: '+910000000002', thana: 'बीजापुर सदर',
+      name: CADRE_NAME, phone: '+910000000002', thana: 'बीजापुर',
       currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
       alertLevel: 'normal', aliases: [], assignedOfficerId: officerId, avatarUrl: 'https://x/a.jpg',
     },

@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
+import { cadreScopeWhere, type CadreScope } from '../../lib/scope.js';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { toWireReport, type WireReport } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
@@ -34,10 +35,13 @@ export interface CreateReportResult {
 }
 
 export interface ReportsService {
-  listByCadre(cadreId: number, query: ListReportsQuery): Promise<Paginated<WireReport>>;
-  list(query: ResolvedListAllReportsQuery): Promise<Paginated<WireReport>>;
-  getById(cadreId: number, reportId: number): Promise<WireReport>;
-  create(cadreId: number, body: CreateReportBody, reporterId: number): Promise<CreateReportResult>;
+  // ADR-044. Reports inherit their cadre's scope — a report is as sensitive as the cadre
+  // it is about, so there is no separate report-level rule. `scope` is required on every
+  // read AND on create: writing a report about an out-of-scope cadre is also an escape.
+  listByCadre(cadreId: number, query: ListReportsQuery, scope: CadreScope): Promise<Paginated<WireReport>>;
+  list(query: ResolvedListAllReportsQuery, scope: CadreScope): Promise<Paginated<WireReport>>;
+  getById(cadreId: number, reportId: number, scope: CadreScope): Promise<WireReport>;
+  create(cadreId: number, body: CreateReportBody, reporterId: number, scope: CadreScope): Promise<CreateReportResult>;
 }
 
 // Load the report together with its cadre so the wire entity can carry the
@@ -81,15 +85,19 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
   // the serializer so every read hands out non-expired photo URLs.
   const signUrl = (key: string): Promise<string> => storage.presignGet(key, mediaUrlTtlSeconds);
 
-  // Confirms the cadre exists and is not soft-deleted; throws 404 otherwise.
-  async function assertCadre(cadreId: number): Promise<void> {
-    const cadre = await prisma.cadre.findFirst({ where: { id: cadreId, deletedAt: null } });
+  // Confirms the cadre exists, is not soft-deleted, AND is inside the caller's scope;
+  // throws 404 otherwise. Out-of-scope reads 404 rather than 403 so cadre ids stay
+  // unenumerable. This is the single chokepoint for every per-cadre report route.
+  async function assertCadre(cadreId: number, scope: CadreScope): Promise<void> {
+    const cadre = await prisma.cadre.findFirst({
+      where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(scope) },
+    });
     if (cadre === null) throw notFound('Cadre not found');
   }
 
   return {
-    async listByCadre(cadreId, query) {
-      await assertCadre(cadreId);
+    async listByCadre(cadreId, query, scope) {
+      await assertCadre(cadreId, scope);
 
       // Soft-delete filter applies to every read.
       const where: Prisma.ReportWhereInput = { cadreId, deletedAt: null };
@@ -122,10 +130,15 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
       };
     },
 
-    async list(query) {
+    async list(query, scope) {
       // Aggregate feed across every cadre (ADR-021). No cadre assertion — this is
       // not scoped to one cadre; it's "the reports matching this filter".
+      // Scoped through the RELATION: a report is visible only if its cadre is. Note this
+      // also bounds `reportedBy=me` — an officer who filed a report and then moved station
+      // stops seeing it, because the cadre is no longer theirs. That is the correct
+      // reading: the boundary is the cadre's jurisdiction, not who typed the report.
       const where: Prisma.ReportWhereInput = { deletedAt: null };
+      if (scope.kind !== 'all') where.cadre = { thana: { in: [...scope.thanas] } };
       // The route has already resolved `me` to a concrete officer id.
       if (query.reportedBy !== undefined) where.reportedById = query.reportedBy;
 
@@ -158,7 +171,8 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
       };
     },
 
-    async getById(cadreId, reportId) {
+    async getById(cadreId, reportId, scope) {
+      await assertCadre(cadreId, scope);
       const report = await prisma.report.findFirst({
         where: { id: reportId, cadreId, deletedAt: null },
         ...withCadre,
@@ -167,7 +181,7 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
       return toWireReport(report, signUrl);
     },
 
-    async create(cadreId, body, reporterId) {
+    async create(cadreId, body, reporterId, scope) {
       // Idempotent replay: a report already exists for this key → return it (200),
       // never a duplicate. Checked before the cadre assertion so a replay stays
       // cheap and succeeds even if the cadre was later soft-deleted.
@@ -179,7 +193,7 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
         if (existing !== null) return { report: await toWireReport(existing, signUrl), created: false };
       }
 
-      await assertCadre(cadreId);
+      await assertCadre(cadreId, scope);
 
       const data: Prisma.ReportCreateInput = {
         cadre: { connect: { id: cadreId } },

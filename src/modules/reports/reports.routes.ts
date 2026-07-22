@@ -48,7 +48,7 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const { reportedBy, ...rest } = listAllReportsQuery.parse(request.query);
       const resolved = reportedBy === 'me' ? request.authUser!.sub : reportedBy;
-      return service.list({ ...rest, reportedBy: resolved });
+      return service.list({ ...rest, reportedBy: resolved }, request.scope!);
     },
   );
 
@@ -68,7 +68,7 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const { cadreId } = reportCadreParam.parse(request.params);
       const query = listReportsQuery.parse(request.query);
-      return service.listByCadre(cadreId, query);
+      return service.listByCadre(cadreId, query, request.scope!);
     },
   );
 
@@ -86,7 +86,7 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
     },
     async (request) => {
       const { cadreId, reportId } = reportDetailParams.parse(request.params);
-      return service.getById(cadreId, reportId);
+      return service.getById(cadreId, reportId, request.scope!);
     },
   );
 
@@ -118,7 +118,7 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
         throw badRequest('cadre_id in body does not match the URL', 'CADRE_ID_MISMATCH');
       }
 
-      const { report, created } = await service.create(cadreId, body, request.authUser!.sub);
+      const { report, created } = await service.create(cadreId, body, request.authUser!.sub, request.scope!);
       // 201 for a fresh create; 200 for an idempotent replay (ADR-013).
       return reply.code(created ? 201 : 200).send(report);
     },

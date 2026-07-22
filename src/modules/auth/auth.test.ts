@@ -48,6 +48,9 @@ async function login(app: FastifyInstance, email: string, password = PASSWORD) {
 }
 
 beforeAll(async () => {
+  // SDR-002 state is keyed by EMAIL and outlives the users it locked, so a lockout
+  // left by an earlier run makes this suite fail in isolation. Purge it up front.
+  await prisma.loginAttempt.deleteMany({});
   await prisma.user.deleteMany({ where: { name: { in: IDS } } });
   const hash = await hashPassword(PASSWORD);
 

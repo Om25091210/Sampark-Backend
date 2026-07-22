@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
+import { cadreScopeWhere, scopeAdmitsThana, type CadreScope } from '../../lib/scope.js';
 import { Prisma } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
 import { toWireCadre, REPORTING_CADENCE_DAYS, type WireCadre } from '../../lib/serialize.js';
@@ -50,10 +51,14 @@ export interface ImportResult {
 }
 
 export interface CadresService {
-  list(query: ResolvedListCadresQuery): Promise<Paginated<WireCadre>>;
-  facets(): Promise<CadreFacets>;
-  getById(id: number): Promise<WireCadre>;
-  transfer(cadreId: number, toOfficerId: number, actorId: number): Promise<void>;
+  // ADR-044. `scope` is the caller's row-level authorisation, resolved per request in the
+  // auth plugin. It is a REQUIRED parameter, not an optional one: an optional scope is a
+  // scope somebody forgets to pass, and the failure mode of forgetting is a silent,
+  // total loss of access control. TypeScript refuses the call instead.
+  list(query: ResolvedListCadresQuery, scope: CadreScope): Promise<Paginated<WireCadre>>;
+  facets(scope: CadreScope): Promise<CadreFacets>;
+  getById(id: number, scope: CadreScope): Promise<WireCadre>;
+  transfer(cadreId: number, toOfficerId: number, actorId: number, scope: CadreScope): Promise<void>;
   // ADR-038. Bulk historical import. `actorId` is the super_admin's id for an
   // interactive call, or null when authenticated by the SDR-007 machine key.
   importCadres(rows: unknown[], actorId: number | null): Promise<ImportResult>;
@@ -200,9 +205,9 @@ export function makeCadresService({ prisma, log, storage, mediaUrlTtlSeconds }: 
   }
 
   return {
-    async list(query) {
-      // Soft-delete filter applies to every read.
-      const where: Prisma.CadreWhereInput = { deletedAt: null };
+    async list(query, scope) {
+      // Soft-delete filter applies to every read; ADR-044 scope applies on top of it.
+      const where: Prisma.CadreWhereInput = { deletedAt: null, ...cadreScopeWhere(scope) };
 
       // ADR-033: multi-valued facets. `all` is the client's "no filter" sentinel, so
       // its presence anywhere in the selection widens to everything rather than
@@ -298,16 +303,20 @@ export function makeCadresService({ prisma, log, storage, mediaUrlTtlSeconds }: 
      * the sheet cannot offer an option that finds nobody, and Design-Docs#7's ~1,790
      * imported cadres populate it without a code change.
      */
-    async facets() {
+    async facets(scope) {
+      // Scoped too. An unscoped facet list would leak the shape of the wider register —
+      // a thana officer could read off every station and designation in the district from
+      // a filter dropdown they cannot actually filter into.
+      const visible = { deletedAt: null, ...cadreScopeWhere(scope) };
       const [thanas, designations] = await prisma.$transaction([
         prisma.cadre.findMany({
-          where: { deletedAt: null },
+          where: visible,
           distinct: ['thana'],
           select: { thana: true },
           orderBy: { thana: 'asc' },
         }),
         prisma.cadre.findMany({
-          where: { deletedAt: null },
+          where: visible,
           distinct: ['designation'],
           select: { designation: true },
           orderBy: { designation: 'asc' },
@@ -321,9 +330,12 @@ export function makeCadresService({ prisma, log, storage, mediaUrlTtlSeconds }: 
       };
     },
 
-    async getById(id) {
+    async getById(id, scope) {
+      // Scope is in the WHERE, so an out-of-scope cadre is indistinguishable from one that
+      // does not exist. Deliberate: a 403 here would confirm that a given cadre id is real,
+      // letting anyone enumerate the register's size and id space by probing.
       const cadre = await prisma.cadre.findFirst({
-        where: { id, deletedAt: null },
+        where: { id, deletedAt: null, ...cadreScopeWhere(scope) },
         include: LATEST_REPORT,
       });
       if (cadre === null) throw notFound('Cadre not found');
@@ -337,12 +349,25 @@ export function makeCadresService({ prisma, log, storage, mediaUrlTtlSeconds }: 
       });
     },
 
-    async transfer(cadreId, toOfficerId, actorId) {
-      const cadre = await prisma.cadre.findFirst({ where: { id: cadreId, deletedAt: null } });
+    async transfer(cadreId, toOfficerId, actorId, scope) {
+      const cadre = await prisma.cadre.findFirst({
+        where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(scope) },
+      });
       if (cadre === null) throw notFound('Cadre not found');
 
       const target = await prisma.user.findFirst({ where: { id: toOfficerId, deletedAt: null } });
       if (target === null) throw badRequest('to_officer_id does not reference an active user', 'INVALID_OFFICER');
+
+      // BOTH ends of a transfer must be in scope. Without this an SDOP could hand a cadre
+      // they legitimately hold to an officer in another sub-division — pushing a record
+      // OUT of their own jurisdiction and permanently out of their own reach, which is a
+      // scope escape even though every individual object was one they could see.
+      if (target.role === 'officer' && target.thana !== null && !scopeAdmitsThana(scope, target.thana)) {
+        throw badRequest(
+          'to_officer_id is outside your jurisdiction',
+          'OFFICER_OUT_OF_SCOPE',
+        );
+      }
 
       const fromOfficerId = cadre.assignedOfficerId;
 

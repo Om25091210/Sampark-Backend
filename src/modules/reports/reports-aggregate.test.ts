@@ -50,12 +50,15 @@ async function seedReport(cadreId: number, reporterId: number, daysAgo: number):
 
 beforeAll(async () => {
   const a = await prisma.user.upsert({
-    where: { phone: PHONES[0] }, update: { deletedAt: null, role: 'officer', name: 'Agg Officer A' },
-    create: { phone: PHONES[0]!, name: 'Agg Officer A', role: 'officer' },
+    // ADR-044: both officers are posted to the fixture cadres' station.
+    where: { phone: PHONES[0] },
+    update: { deletedAt: null, role: 'officer', name: 'Agg Officer A', thana: 'agg' },
+    create: { phone: PHONES[0]!, name: 'Agg Officer A', role: 'officer', thana: 'agg' },
   });
   const b = await prisma.user.upsert({
-    where: { phone: PHONES[1] }, update: { deletedAt: null, role: 'officer', name: 'Agg Officer B' },
-    create: { phone: PHONES[1]!, name: 'Agg Officer B', role: 'officer' },
+    where: { phone: PHONES[1] },
+    update: { deletedAt: null, role: 'officer', name: 'Agg Officer B', thana: 'agg' },
+    create: { phone: PHONES[1]!, name: 'Agg Officer B', role: 'officer', thana: 'agg' },
   });
   officerAId = a.id;
   officerBId = b.id;

@@ -49,13 +49,15 @@ beforeAll(async () => {
   });
   const officerB = await prisma.user.upsert({
     where: { phone: PHONES[1] },
-    update: { deletedAt: null, role: 'officer', name: 'ZZ Officer Beta', thana: 'उसूर' },
-    create: { phone: PHONES[1]!, name: 'ZZ Officer Beta', role: 'officer', thana: 'उसूर' },
+    update: { deletedAt: null, role: 'officer', name: 'ZZ Officer Beta', thana: 'जांगला' },
+    create: { phone: PHONES[1]!, name: 'ZZ Officer Beta', role: 'officer', thana: 'जांगला' },
   });
   const admin = await prisma.user.upsert({
     where: { phone: PHONES[2] },
-    update: { deletedAt: null, role: 'admin', name: 'ZZ Admin' },
-    create: { phone: PHONES[2]!, name: 'ZZ Admin', role: 'admin' },
+    // ADR-044: both fixture officers are in the भैरमगढ़ sub-division (भैरमगढ़ + जांगला),
+    // so this SDOP's roster covers exactly them. Previously 'जांगला', which is आवापल्ली's.
+    update: { deletedAt: null, role: 'admin', name: 'ZZ Admin', subDivision: 'भैरमगढ़' },
+    create: { phone: PHONES[2]!, name: 'ZZ Admin', role: 'admin', subDivision: 'भैरमगढ़' },
   });
   const viewer = await prisma.user.upsert({
     where: { phone: PHONES[3] },
@@ -166,7 +168,7 @@ describe('officers — roster for the admin assignment picker (ADR-018)', () => 
     expect(nameBody.data.map((o) => o.id)).not.toContain(officerAId);
 
     const byThana = await app.inject({
-      method: 'GET', url: '/api/v1/officers?search=उसूर', headers: auth(adminToken),
+      method: 'GET', url: '/api/v1/officers?search=जांगला', headers: auth(adminToken),
     });
     const thanaBody = byThana.json() as Page<WireOfficerBody>;
     expect(thanaBody.data.map((o) => o.id)).toContain(officerBId);

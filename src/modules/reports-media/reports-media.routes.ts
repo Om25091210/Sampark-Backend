@@ -50,7 +50,7 @@ export async function reportsMediaRoutes(app: FastifyInstance): Promise<void> {
       // (→ 413 via the central error handler) if the file exceeds UPLOAD_MAX_BYTES.
       const buffer = await mp.toBuffer();
 
-      return service.uploadPhoto(cadreId, { buffer, contentType: mp.mimetype });
+      return service.uploadPhoto(cadreId, { buffer, contentType: mp.mimetype }, request.scope!);
     },
   );
 
@@ -89,7 +89,7 @@ export async function reportsMediaRoutes(app: FastifyInstance): Promise<void> {
         throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Only image/jpeg and image/png are accepted');
       }
       const buffer = await mp.toBuffer();
-      return service.uploadAvatar(cadreId, { buffer, contentType: mp.mimetype });
+      return service.uploadAvatar(cadreId, { buffer, contentType: mp.mimetype }, request.scope!);
     },
   );
 
@@ -114,7 +114,7 @@ export async function reportsMediaRoutes(app: FastifyInstance): Promise<void> {
     },
     async (request) => {
       const { cadreId } = mediaCadreParam.parse(request.params);
-      return service.exportReports(cadreId);
+      return service.exportReports(cadreId, request.scope!);
     },
   );
 }

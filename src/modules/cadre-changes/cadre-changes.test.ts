@@ -86,14 +86,24 @@ async function submit(
 }
 
 beforeAll(async () => {
-  const mk = async (phone: string, role: 'super_admin' | 'admin' | 'officer' | 'viewer', name: string) =>
+  // ADR-044. Everyone in this suite works the one fixture cadre (thana 'बीजापुर'), so the
+  // officer is posted there and the admin gets the sub-division that contains it — the
+  // approval ladder is otherwise invisible to them and every step 404s.
+  const mk = async (
+    phone: string,
+    role: 'super_admin' | 'admin' | 'officer' | 'viewer',
+    name: string,
+    scope: { thana?: string; subDivision?: string } = {},
+  ) =>
     prisma.user.upsert({
-      where: { phone }, update: { deletedAt: null, role, name }, create: { phone, name, role },
+      where: { phone },
+      update: { deletedAt: null, role, name, thana: null, subDivision: null, ...scope },
+      create: { phone, name, role, ...scope },
     });
 
   superId = (await mk(PHONES[0]!, 'super_admin', 'Chg Super')).id;
-  adminId = (await mk(PHONES[1]!, 'admin', 'Chg Admin')).id;
-  officerId = (await mk(PHONES[2]!, 'officer', 'Chg Officer')).id;
+  adminId = (await mk(PHONES[1]!, 'admin', 'Chg Admin', { subDivision: 'बीजापुर' })).id;
+  officerId = (await mk(PHONES[2]!, 'officer', 'Chg Officer', { thana: 'बीजापुर' })).id;
   viewerId = (await mk(PHONES[3]!, 'viewer', 'Chg Viewer')).id;
 
   await prisma.cadreChangeRequest.deleteMany({ where: { cadre: { name: CADRE_NAME } } });

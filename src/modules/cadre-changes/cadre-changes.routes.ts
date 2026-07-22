@@ -49,7 +49,7 @@ export async function cadreChangesRoutes(app: FastifyInstance): Promise<void> {
   const actorOf = (request: FastifyRequest): Actor => {
     const principal = request.authUser!;
     if (!ROLES.includes(principal.role)) throw forbidden('Unrecognised role on token');
-    return { id: principal.sub, role: principal.role as Role };
+    return { id: principal.sub, role: principal.role as Role, scope: request.scope! };
   };
 
   app.post(

@@ -38,16 +38,21 @@ const makeApp = (): Promise<FastifyInstance> => buildApp({ config, prisma, logge
 
 beforeAll(async () => {
   const admin = await prisma.user.upsert({
-    where: { phone: PHONES[0] }, update: { deletedAt: null, role: 'admin', name: 'Test Admin' },
-    create: { phone: PHONES[0]!, name: 'Test Admin', role: 'admin' },
+    // ADR-044. Transfer is scoped at BOTH ends, so this SDOP must hold the sub-division
+    // that the fixture cadre and the target officer are both in.
+    where: { phone: PHONES[0] },
+    update: { deletedAt: null, role: 'admin', name: 'Test Admin', subDivision: 'बीजापुर' },
+    create: { phone: PHONES[0]!, name: 'Test Admin', role: 'admin', subDivision: 'बीजापुर' },
   });
   const officerA = await prisma.user.upsert({
-    where: { phone: PHONES[1] }, update: { deletedAt: null, role: 'officer', name: 'Test Officer A' },
-    create: { phone: PHONES[1]!, name: 'Test Officer A', role: 'officer' },
+    where: { phone: PHONES[1] },
+    update: { deletedAt: null, role: 'officer', name: 'Test Officer A', thana: 'बीजापुर' },
+    create: { phone: PHONES[1]!, name: 'Test Officer A', role: 'officer', thana: 'बीजापुर' },
   });
   const officerB = await prisma.user.upsert({
-    where: { phone: PHONES[2] }, update: { deletedAt: null, role: 'officer', name: 'Test Officer B' },
-    create: { phone: PHONES[2]!, name: 'Test Officer B', role: 'officer' },
+    where: { phone: PHONES[2] },
+    update: { deletedAt: null, role: 'officer', name: 'Test Officer B', thana: 'बीजापुर' },
+    create: { phone: PHONES[2]!, name: 'Test Officer B', role: 'officer', thana: 'बीजापुर' },
   });
   const superAdmin = await prisma.user.upsert({
     where: { phone: PHONES[3] }, update: { deletedAt: null, role: 'super_admin', name: 'Test Super Admin' },
@@ -61,7 +66,7 @@ beforeAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: 'TEST CADRE ALPHA' } });
   const cadre = await prisma.cadre.create({
     data: {
-      name: 'TEST CADRE ALPHA', phone: '+910000000000', thana: 'बीजापुर सदर',
+      name: 'TEST CADRE ALPHA', phone: '+910000000000', thana: 'बीजापुर',
       currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
       alertLevel: 'normal', aliases: ['alpha-x'], assignedOfficerId: officerAId,
       // ADR-036. A fixed birth date so the derived age is assertable, plus relations.
@@ -215,7 +220,7 @@ describe('cadres', () => {
 
   it('GET /cadres returns a paginated, camelCase list (no internal fields)', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres?pageSize=50', headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres?pageSize=50', headers: auth(superAdminToken) });
     expect(res.statusCode).toBe(200);
     const body = res.json() as ListBody;
     expect(body).toMatchObject({ page: 1, pageSize: 50 });
@@ -235,7 +240,7 @@ describe('cadres', () => {
 
   it('filters by category', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres?category=surrendered&pageSize=50', headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres?category=surrendered&pageSize=50', headers: auth(superAdminToken) });
     const body = res.json() as ListBody;
     expect(body.data.length).toBeGreaterThan(0);
     expect(body.data.every((c) => c.category === 'surrendered')).toBe(true);
@@ -257,7 +262,7 @@ describe('cadres', () => {
     try {
       // A fragment of the serial must find it — an officer reads a partial off the register.
       const res = await app.inject({
-        method: 'GET', url: '/api/v1/cadres?search=SNTEST&pageSize=50', headers: auth(officerToken),
+        method: 'GET', url: '/api/v1/cadres?search=SNTEST&pageSize=50', headers: auth(superAdminToken),
       });
       const body = res.json() as ListBody;
       expect(body.data.some((r) => (r as { serialNumber?: string }).serialNumber === serial)).toBe(true);
@@ -274,7 +279,7 @@ describe('cadres', () => {
     // global cadre count would make this test depend on the seed (absent in CI)
     // and on whatever other parallel test files have created or deleted.
     const p1 = await app.inject({
-      method: 'GET', url: `/api/v1/cadres?search=${PAGE_TOKEN}&pageSize=2`, headers: auth(officerToken),
+      method: 'GET', url: `/api/v1/cadres?search=${PAGE_TOKEN}&pageSize=2`, headers: auth(superAdminToken),
     });
     const first = p1.json() as ListBody;
     expect(first.total).toBe(3);
@@ -282,7 +287,7 @@ describe('cadres', () => {
     expect(first.hasMore).toBe(true);
 
     const p2 = await app.inject({
-      method: 'GET', url: `/api/v1/cadres?search=${PAGE_TOKEN}&pageSize=2&page=2`, headers: auth(officerToken),
+      method: 'GET', url: `/api/v1/cadres?search=${PAGE_TOKEN}&pageSize=2&page=2`, headers: auth(superAdminToken),
     });
     const second = p2.json() as ListBody;
     expect(second.data.length).toBe(1);
@@ -306,8 +311,8 @@ describe('cadres', () => {
     const q = (origin: string) =>
       `/api/v1/cadres?search=${ORIGIN_TOKEN}&category=surrendered&surrenderOrigin=${origin}&pageSize=50`;
 
-    const d = (await app.inject({ method: 'GET', url: q('district'), headers: auth(officerToken) })).json() as ListBody;
-    const o = (await app.inject({ method: 'GET', url: q('other'), headers: auth(officerToken) })).json() as ListBody;
+    const d = (await app.inject({ method: 'GET', url: q('district'), headers: auth(superAdminToken) })).json() as ListBody;
+    const o = (await app.inject({ method: 'GET', url: q('other'), headers: auth(superAdminToken) })).json() as ListBody;
 
     expect(d.total).toBe(2);
     expect(o.total).toBe(1);
@@ -324,7 +329,7 @@ describe('cadres', () => {
     const app = await makeApp();
     const res = await app.inject({
       method: 'GET', url: `/api/v1/cadres?search=${ORIGIN_TOKEN}&category=thana&pageSize=50`,
-      headers: auth(officerToken),
+      headers: auth(superAdminToken),
     });
     const body = res.json() as ListBody;
     expect(body.total).toBe(1);
@@ -336,7 +341,7 @@ describe('cadres', () => {
     const app = await makeApp();
     const res = await app.inject({
       method: 'GET', url: `/api/v1/cadres?search=${ALERT_TOKEN}&alertLevel=critical&pageSize=50`,
-      headers: auth(officerToken),
+      headers: auth(superAdminToken),
     });
     const body = res.json() as ListBody;
     expect(body.total).toBe(1); // only the -C row, not -W or -N
@@ -354,7 +359,7 @@ describe('cadres', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/v1/cadres?search=${ALERT_TOKEN}&alertLevel=critical&alertLevel=warning&pageSize=50`,
-      headers: auth(officerToken),
+      headers: auth(superAdminToken),
     });
     const body = res.json() as ListBody;
     expect(body.total).toBe(2); // -C and -W, never -N
@@ -368,7 +373,7 @@ describe('cadres', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/v1/cadres?search=${FACET_TOKEN}&thana=${encodeURIComponent('गंगालूर')}&pageSize=50`,
-      headers: auth(officerToken),
+      headers: auth(superAdminToken),
     });
     const body = res.json() as ListBody;
     // An equality match would return 0 here — that was the old sheet's bug.
@@ -381,7 +386,7 @@ describe('cadres', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/v1/cadres?search=${FACET_TOKEN}&designation=${encodeURIComponent('सीनियर')}&pageSize=50`,
-      headers: auth(officerToken),
+      headers: auth(superAdminToken),
     });
     const body = res.json() as ListBody;
     expect(body.total).toBe(2);
@@ -394,7 +399,7 @@ describe('cadres', () => {
       `/api/v1/cadres?search=${FACET_TOKEN}` +
       `&thana=${encodeURIComponent('गंगालूर')}` +
       `&designation=${encodeURIComponent('सीनियर')}&pageSize=50`;
-    const res = await app.inject({ method: 'GET', url, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url, headers: auth(superAdminToken) });
     const body = res.json() as ListBody;
     // Only -3 is both in गंगालूर AND a सीनियर कैडर.
     expect(body.total).toBe(1);
@@ -409,7 +414,7 @@ describe('cadres', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/v1/cadres?search=${FACET_TOKEN}-2&thana=${encodeURIComponent('गंगालूर')}&pageSize=50`,
-      headers: auth(officerToken),
+      headers: auth(superAdminToken),
     });
     const body = res.json() as ListBody;
     expect(body.total).toBe(0); // -2 is in दंतेवाड़ा, so the AND is empty
@@ -421,7 +426,7 @@ describe('cadres', () => {
     expect((await app.inject({ method: 'GET', url: '/api/v1/cadres/facets' })).statusCode).toBe(401);
 
     const res = await app.inject({
-      method: 'GET', url: '/api/v1/cadres/facets', headers: auth(officerToken),
+      method: 'GET', url: '/api/v1/cadres/facets', headers: auth(superAdminToken),
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { thanas: string[]; designations: string[] };
@@ -438,7 +443,7 @@ describe('cadres', () => {
   it('rejects an unknown alertLevel with 400', async () => {
     const app = await makeApp();
     const res = await app.inject({
-      method: 'GET', url: '/api/v1/cadres?alertLevel=urgent', headers: auth(officerToken),
+      method: 'GET', url: '/api/v1/cadres?alertLevel=urgent', headers: auth(superAdminToken),
     });
     expect(res.statusCode).toBe(400);
     await app.close();
@@ -447,7 +452,7 @@ describe('cadres', () => {
   it('rejects an unknown surrenderOrigin with 400', async () => {
     const app = await makeApp();
     const res = await app.inject({
-      method: 'GET', url: '/api/v1/cadres?surrenderOrigin=bijapur', headers: auth(officerToken),
+      method: 'GET', url: '/api/v1/cadres?surrenderOrigin=bijapur', headers: auth(superAdminToken),
     });
     expect(res.statusCode).toBe(400);
     expect((res.json() as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
@@ -456,7 +461,7 @@ describe('cadres', () => {
 
   it('rejects pageSize over the max (51) with 400', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres?pageSize=51', headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres?pageSize=51', headers: auth(superAdminToken) });
     expect(res.statusCode).toBe(400);
     expect((res.json() as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR');
     await app.close();
@@ -464,7 +469,7 @@ describe('cadres', () => {
 
   it('GET /cadres/:id returns the cadre', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(superAdminToken) });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ id: cadreId, name: 'TEST CADRE ALPHA', category: 'surrendered' });
     await app.close();
@@ -472,7 +477,7 @@ describe('cadres', () => {
 
   it('serves dateOfBirth, derived age, and the relation names (ADR-036)', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(superAdminToken) });
     const c = res.json() as {
       dateOfBirth?: string; age?: number; fatherName?: string; motherName?: string; spouseName?: string;
     };
@@ -491,7 +496,7 @@ describe('cadres', () => {
     const app = await makeApp();
     // The ALERT fixtures carry no dateOfBirth.
     const res = await app.inject({
-      method: 'GET', url: `/api/v1/cadres?search=${ALERT_TOKEN}&pageSize=1`, headers: auth(officerToken),
+      method: 'GET', url: `/api/v1/cadres?search=${ALERT_TOKEN}&pageSize=1`, headers: auth(superAdminToken),
     });
     const row = (res.json() as ListBody).data[0] as { dateOfBirth?: string; age?: number };
     expect(row.dateOfBirth).toBeUndefined();
@@ -501,7 +506,7 @@ describe('cadres', () => {
 
   it('nextReportingDueAt = latest report date + 30 days (ADR-022)', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(superAdminToken) });
     expect(res.statusCode).toBe(200);
     // Computed from the NEWER report (DUE_REPORT_AT), not the April one.
     expect((res.json() as { nextReportingDueAt?: string }).nextReportingDueAt).toBe(DUE_EXPECTED);
@@ -511,14 +516,14 @@ describe('cadres', () => {
   it('a cadre with no reports has no nextReportingDueAt (no baseline)', async () => {
     const app = await makeApp();
     // The ALPHA fixture cadre has no reports.
-    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(superAdminToken) });
     expect(res.json()).not.toHaveProperty('nextReportingDueAt');
     await app.close();
   });
 
   it('lastReportedAt is the latest report date itself, the baseline the due date derives from (ADR-023)', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(superAdminToken) });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { lastReportedAt?: string; nextReportingDueAt?: string };
     // The newer report, not the April one — same row nextReportingDueAt counts from.
@@ -534,7 +539,7 @@ describe('cadres', () => {
 
   it('a cadre with no reports has no lastReportedAt either', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(superAdminToken) });
     expect(res.json()).not.toHaveProperty('lastReportedAt');
     await app.close();
   });
@@ -562,7 +567,7 @@ describe('cadres', () => {
         const res = await app.inject({
           method: 'GET',
           url: `/api/v1/cadres?search=${encodeURIComponent('RECENCY FIXTURE')}&recency=${tier}&pageSize=50`,
-          headers: auth(officerToken),
+          headers: auth(superAdminToken),
         });
         return (res.json() as ListBody).data.some((r) => r.id === c.id);
       };
@@ -582,7 +587,7 @@ describe('cadres', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/api/v1/cadres?recency=overdue3m&search=${encodeURIComponent('TEST CADRE ALPHA')}&pageSize=50`,
-      headers: auth(officerToken),
+      headers: auth(superAdminToken),
     });
     expect((res.json() as ListBody).data.some((c) => c.id === cadreId)).toBe(true);
     await app.close();
@@ -590,7 +595,7 @@ describe('cadres', () => {
 
   it('serialNumber is absent when unset, and never falls back to id (ADR-025)', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(superAdminToken) });
     expect(res.statusCode).toBe(200);
     // The fixture has no serial. It must be omitted — NOT filled in from `id`,
     // which is an unrelated surrogate key the import will reassign.
@@ -601,7 +606,7 @@ describe('cadres', () => {
   it('serialNumber is serialized when set (ADR-025)', async () => {
     const app = await makeApp();
     await prisma.cadre.update({ where: { id: dueCadreId }, data: { serialNumber: 'BJP/2024/0731' } });
-    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${dueCadreId}`, headers: auth(superAdminToken) });
     expect((res.json() as { serialNumber?: string }).serialNumber).toBe('BJP/2024/0731');
     await prisma.cadre.update({ where: { id: dueCadreId }, data: { serialNumber: null } });
     await app.close();
@@ -610,7 +615,7 @@ describe('cadres', () => {
   it('nextReportingDueAt is present in the list too, not only the detail', async () => {
     const app = await makeApp();
     const res = await app.inject({
-      method: 'GET', url: `/api/v1/cadres?search=${encodeURIComponent(DUE_NAME)}&pageSize=50`, headers: auth(officerToken),
+      method: 'GET', url: `/api/v1/cadres?search=${encodeURIComponent(DUE_NAME)}&pageSize=50`, headers: auth(superAdminToken),
     });
     const body = res.json() as ListBody;
     const due = body.data.find((c) => c.id === dueCadreId);
@@ -620,7 +625,7 @@ describe('cadres', () => {
 
   it('GET /cadres/:id → 404 for unknown id', async () => {
     const app = await makeApp();
-    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres/99999999', headers: auth(officerToken) });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/cadres/99999999', headers: auth(superAdminToken) });
     expect(res.statusCode).toBe(404);
     await app.close();
   });
@@ -786,7 +791,7 @@ describe('cadres import (ADR-038)', () => {
 
     // Verify field-by-field via GET — not just that a 200 came back (ADR-019/020/021 standard).
     const list = await app.inject({
-      method: 'GET', url: `/api/v1/cadres?search=${IMPORT_TOKEN}&pageSize=50`, headers: auth(officerToken),
+      method: 'GET', url: `/api/v1/cadres?search=${IMPORT_TOKEN}&pageSize=50`, headers: auth(superAdminToken),
     });
     const row = (list.json() as ListBody).data.find(
       (c) => (c as { serialNumber?: string }).serialNumber === serial,

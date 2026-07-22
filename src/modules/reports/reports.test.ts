@@ -45,8 +45,11 @@ async function purgeReports(): Promise<void> {
 
 beforeAll(async () => {
   const officer = await prisma.user.upsert({
-    where: { phone: PHONES[0] }, update: { deletedAt: null, role: 'officer', name: 'Report Officer' },
-    create: { phone: PHONES[0]!, name: 'Report Officer', role: 'officer' },
+    // ADR-044: the officer must be posted to the fixture cadre's station, or scope
+    // filtering (correctly) hides it and every report route 404s.
+    where: { phone: PHONES[0] },
+    update: { deletedAt: null, role: 'officer', name: 'Report Officer', thana: 'बीजापुर सदर' },
+    create: { phone: PHONES[0]!, name: 'Report Officer', role: 'officer', thana: 'बीजापुर सदर' },
   });
   const viewer = await prisma.user.upsert({
     where: { phone: PHONES[1] }, update: { deletedAt: null, role: 'viewer', name: 'Report Viewer' },

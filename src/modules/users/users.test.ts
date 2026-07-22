@@ -342,7 +342,7 @@ describe('DELETE /users/:userId — soft deactivate (Phase B)', () => {
     });
     const refresh = (session.json() as { refresh_token: string }).refresh_token;
 
-    const before = (await app.inject({ method: 'GET', url: '/api/v1/officers?pageSize=50', headers: auth(adminToken) })).json() as { data: { id: number }[] };
+    const before = (await app.inject({ method: 'GET', url: '/api/v1/officers?pageSize=50', headers: auth(saToken) })).json() as { data: { id: number }[] };
     expect(before.data.some((o) => o.id === target.id)).toBe(true);
 
     const del = await app.inject({ method: 'DELETE', url: `/api/v1/users/${target.id}`, headers: auth(saToken) });
@@ -361,7 +361,7 @@ describe('DELETE /users/:userId — soft deactivate (Phase B)', () => {
     expect(relogin.statusCode).toBe(401);
     const reuse = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: refresh } });
     expect(reuse.statusCode).toBe(401);
-    const after = (await app.inject({ method: 'GET', url: '/api/v1/officers?pageSize=50', headers: auth(adminToken) })).json() as { data: { id: number }[] };
+    const after = (await app.inject({ method: 'GET', url: '/api/v1/officers?pageSize=50', headers: auth(saToken) })).json() as { data: { id: number }[] };
     expect(after.data.some((o) => o.id === target.id)).toBe(false);
 
     await app.close();

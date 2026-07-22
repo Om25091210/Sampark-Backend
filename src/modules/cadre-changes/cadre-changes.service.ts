@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
+import { cadreScopeWhere, type CadreScope } from '../../lib/scope.js';
 import { Prisma, type PrismaClient, type Role, type CadreChangeRequest, type AlertLevel } from '@prisma/client';
 import { tagToLevel } from '../../lib/alert-tags.js';
 import { writeAuditLog } from '../../lib/audit.js';
@@ -30,6 +31,12 @@ export interface CadreChangesDeps {
 export interface Actor {
   id: number;
   role: Role;
+  /**
+   * ADR-044. Carried on the Actor rather than added as a parameter to all six methods:
+   * every one of them already takes an Actor, and a scope that travels WITH the identity
+   * cannot be forgotten at one call site the way a seventh argument can.
+   */
+  scope: CadreScope;
 }
 
 export interface Paginated<T> {
@@ -282,11 +289,27 @@ export function makeCadreChangesService({
     return req as Row;
   }
 
+  /**
+   * A change request is exactly as sensitive as the cadre it edits, so it inherits that
+   * cadre's scope. Loaded separately (rather than joined into WITH_PEOPLE) so the check is
+   * one obvious call every mutating path makes, instead of a condition buried in a select.
+   * 404, not 403 — same reason as everywhere else: ids must stay unenumerable.
+   */
+  async function assertRequestInScope(req: { cadreId: number }, actor: Actor): Promise<void> {
+    const cadre = await prisma.cadre.findFirst({
+      where: { id: req.cadreId, deletedAt: null, ...cadreScopeWhere(actor.scope) },
+      select: { id: true },
+    });
+    if (cadre === null) throw notFound('Change request not found');
+  }
+
   return {
     async submit(cadreId, body, actor) {
       if (!canSubmit(actor.role)) throw forbidden('Viewers cannot propose changes');
 
-      const cadre = await prisma.cadre.findFirst({ where: { id: cadreId, deletedAt: null } });
+      const cadre = await prisma.cadre.findFirst({
+        where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(actor.scope) },
+      });
       if (cadre === null) throw notFound('Cadre not found');
 
       const record = cadre as unknown as Record<string, unknown>;
@@ -377,6 +400,9 @@ export function makeCadreChangesService({
 
     async list(query, actor) {
       const where: Prisma.CadreChangeRequestWhereInput = {};
+      // ADR-044 + BE#16. The approver queue and the submissions list are both bounded by
+      // the cadre's jurisdiction, so an SDOP's queue is their own sub-division's work.
+      if (actor.scope.kind !== 'all') where.cadre = { thana: { in: [...actor.scope.thanas] } };
       if (query.status !== undefined) where.status = query.status;
       if (query.submittedBy !== undefined) where.submittedById = query.submittedBy;
       if (query.cadreId !== undefined) where.cadreId = query.cadreId;
@@ -437,6 +463,7 @@ export function makeCadreChangesService({
       if (req.submittedById === actor.id) {
         throw forbidden('You cannot approve a change you submitted');
       }
+      await assertRequestInScope(req, actor);
       if (!canApproveNext(actor.role, req)) {
         throw forbidden('This change is not awaiting your approval');
       }
@@ -476,6 +503,7 @@ export function makeCadreChangesService({
 
     async reject(id, reason, actor) {
       const req = await loadOrThrow(id);
+      await assertRequestInScope(req, actor);
       if (req.status !== 'pending') {
         throw badRequest(`Change request is already ${req.status}`, 'NOT_PENDING');
       }
@@ -506,6 +534,7 @@ export function makeCadreChangesService({
 
     async cancel(id, actor) {
       const req = await loadOrThrow(id);
+      await assertRequestInScope(req, actor);
       if (req.submittedById !== actor.id) {
         throw forbidden('Only the submitter can withdraw a change');
       }
@@ -534,7 +563,9 @@ export function makeCadreChangesService({
     async patchDirect(cadreId, body, actor) {
       if (!canWriteDirect(actor.role)) throw forbidden('Viewers cannot edit cadres');
 
-      const cadre = await prisma.cadre.findFirst({ where: { id: cadreId, deletedAt: null } });
+      const cadre = await prisma.cadre.findFirst({
+        where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(actor.scope) },
+      });
       if (cadre === null) throw notFound('Cadre not found');
 
       const before = {

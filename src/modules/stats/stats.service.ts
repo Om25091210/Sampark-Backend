@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
+import { cadreScopeWhere, type CadreScope } from '../../lib/scope.js';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { REPORTING_CADENCE_DAYS } from '../../lib/serialize.js';
 import type { DashboardStats, OfficerStats } from './stats.schema.js';
@@ -9,9 +10,12 @@ export interface StatsDeps {
 }
 
 export interface StatsService {
-  dashboard(): Promise<DashboardStats>;
+  // ADR-044. Every count is scoped. An unscoped total is a leak in its own right: it tells
+  // a thana officer exactly how many cadres exist district-wide, which is the number the
+  // scoping was introduced to withhold.
+  dashboard(scope: CadreScope): Promise<DashboardStats>;
   /** ADR-031. The caller's own numbers. Aggregated in SQL, never over one page. */
-  forOfficer(officerId: number): Promise<OfficerStats>;
+  forOfficer(officerId: number, scope: CadreScope): Promise<OfficerStats>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -34,7 +38,7 @@ function istMonthKey(d: Date, monthsAgo: number): string {
 
 export function makeStatsService({ prisma }: StatsDeps): StatsService {
   return {
-    async dashboard() {
+    async dashboard(scope) {
       const now = Date.now();
       const weekAgo = new Date(now - 7 * DAY_MS);
       // ADR-041. Recency boundaries as multiples of the reporting cadence, so the
@@ -45,7 +49,14 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       const twoMonthsAgo = new Date(now - cadence * 2 * DAY_MS); // 60d
       const threeMonthsAgo = new Date(now - cadence * 3 * DAY_MS); // 90d
 
-      const live = { deletedAt: null };
+      // ADR-044. Two predicates, because `Cadre` and `Report` scope differently: a cadre
+      // is scoped on its OWN thana, a report through its cadre relation. They were one
+      // object before scoping and the compiler caught the conflation.
+      const live = { deletedAt: null, ...cadreScopeWhere(scope) };
+      const liveReports: Prisma.ReportWhereInput = {
+        deletedAt: null,
+        ...(scope.kind === 'all' ? {} : { cadre: { thana: { in: [...scope.thanas] } } }),
+      };
 
       // One transaction so every count reflects the same snapshot — a cadre created
       // mid-read must not land in the total but not the category breakdown. Plain
@@ -71,7 +82,7 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         prisma.cadre.count({ where: { ...live, category: 'thana' } }),
         prisma.cadre.count({ where: { ...live, category: 'jail' } }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'critical' } }),
-        prisma.report.count({ where: { ...live, reportedAt: { gte: weekAgo } } }),
+        prisma.report.count({ where: { ...liveReports, reportedAt: { gte: weekAgo } } }),
         // Cadres with no live report in the last 30 days — the "overdue on the monthly
         // check-in" count. `none` covers never-reported too (an empty relation matches).
         prisma.cadre.count({
@@ -132,10 +143,13 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       };
     },
 
-    async forOfficer(officerId) {
+    async forOfficer(officerId, scope) {
       const now = new Date();
       const monthAgo = new Date(now.getTime() - 30 * DAY_MS);
-      const live = { deletedAt: null };
+      // Scoped as well as assigned. `assignedOfficerId` alone is not a boundary (backend
+      // CLAUDE.md is explicit that it is a filter), and a cadre could remain assigned to an
+      // officer after being moved to another station.
+      const live = { deletedAt: null, ...cadreScopeWhere(scope) };
       const mine = { ...live, assignedOfficerId: officerId };
 
       // The window start: the first day of the IST month `MONTHS_SHOWN - 1` back.
@@ -144,7 +158,7 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       const firstKey = istMonthKey(now, MONTHS_SHOWN - 1);
       const windowStart = new Date(Date.parse(`${firstKey}-01T00:00:00.000Z`) - 330 * 60 * 1000);
 
-      const myReports = { ...live, reportedById: officerId };
+      const myReports = { deletedAt: null, reportedById: officerId, ...(scope.kind === 'all' ? {} : { cadre: { thana: { in: [...scope.thanas] } } }) };
 
       // Plain counts rather than groupBy — three categories and two places, each a
       // cheap indexed count. Same call the dashboard makes above, and for the same

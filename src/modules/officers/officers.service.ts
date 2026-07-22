@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
+import { type CadreScope } from '../../lib/scope.js';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { toWireUser, type WireUser } from '../../lib/serialize.js';
 import type { ListOfficersQuery } from './officers.schema.js';
@@ -21,16 +22,21 @@ export interface Paginated<T> {
 export type WireOfficer = WireUser & { assignedCadreCount: number };
 
 export interface OfficersService {
-  list(query: ListOfficersQuery): Promise<Paginated<WireOfficer>>;
+  // ADR-044. Scoped so an SDOP's roster is their own officers. This list drives the
+  // assignment/transfer picker, so an unscoped roster would offer an SDOP officers they
+  // are not allowed to transfer to - a picker full of choices the API then rejects.
+  list(query: ListOfficersQuery, scope: CadreScope): Promise<Paginated<WireOfficer>>;
 }
 
 export function makeOfficersService({ prisma }: OfficersDeps): OfficersService {
   return {
-    async list(query) {
+    async list(query, scope) {
       // Only officers are assignable. Admins and viewers are deliberately excluded:
       // an admin is not a field reporter, and assigning a cadre to one would create
       // a record nobody is accountable for.
       const where: Prisma.UserWhereInput = { role: 'officer', deletedAt: null };
+      // An officer's own thana places them, so the same thana list bounds the roster.
+      if (scope.kind !== 'all') where.thana = { in: [...scope.thanas] };
 
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search;

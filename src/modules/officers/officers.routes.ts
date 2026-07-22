@@ -32,7 +32,7 @@ export async function officersRoutes(app: FastifyInstance): Promise<void> {
     },
     async (request) => {
       const query = listOfficersQuery.parse(request.query);
-      return service.list(query);
+      return service.list(query, request.scope!);
     },
   );
 }
