@@ -56,6 +56,9 @@ export interface WireCadre {
   permanentAddress?: string;
   designation: string;
   category: Cadre['category'];
+  // ADR-046. The register's priority GRADE (A/B/C/jail/death), distinct from
+  // `category`. Drives the per-category reporting cadence. Absent when null.
+  priorityCategory?: NonNullable<Cadre['priorityCategory']>;
   filter?: NonNullable<Cadre['filter']>;
   alertLevel: Cadre['alertLevel'];
   avatarUrl?: string;
@@ -122,9 +125,34 @@ export interface WireCadre {
   updatedAt: string;
 }
 
-// ADR-022. Fixed monthly reporting cadence. No per-category rules for now — the
-// simplest thing that works; revisit if it proves wrong.
+// ADR-022/046. The BASELINE reporting cadence, in days. Once "no per-category rules";
+// ADR-046 made cadence per-category via `cadenceDaysFor` below — this constant survives
+// as the DEFAULT that a null `priorityCategory` falls back to (and as category-A's own
+// cadence). Keeping the default at 30 preserves ADR-041's invariant that every
+// non-jail/death cadre lands in exactly one recency tier and the tiles sum to the total.
 export const REPORTING_CADENCE_DAYS = 30;
+
+// ADR-046. Per-category reporting cadence, in days — the ONE source of truth the
+// serializer, the recency where-builder (lib/recency.ts) and the dashboard tiles all
+// derive from, so a category's clock can never be defined twice and drift.
+//   A → 30d, B → 60d, C → 90d  (priority A is chased hardest)
+//   jail/death → null: no reporting is due, so no cadence and no alarm
+//   null/undefined → REPORTING_CADENCE_DAYS (30d) — a row backfill has not graded yet
+export function cadenceDaysFor(priorityCategory: Cadre['priorityCategory']): number | null {
+  switch (priorityCategory) {
+    case 'A':
+      return 30;
+    case 'B':
+      return 60;
+    case 'C':
+      return 90;
+    case 'jail':
+    case 'death':
+      return null;
+    default:
+      return REPORTING_CADENCE_DAYS;
+  }
+}
 
 // ADR-036. Whole years from a birth date to today, in UTC. Age is derived on every
 // read so it can never go stale — a stored int is wrong the day after a birthday and
@@ -168,9 +196,12 @@ export function toWireCadre(
   lastReportedAt?: Date | null,
   edit?: CadreEditContext,
 ): WireCadre {
+  // ADR-046. Cadence is the cadre's OWN per-category cadence, not the global constant.
+  // `null` (jail/death) means no reporting is due, so there is no next check-in to emit.
+  const cadenceDays = cadenceDaysFor(c.priorityCategory);
   const nextReportingDueAt =
-    lastReportedAt != null
-      ? new Date(lastReportedAt.getTime() + REPORTING_CADENCE_DAYS * 24 * 60 * 60 * 1000).toISOString()
+    lastReportedAt != null && cadenceDays !== null
+      ? new Date(lastReportedAt.getTime() + cadenceDays * 24 * 60 * 60 * 1000).toISOString()
       : undefined;
 
   return {
@@ -183,6 +214,7 @@ export function toWireCadre(
     permanentAddress: c.permanentAddress ?? undefined,
     designation: c.designation,
     category: c.category,
+    priorityCategory: c.priorityCategory ?? undefined,
     filter: c.filter ?? undefined,
     alertLevel: c.alertLevel,
     // ADR-029. Prefer a freshly-signed URL from the durable `avatarKey`; fall back

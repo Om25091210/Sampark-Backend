@@ -4,12 +4,15 @@ import { makeCadresService } from './cadres.service.js';
 import {
   avatarBackfillBody,
   cadreIdParam,
+  categoryBackfillBody,
   importCadresBody,
   listCadresQuery,
+  thanaTransferBody,
   transferBody,
   transferParams,
   AVATAR_BACKFILL_BODY_LIMIT_BYTES,
   MAX_AVATAR_BACKFILL_BATCH,
+  MAX_IMPORT_BATCH,
 } from './cadres.schema.js';
 import { forbidden, unauthorized } from '../../lib/errors.js';
 import {
@@ -137,6 +140,45 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // ADR-046. The grade half of the register backfill. super_admin only, like
+  // /cadres/avatar-backfill — this WRITES OVER existing rows, so the machine key is
+  // refused and the actor is in the audit. Registered before `/cadres/:id` alongside the
+  // other static segments.
+  app.post(
+    '/cadres/category-backfill',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Bulk priorityCategory backfill by serialNumber (super_admin)',
+        description:
+          'ADR-046. Sets the priority grade (कैटेगरी) in bulk from the historical register, ' +
+          'matching EXISTING cadres by `serialNumber` (ADR-025). Body is an OBJECT with a ' +
+          `\`categories\` array (max ${MAX_IMPORT_BATCH} rows). Each row is ` +
+          '`{ serialNumber, priorityCategory }` where priorityCategory is `A|B|C|jail|death` ' +
+          '(A/B/C uppercase — a deliberate wire deviation, see ADR-046). Bypasses the ADR-026 ' +
+          'change-request ladder and writes directly, exactly as ADR-038/045 do for the row ' +
+          'and photo loads. A cadre that ALREADY has a grade is skipped, never overwritten, so ' +
+          'a re-run is idempotent. Returns a per-row result array in input order.',
+        security: bearerAuth,
+        body: zodToJson(categoryBackfillBody),
+        response: {
+          200: jsonResponse('Per-row category backfill results', {
+            results: [
+              { serialNumber: 'BJP/2025/0001', status: 'updated', cadreId: 1, priorityCategory: 'A' },
+              { serialNumber: 'BJP/2025/0002', status: 'skipped_has_category', cadreId: 2, priorityCategory: 'B' },
+              { serialNumber: 'BJP/2025/9999', status: 'not_found' },
+            ],
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const { categories } = categoryBackfillBody.parse(request.body);
+      return service.backfillCategory(categories, request.authUser!.sub);
+    },
+  );
+
   app.get(
     '/cadres',
     {
@@ -221,6 +263,35 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
       const { cadreId } = transferParams.parse(request.params);
       const { to_officer_id } = transferBody.parse(request.body);
       await service.transfer(cadreId, to_officer_id, request.authUser!.sub, request.scope!);
+      return reply.code(204).send();
+    },
+  );
+
+  // ADR-046. Move a cadre to another station (admin+). Honours ADR-044 on both ends: the
+  // cadre must be in the caller's scope, and the destination thana must be admitted by it
+  // (400 THANA_OUT_OF_SCOPE otherwise). Clears the assignment; leaves sub-division as-is.
+  app.post(
+    '/cadres/:cadreId/thana-transfer',
+    {
+      preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Move a cadre to another station (admin+)',
+        description:
+          'ADR-046. Reassigns the cadre to a different thana — a real move, not a copy. ' +
+          'Enforces ADR-044 jurisdiction on BOTH ends (source in scope, destination admitted). ' +
+          'Clears `assignedOfficerId` (the old station\'s officer loses scope) and leaves ' +
+          '`subDivision` un-re-derived (ADR-043).',
+        security: bearerAuth,
+        params: zodToJson(transferParams),
+        body: zodToJson(thanaTransferBody),
+        response: { 204: emptyResponse('Transferred') },
+      },
+    },
+    async (request, reply) => {
+      const { cadreId } = transferParams.parse(request.params);
+      const { thana } = thanaTransferBody.parse(request.body);
+      await service.transferThana(cadreId, thana, request.authUser!.sub, request.scope!);
       return reply.code(204).send();
     },
   );

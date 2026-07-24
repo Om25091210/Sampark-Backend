@@ -83,6 +83,24 @@ enum Gender {
   female
 }
 
+// ADR-046. The register's कैटेगरी column — a priority GRADE, distinct from
+// `category` (surrendered/jail/thana, which records station-status). A/B/C are
+// priority tiers (A > B > C) and drive the per-category reporting cadence
+// (`cadenceDaysFor`: A→30d, B→60d, C→90d); jail/death carry no reporting cadence.
+//
+// DELIBERATE WIRE DEVIATION (CLAUDE.md rule 11 says enums serialize lowercase):
+// A/B/C stay UPPERCASE on the wire because the uppercase letters ARE the register's
+// grades and every officer's mental model. Lowercasing them would make the API
+// disagree with the paper record for no benefit. `jail`/`death` are not grades and
+// stay lowercase like every other enum. See ADR-046.
+enum PriorityCategory {
+  A
+  B
+  C
+  jail
+  death
+}
+
 // ─── Users (officers + admins) ─────────────────────────────────────────────────
 
 model User {
@@ -162,6 +180,11 @@ model Cadre {
   permanentAddress   String?        @map("permanent_address")
   designation        String
   category           CadreCategory
+  // ADR-046. Priority GRADE from the register's कैटेगरी column — separate from
+  // `category` above. Drives the per-category reporting cadence (cadenceDaysFor).
+  // Nullable because existing rows predate it; the CSV backfill (category-backfill
+  // route) and the ADR-038 import supply it — same posture as serialNumber/dateOfBirth.
+  priorityCategory   PriorityCategory? @map("priority_category")
   filter             CadreFilter?
   alertLevel         AlertLevel     @map("alert_level")
   avatarUrl          String?        @map("avatar_url")
@@ -245,6 +268,8 @@ model Cadre {
   @@index([category])
   @@index([alertLevel])
   @@index([assignedOfficerId])
+  // ADR-046. The recency queries filter on priorityCategory (per-category cadence).
+  @@index([priorityCategory])
   // The two surrendered dashboard tiles both filter category + origin together.
   @@index([category, surrenderOrigin])
   @@map("cadres")

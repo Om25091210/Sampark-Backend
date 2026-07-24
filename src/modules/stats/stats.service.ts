@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { cadreScopeWhere, type CadreScope } from '../../lib/scope.js';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { REPORTING_CADENCE_DAYS } from '../../lib/serialize.js';
+import { recencyTierWhere } from '../../lib/recency.js';
 import type { DashboardStats, OfficerStats } from './stats.schema.js';
 
 export interface StatsDeps {
@@ -41,13 +42,10 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
     async dashboard(scope) {
       const now = Date.now();
       const weekAgo = new Date(now - 7 * DAY_MS);
-      // ADR-041. Recency boundaries as multiples of the reporting cadence, so the
-      // dashboard tiers can never drift from the card's (CadreCard) or the /cadres
-      // `recency` filter's — they all step off the same 30-day constant.
-      const cadence = REPORTING_CADENCE_DAYS;
-      const monthAgo = new Date(now - cadence * DAY_MS); // 30d — pendingReporting + tier boundary
-      const twoMonthsAgo = new Date(now - cadence * 2 * DAY_MS); // 60d
-      const threeMonthsAgo = new Date(now - cadence * 3 * DAY_MS); // 90d
+      // The recency tiers now come from recencyTierWhere (ADR-046, per-category). This
+      // constant remains only for `pendingReporting` — the coarse global-30d "overdue on
+      // the monthly touch" count, deliberately distinct from the per-category tiers.
+      const monthAgo = new Date(now - REPORTING_CADENCE_DAYS * DAY_MS);
 
       // ADR-044. Two predicates, because `Cadre` and `Report` scope differently: a cadre
       // is scoped on its OWN thana, a report through its cadre relation. They were one
@@ -88,36 +86,15 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         prisma.cadre.count({
           where: { ...live, reports: { none: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
         }),
-        // ADR-041. The four recency tiers — disjoint windows, so each live cadre falls
-        // in exactly one and the four sum to totalCadres.
-        // सामान्य: reported within 30d.
-        prisma.cadre.count({
-          where: { ...live, reports: { some: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
-        }),
-        // सतर्क: latest report in [60d, 30d) — some within 60d, none within 30d.
-        prisma.cadre.count({
-          where: {
-            ...live,
-            AND: [
-              { reports: { some: { deletedAt: null, reportedAt: { gte: twoMonthsAgo } } } },
-              { reports: { none: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
-            ],
-          },
-        }),
-        // जोखिम: latest report in [90d, 60d).
-        prisma.cadre.count({
-          where: {
-            ...live,
-            AND: [
-              { reports: { some: { deletedAt: null, reportedAt: { gte: threeMonthsAgo } } } },
-              { reports: { none: { deletedAt: null, reportedAt: { gte: twoMonthsAgo } } } },
-            ],
-          },
-        }),
-        // उच्च जोखिम: nothing within 90d (includes never-reported — no grace, ADR-031).
-        prisma.cadre.count({
-          where: { ...live, reports: { none: { deletedAt: null, reportedAt: { gte: threeMonthsAgo } } } },
-        }),
+        // ADR-041/046. The four recency tiers — now PER-CATEGORY, via the shared
+        // recencyTierWhere (the same builder /cadres?recency uses, so a tile's count
+        // equals the length of the list it drills into). Still disjoint and exhaustive:
+        // each live cadre falls in exactly one tier (jail/death in `current` only), so the
+        // four sum to totalCadres. सामान्य / सतर्क / जोखिम / उच्च जोखिम.
+        prisma.cadre.count({ where: { ...live, ...recencyTierWhere('current') } }),
+        prisma.cadre.count({ where: { ...live, ...recencyTierWhere('overdue1m') } }),
+        prisma.cadre.count({ where: { ...live, ...recencyTierWhere('overdue2m') } }),
+        prisma.cadre.count({ where: { ...live, ...recencyTierWhere('overdue3m') } }),
       ]);
 
       return {

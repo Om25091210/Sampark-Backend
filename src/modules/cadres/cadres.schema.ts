@@ -97,6 +97,13 @@ export const importCadreRow = z.object({
   currentAddress: z.string().trim().min(1, 'currentAddress is required'),
   designation: z.string().trim().min(1, 'designation is required'),
   category: z.enum(['surrendered', 'jail', 'thana']),
+  // ADR-046. Priority grade from the register's कैटेगरी column. A/B/C stay UPPERCASE on
+  // the wire (a deliberate deviation from the lowercase-enum convention — the letters ARE
+  // the register's grades); jail/death lowercase. Optional — a blank cell → undefined.
+  priorityCategory: z
+    .enum(['A', 'B', 'C', 'jail', 'death'])
+    .nullish()
+    .transform((v) => v ?? undefined),
   alertLevel: z.enum(['critical', 'warning', 'normal']),
   // Optional — only DVCM/ACM/PM rows carry a filter; the other ~30 designations leave it null.
   filter: z
@@ -196,8 +203,39 @@ export const transferParams = z.object({ cadreId: z.coerce.number().int().positi
 // Request body is snake_case (per the client contract).
 export const transferBody = z.object({ to_officer_id: z.number().int().positive() });
 
+// ADR-046. Thana-transfer body — a single station name. NFC-normalised at the boundary
+// so it matches how scope thanas are stored (a canonicalisation mismatch would make the
+// destination scope check fail on encoding alone). The transfer sheet reuses the mobile
+// THANAS list, so the value is a known station, not free text.
+export const thanaTransferBody = z.object({
+  thana: z.string().trim().min(1).max(100).transform(nfc),
+});
+
+// ── Bulk priorityCategory backfill (ADR-046) ─────────────────────────────────────
+// The grade half of the register load, same tooling and per-row-result contract as the
+// avatar backfill (Design-Docs#8): match EXISTING cadres by serialNumber, idempotent,
+// super_admin-only. Rows are camelCase, mirroring the Cadre entity, exactly as ADR-038's
+// import rows are — this is a machine/super-admin entity load, not a client operation.
+export const categoryBackfillRow = z.object({
+  serialNumber: z.string().trim().min(1, 'serialNumber is required'),
+  priorityCategory: z.enum(['A', 'B', 'C', 'jail', 'death']),
+});
+
+// Same envelope discipline as importCadresBody / avatarBackfillBody: rows arrive as
+// unknowns so one malformed row cannot fail the whole parse. Bounded by MAX_IMPORT_BATCH
+// (a category row is a couple of short strings, like an import row, not a photo).
+export const categoryBackfillBody = z.object({
+  categories: z
+    .array(z.unknown())
+    .min(1, 'categories must be a non-empty array')
+    .max(MAX_IMPORT_BATCH),
+});
+
 export type ListCadresQuery = z.infer<typeof listCadresQuery>;
 export type TransferBody = z.infer<typeof transferBody>;
+export type ThanaTransferBody = z.infer<typeof thanaTransferBody>;
+export type CategoryBackfillRow = z.infer<typeof categoryBackfillRow>;
+export type CategoryBackfillBody = z.infer<typeof categoryBackfillBody>;
 
 // What the service actually receives: the route resolves the `me` sentinel to the
 // caller's id, so the service never has to know who is asking.

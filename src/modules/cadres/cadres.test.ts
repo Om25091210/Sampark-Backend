@@ -1185,3 +1185,283 @@ describe('cadres avatar backfill (Design-Docs#8)', () => {
     await app.close();
   });
 });
+
+// ── Thana transfer (ADR-046) ──────────────────────────────────────────────────
+// Moves a cadre to another station. ADR-044 is enforced on BOTH ends: the cadre must
+// be in the caller's scope to be found, and the destination thana must be admitted by
+// it. adminToken is scoped to the बीजापुर sub-division (thanas: [बीजापुर]); superAdmin
+// is unrestricted. गंगालूर and पामेड़ are canonical thanas in OTHER sub-divisions.
+describe('cadres thana transfer (ADR-046)', () => {
+  const TXN_TOKEN = 'TXNFIXTURE';
+  const created: number[] = [];
+  const makeCadre = async (suffix: string, thana: string): Promise<number> => {
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${TXN_TOKEN} ${suffix}`, phone: '+910000000501', thana,
+        currentAddress: 'Txn fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], assignedOfficerId: officerAId,
+      },
+    });
+    created.push(c.id);
+    return c.id;
+  };
+
+  afterAll(async () => {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'cadre', entityId: { in: created.map(String) } } });
+    await prisma.outboxEvent.deleteMany({ where: { aggregateType: 'cadre', aggregateId: { in: created.map(String) } } });
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('is forbidden for officers (403)', async () => {
+    const app = await makeApp();
+    const id = await makeCadre('officer-403', 'बीजापुर');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${id}/thana-transfer`,
+      headers: auth(officerToken), payload: { thana: 'गंगालूर' },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('super_admin move → 204, changes thana, clears the assignment, audits + outboxes', async () => {
+    const app = await makeApp();
+    const id = await makeCadre('happy', 'बीजापुर');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${id}/thana-transfer`,
+      headers: auth(superAdminToken), payload: { thana: 'गंगालूर' },
+    });
+    expect(res.statusCode).toBe(204);
+
+    const updated = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(updated.thana).toBe('गंगालूर');
+    // The old station's officer loses scope, so the assignment is cleared.
+    expect(updated.assignedOfficerId).toBeNull();
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.thana_transfer' },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit?.hash).toBeTruthy();
+
+    const event = await prisma.outboxEvent.findFirst({
+      where: { aggregateType: 'cadre', aggregateId: String(id), eventType: 'cadre.thana_transferred' },
+    });
+    expect(event).not.toBeNull();
+    await app.close();
+  });
+
+  it('rejects a destination outside the actor jurisdiction → 400 THANA_OUT_OF_SCOPE', async () => {
+    const app = await makeApp();
+    // In the admin's scope (बीजापुर) so it is found; गंगालूर is a DIFFERENT sub-division.
+    const id = await makeCadre('dest-oos', 'बीजापुर');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${id}/thana-transfer`,
+      headers: auth(adminToken), payload: { thana: 'गंगालूर' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('THANA_OUT_OF_SCOPE');
+    // Nothing moved.
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id } })).thana).toBe('बीजापुर');
+    await app.close();
+  });
+
+  it('a cadre outside the actor jurisdiction is a 404 (source end of the scope check)', async () => {
+    const app = await makeApp();
+    // पामेड़ is outside the admin's बीजापुर scope, so it is indistinguishable from absent.
+    const id = await makeCadre('src-oos', 'पामेड़');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${id}/thana-transfer`,
+      headers: auth(adminToken), payload: { thana: 'पामेड़' },
+    });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('rejects a missing thana with 400', async () => {
+    const app = await makeApp();
+    const id = await makeCadre('no-thana', 'बीजापुर');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${id}/thana-transfer`,
+      headers: auth(adminToken), payload: {},
+    });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+});
+
+// ── priorityCategory backfill (ADR-046) ───────────────────────────────────────
+describe('cadres category backfill (ADR-046)', () => {
+  const url = '/api/v1/cadres/category-backfill';
+  const CAT_TOKEN = 'CATFIXTURE';
+  const created: number[] = [];
+
+  interface CatResp {
+    results: Array<{ serialNumber: string | null; status: string; cadreId?: number; priorityCategory?: string; error?: string }>;
+  }
+
+  const makeTarget = async (suffix: string, grade: 'A' | 'B' | 'C' | 'jail' | 'death' | null = null): Promise<{ id: number; serial: string }> => {
+    const serial = `${CAT_TOKEN}-${suffix}`;
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${CAT_TOKEN} ${suffix}`, phone: '+910000000601', thana: 'बीजापुर',
+        currentAddress: 'Cat fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], serialNumber: serial, priorityCategory: grade,
+      },
+    });
+    created.push(c.id);
+    return { id: c.id, serial };
+  };
+
+  afterAll(async () => {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'cadre', entityId: { in: created.map(String) } } });
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('rejects an unauthenticated call with 401', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'POST', url, payload: { categories: [] } });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('rejects an admin JWT with 403 (backfill is super_admin-tier)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(adminToken),
+      payload: { categories: [{ serialNumber: 'x', priorityCategory: 'A' }] },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('rejects the SDR-007 machine key with 401 — not accepted on this route', async () => {
+    const app = await buildApp({ config: testConfig({ importApiKey: IMPORT_KEY }), prisma, logger: false });
+    const res = await app.inject({
+      method: 'POST', url, headers: { 'x-sampark-import-key': IMPORT_KEY },
+      payload: { categories: [{ serialNumber: 'x', priorityCategory: 'A' }] },
+    });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('sets priorityCategory directly, bypasses the ladder, audits the super_admin, and serializes it', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('set');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { categories: [{ serialNumber: serial, priorityCategory: 'A' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as CatResp).results[0]).toMatchObject({ serialNumber: serial, status: 'updated', cadreId: id, priorityCategory: 'A' });
+
+    const row = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(row.priorityCategory).toBe('A');
+    expect(await prisma.cadreChangeRequest.count({ where: { cadreId: id } })).toBe(0);
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.category_backfill' },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit!.actorId).toBe(superAdminId);
+
+    // The grade is on the wire, uppercase (the deliberate ADR-046 deviation).
+    const get = await app.inject({ method: 'GET', url: `/api/v1/cadres/${id}`, headers: auth(superAdminToken) });
+    expect((get.json() as { priorityCategory?: string }).priorityCategory).toBe('A');
+    await app.close();
+  });
+
+  it('skips a cadre that already has a grade — a re-run cannot overwrite it', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('already', 'A');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { categories: [{ serialNumber: serial, priorityCategory: 'B' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as CatResp).results[0]).toMatchObject({ serialNumber: serial, status: 'skipped_has_category', cadreId: id, priorityCategory: 'A' });
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id } })).priorityCategory).toBe('A');
+    expect(await prisma.auditLog.count({ where: { entityType: 'cadre', entityId: String(id), action: 'cadre.category_backfill' } })).toBe(0);
+    await app.close();
+  });
+
+  it('reports an unmatched serial as not_found without failing the batch', async () => {
+    const app = await makeApp();
+    const { serial } = await makeTarget('mixed');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: {
+        categories: [
+          { serialNumber: `${CAT_TOKEN}-NOSUCH`, priorityCategory: 'C' },
+          { serialNumber: serial, priorityCategory: 'C' },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as CatResp).results;
+    expect(results[0]).toMatchObject({ status: 'not_found' });
+    expect(results[0]!.cadreId).toBeUndefined();
+    expect(results[1]).toMatchObject({ serialNumber: serial, status: 'updated', priorityCategory: 'C' });
+    await app.close();
+  });
+});
+
+// ── Per-category recency (ADR-046) ────────────────────────────────────────────
+// The recency tiers scale by each cadre's OWN cadence: a grade-A cadre 35 days dark is
+// overdue1m, but a grade-C cadre at the same 35 days is still current. jail/death never
+// alarm — they are current regardless of how long dark.
+describe('cadres per-category recency (ADR-046)', () => {
+  const REC_TOKEN = 'RECCATFIXTURE';
+  const created: number[] = [];
+
+  const makeGraded = async (suffix: string, grade: 'A' | 'B' | 'C' | 'jail' | 'death', daysDark: number): Promise<number> => {
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${REC_TOKEN} ${suffix}`, phone: '+910000000701', thana: 'बीजापुर',
+        currentAddress: 'Rec fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], priorityCategory: grade,
+      },
+    });
+    created.push(c.id);
+    await prisma.report.create({
+      data: {
+        cadreId: c.id, reportedById: officerAId, reportingPlace: 'thana', specificLocation: 'x',
+        personStatus: 'alive', currentPhone: '+910', currentActivity: 'y',
+        reportedAt: new Date(Date.now() - daysDark * 24 * 60 * 60 * 1000),
+      },
+    });
+    return c.id;
+  };
+
+  afterAll(async () => {
+    await prisma.report.deleteMany({ where: { cadreId: { in: created } } });
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  const inTier = async (app: FastifyInstance, id: number, tier: string): Promise<boolean> => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?search=${encodeURIComponent(REC_TOKEN)}&recency=${tier}&pageSize=50`,
+      headers: auth(superAdminToken),
+    });
+    return (res.json() as ListBody).data.some((r) => r.id === id);
+  };
+
+  it('a grade-A cadre 35 days dark is overdue1m, but a grade-C cadre at 35 days is still current', async () => {
+    const app = await makeApp();
+    const aId = await makeGraded('A35', 'A', 35);
+    const cId = await makeGraded('C35', 'C', 35);
+    expect(await inTier(app, aId, 'overdue1m')).toBe(true);
+    expect(await inTier(app, aId, 'current')).toBe(false);
+    expect(await inTier(app, cId, 'current')).toBe(true);
+    expect(await inTier(app, cId, 'overdue1m')).toBe(false);
+    await app.close();
+  });
+
+  it('a jail cadre is always current, however long dark', async () => {
+    const app = await makeApp();
+    const jId = await makeGraded('JAIL', 'jail', 400);
+    expect(await inTier(app, jId, 'current')).toBe(true);
+    expect(await inTier(app, jId, 'overdue3m')).toBe(false);
+    await app.close();
+  });
+});

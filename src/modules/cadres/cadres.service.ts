@@ -2,7 +2,8 @@ import type { FastifyBaseLogger } from 'fastify';
 import { cadreScopeWhere, scopeAdmitsThana, type CadreScope } from '../../lib/scope.js';
 import { Prisma } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
-import { toWireCadre, REPORTING_CADENCE_DAYS, type WireCadre } from '../../lib/serialize.js';
+import { toWireCadre, type WireCadre } from '../../lib/serialize.js';
+import { recencyTierWhere } from '../../lib/recency.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
@@ -11,8 +12,10 @@ import { randomUUID } from 'node:crypto';
 import { decodeBase64Image, sniffImageType, EXT_BY_TYPE } from '../../lib/images.js';
 import {
   avatarBackfillRow,
+  categoryBackfillRow,
   importCadreRow,
   type AvatarBackfillRow,
+  type CategoryBackfillRow,
   type ImportCadreRow,
   type ResolvedListCadresQuery,
 } from './cadres.schema.js';
@@ -76,6 +79,25 @@ export interface AvatarBackfillResult {
   results: AvatarBackfillRowResult[];
 }
 
+// ADR-046. Per-row outcome of the bulk priorityCategory backfill, same contract as the
+// avatar backfill (matched by serialNumber, idempotent). `skipped_has_category` mirrors
+// `skipped_has_avatar`: a row already graded is left alone, so a re-run cannot overwrite
+// a category set since the last run. `not_found` is its own status for the same reason it
+// is on the avatar backfill — a serial the register has but the DB does not is an
+// expected gap, not a malfunction.
+export interface CategoryBackfillRowResult {
+  serialNumber: string | null;
+  status: 'updated' | 'skipped_has_category' | 'not_found' | 'error';
+  cadreId?: number;
+  /** The grade written, on `updated` — so the sheet records what was set. */
+  priorityCategory?: CategoryBackfillRow['priorityCategory'];
+  error?: string;
+}
+
+export interface CategoryBackfillResult {
+  results: CategoryBackfillRowResult[];
+}
+
 export interface CadresService {
   // ADR-044. `scope` is the caller's row-level authorisation, resolved per request in the
   // auth plugin. It is a REQUIRED parameter, not an optional one: an optional scope is a
@@ -85,6 +107,10 @@ export interface CadresService {
   facets(scope: CadreScope): Promise<CadreFacets>;
   getById(id: number, scope: CadreScope): Promise<WireCadre>;
   transfer(cadreId: number, toOfficerId: number, actorId: number, scope: CadreScope): Promise<void>;
+  // ADR-046. Move a cadre to another station. `scope` enforces ADR-044 on BOTH ends —
+  // the cadre must be in scope to be found AND the destination thana must be admitted —
+  // for the same reason `transfer`'s `scope` is required, not optional.
+  transferThana(cadreId: number, newThana: string, actorId: number, scope: CadreScope): Promise<void>;
   // ADR-038. Bulk historical import. `actorId` is the super_admin's id for an
   // interactive call, or null when authenticated by the SDR-007 machine key.
   importCadres(rows: unknown[], actorId: number | null): Promise<ImportResult>;
@@ -93,6 +119,10 @@ export interface CadresService {
   // super_admin-only, and a super_admin's scope is unrestricted by definition
   // (ADR-044). `actorId` is NOT nullable here — there is no machine-key path.
   backfillAvatars(rows: unknown[], actorId: number): Promise<AvatarBackfillResult>;
+  // ADR-046. Bulk priorityCategory backfill by serialNumber, from the register CSV.
+  // super_admin-only like backfillAvatars, so `actorId` is non-nullable (no machine-key
+  // path) and no `scope` parameter (a super_admin's scope is unrestricted, ADR-044).
+  backfillCategory(rows: unknown[], actorId: number): Promise<CategoryBackfillResult>;
 }
 
 // Echoes whatever serialNumber a raw (possibly invalid) row carried, so a row that
@@ -124,6 +154,8 @@ function toCreateData(row: ImportCadreRow): Prisma.CadreCreateInput {
     currentAddress: row.currentAddress,
     designation: row.designation,
     category: row.category,
+    // ADR-046. Priority grade, when the import row carries one.
+    priorityCategory: row.priorityCategory,
     alertLevel: row.alertLevel,
     filter: row.filter,
     permanentAddress: row.permanentAddress,
@@ -150,29 +182,6 @@ function toCreateData(row: ImportCadreRow): Prisma.CadreCreateInput {
 // map cannot see.
 function isDuplicateSerial(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
-}
-
-// ADR-041. Reporting-recency tier → a where clause over report windows. Same 30/60/90
-// boundaries the dashboard counts use (multiples of the cadence), so a tile's count
-// equals the size of the list its drill-down opens.
-const RECENCY_DAY_MS = 86_400_000;
-function recencyWhere(
-  tier: 'current' | 'overdue1m' | 'overdue2m' | 'overdue3m',
-): Prisma.CadreWhereInput {
-  const now = Date.now();
-  const d = (mult: number) => new Date(now - REPORTING_CADENCE_DAYS * mult * RECENCY_DAY_MS);
-  const some = (gte: Date): Prisma.CadreWhereInput => ({ reports: { some: { deletedAt: null, reportedAt: { gte } } } });
-  const none = (gte: Date): Prisma.CadreWhereInput => ({ reports: { none: { deletedAt: null, reportedAt: { gte } } } });
-  switch (tier) {
-    case 'current':
-      return some(d(1)); // सामान्य — reported within 30d
-    case 'overdue1m':
-      return { AND: [some(d(2)), none(d(1))] }; // सतर्क — [60d, 30d)
-    case 'overdue2m':
-      return { AND: [some(d(3)), none(d(2))] }; // जोखिम — [90d, 60d)
-    case 'overdue3m':
-      return none(d(3)); // उच्च जोखिम — nothing within 90d (incl. never)
-  }
 }
 
 // The cadre's most recent non-deleted report date only (ADR-022) — nothing else
@@ -276,8 +285,9 @@ export function makeCadresService({
           OR: query.designation.map((d) => ({ designation: { contains: d, mode: 'insensitive' as const } })),
         });
       }
-      // ADR-041: reporting-recency tier — same windows as /stats/dashboard's tiles.
-      if (query.recency !== undefined) and.push(recencyWhere(query.recency));
+      // ADR-041/046: reporting-recency tier — the shared per-category where-builder, the
+      // same one /stats/dashboard's tiles use, so the tile count matches the list length.
+      if (query.recency !== undefined) and.push(recencyTierWhere(query.recency));
       if (and.length > 0) where.AND = and;
 
       if (query.search !== undefined && query.search !== '') {
@@ -424,6 +434,55 @@ export function makeCadresService({
           aggregateId: String(cadreId),
           eventType: 'cadre.transferred',
           payload: { cadreId, fromOfficerId, toOfficerId, actorId },
+        });
+      });
+    },
+
+    async transferThana(cadreId, newThana, actorId, scope) {
+      // Source end of the scope check: an out-of-scope cadre is a 404, same as getById.
+      const cadre = await prisma.cadre.findFirst({
+        where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(scope) },
+      });
+      if (cadre === null) throw notFound('Cadre not found');
+
+      // Destination end (ADR-044). Without this an SDOP could move a cadre they hold to a
+      // station in another sub-division — pushing the record out of their own jurisdiction
+      // and permanently out of their own reach. Same escape the officer-transfer guard
+      // above closes, one axis over. `newThana` is already NFC-normalised by the schema,
+      // matching how scope thanas are stored, so the comparison cannot fail on encoding.
+      if (!scopeAdmitsThana(scope, newThana)) {
+        throw badRequest('thana is outside your jurisdiction', 'THANA_OUT_OF_SCOPE');
+      }
+
+      const fromThana = cadre.thana;
+      // Moving the station clears the assignment: the old station's officer no longer has
+      // scope over this cadre, so leaving them assigned would be a dangling pointer into
+      // another jurisdiction. `subDivision` is deliberately LEFT AS-IS — ADR-043 refuses
+      // to re-derive location from evidence, and there is no thana→sub-division map.
+      const fromOfficerId = cadre.assignedOfficerId;
+
+      // No-op guard: moving a cadre to the station it is already at should not clear the
+      // assignment or write a spurious audit row.
+      if (fromThana === newThana) return;
+
+      await prisma.$transaction(async (tx) => {
+        await tx.cadre.update({
+          where: { id: cadreId },
+          data: { thana: newThana, assignedOfficerId: null },
+        });
+        await writeAuditLog(tx, {
+          actorId,
+          action: 'cadre.thana_transfer',
+          entityType: 'cadre',
+          entityId: String(cadreId),
+          before: { thana: fromThana, assignedOfficerId: fromOfficerId },
+          after: { thana: newThana, assignedOfficerId: null },
+        });
+        await writeOutboxEvent(tx, {
+          aggregateType: 'cadre',
+          aggregateId: String(cadreId),
+          eventType: 'cadre.thana_transferred',
+          payload: { cadreId, fromThana, toThana: newThana, clearedOfficerId: fromOfficerId, actorId },
         });
       });
     },
@@ -644,6 +703,96 @@ export function makeCadresService({
             status: 'error',
             cadreId: match.id,
             error: 'internal error storing avatar',
+          };
+        }
+      }
+
+      return { results };
+    },
+
+    async backfillCategory(rows, actorId) {
+      // Same three-phase shape as backfillAvatars: validate every row up front, resolve
+      // all serials in one query, then update per row. A near-copy on purpose — the
+      // contract (match by serialNumber, idempotent, per-row result) is identical; only
+      // the field being written differs.
+      const results: CategoryBackfillRowResult[] = new Array(rows.length);
+      const valid: { index: number; row: CategoryBackfillRow }[] = [];
+      rows.forEach((raw, index) => {
+        const parsed = categoryBackfillRow.safeParse(raw);
+        if (!parsed.success) {
+          results[index] = {
+            serialNumber: rawSerial(raw),
+            status: 'error',
+            error: formatIssues(parsed.error),
+          };
+        } else {
+          valid.push({ index, row: parsed.data });
+        }
+      });
+
+      // One query resolving every serial to its cadre + current grade. `deletedAt: null`
+      // — a soft-deleted cadre is not a backfill target and reports `not_found` rather
+      // than being silently revived with a grade.
+      const serials = valid.map((v) => v.row.serialNumber);
+      const existing =
+        serials.length > 0
+          ? await prisma.cadre.findMany({
+              where: { serialNumber: { in: serials }, deletedAt: null },
+              select: { id: true, serialNumber: true, priorityCategory: true },
+            })
+          : [];
+      const bySerial = new Map<string, { id: number; priorityCategory: CategoryBackfillRow['priorityCategory'] | null }>();
+      for (const e of existing) {
+        if (e.serialNumber !== null) bySerial.set(e.serialNumber, { id: e.id, priorityCategory: e.priorityCategory });
+      }
+
+      for (const { index, row } of valid) {
+        const match = bySerial.get(row.serialNumber);
+        if (match === undefined) {
+          results[index] = { serialNumber: row.serialNumber, status: 'not_found' };
+          continue;
+        }
+        // Already graded → skip, never overwrite. Same idempotency discipline as the
+        // avatar backfill, so a re-run cannot clobber a grade corrected since the last run.
+        if (match.priorityCategory !== null) {
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'skipped_has_category',
+            cadreId: match.id,
+            priorityCategory: match.priorityCategory,
+          };
+          continue;
+        }
+        try {
+          await prisma.$transaction(async (tx) => {
+            await tx.cadre.update({ where: { id: match.id }, data: { priorityCategory: row.priorityCategory } });
+            // Bypassing the ADR-026 ladder means this audit row is the only record of
+            // who set the grade — hence the non-null actor and the displaced value.
+            await writeAuditLog(tx, {
+              actorId,
+              action: 'cadre.category_backfill',
+              entityType: 'cadre',
+              entityId: String(match.id),
+              before: { priorityCategory: null },
+              after: { serialNumber: row.serialNumber, priorityCategory: row.priorityCategory },
+            });
+          });
+          // Guard the same serial appearing twice in one batch: the second occurrence now
+          // sees a grade on file and skips.
+          bySerial.set(row.serialNumber, { id: match.id, priorityCategory: row.priorityCategory });
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'updated',
+            cadreId: match.id,
+            priorityCategory: row.priorityCategory,
+          };
+        } catch (err) {
+          log.error({ err, serialNumber: row.serialNumber }, 'cadre category backfill row failed');
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'error',
+            cadreId: match.id,
+            error: 'internal error setting category',
           };
         }
       }
