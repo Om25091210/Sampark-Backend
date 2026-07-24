@@ -35,6 +35,9 @@ export const listCadresQuery = z.object({
   // ADR-033 widened it to multi-value; the dashboard's single-value drill-in still
   // works unchanged, since one value normalises to a one-element array.
   alertLevel: multi(z.enum(['critical', 'warning', 'normal'])),
+  // ADR-047. The register's कैटेगरी grade — the master filter's replacement for the
+  // alert-level chips, now that alertTag is no longer officer-editable (ADR-046).
+  priorityCategory: multi(z.enum(['A', 'B', 'C', 'jail', 'death'])),
   // ADR-041. Reporting-recency tier filter — the dashboard's four recency tiles drill
   // in here. Same 30/60/90-day windows as /stats/dashboard's reportingRecency counts,
   // so a tile's count equals the length of the list it opens.

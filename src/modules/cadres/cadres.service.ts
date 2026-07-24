@@ -270,6 +270,8 @@ export function makeCadresService({
       // ADR-020/033: the "सक्रिय अलर्ट" tile drills into critical cadres; the sheet can
       // select several levels at once.
       if (query.alertLevel !== undefined) where.alertLevel = { in: query.alertLevel };
+      // ADR-047. The master filter's category chips (A/B/C).
+      if (query.priorityCategory !== undefined) where.priorityCategory = { in: query.priorityCategory };
 
       // ADR-033: thana/designation match as substrings, so several chips OR together
       // within a facet while the facets themselves AND. Kept in `AND` rather than the

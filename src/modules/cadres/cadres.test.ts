@@ -1464,4 +1464,78 @@ describe('cadres per-category recency (ADR-046)', () => {
     expect(await inTier(app, jId, 'overdue3m')).toBe(false);
     await app.close();
   });
+
+  // ADR-047. जोखिम is a flat +30 days past सतर्क for every category, not a third
+  // multiple of the cadence — B and C reach उच्च जोखिम much sooner than ADR-046's
+  // original 3× scheme would have (B at 151d not 181d; C at 211d not 271d).
+  it('a grade-B cadre at 160 days is overdue3m (उच्च जोखिम), not overdue2m as the old 3x-cadence scheme would give', async () => {
+    const app = await makeApp();
+    const bId = await makeGraded('B160', 'B', 160);
+    expect(await inTier(app, bId, 'overdue3m')).toBe(true);
+    expect(await inTier(app, bId, 'overdue2m')).toBe(false);
+    await app.close();
+  });
+
+  it('a grade-B cadre at 130 days is still overdue2m (जोखिम) — inside the new 121-150 band', async () => {
+    const app = await makeApp();
+    const bId = await makeGraded('B130', 'B', 130);
+    expect(await inTier(app, bId, 'overdue2m')).toBe(true);
+    expect(await inTier(app, bId, 'overdue3m')).toBe(false);
+    await app.close();
+  });
+
+  it('a grade-C cadre at 250 days is overdue3m (उच्च जोखिम), not overdue2m as the old 3x-cadence scheme would give', async () => {
+    const app = await makeApp();
+    const cId = await makeGraded('C250', 'C', 250);
+    expect(await inTier(app, cId, 'overdue3m')).toBe(true);
+    expect(await inTier(app, cId, 'overdue2m')).toBe(false);
+    await app.close();
+  });
+
+  it('a grade-C cadre at 200 days is still overdue2m (जोखिम) — inside the new 181-210 band', async () => {
+    const app = await makeApp();
+    const cId = await makeGraded('C200', 'C', 200);
+    expect(await inTier(app, cId, 'overdue2m')).toBe(true);
+    expect(await inTier(app, cId, 'overdue3m')).toBe(false);
+    await app.close();
+  });
+});
+
+// ── priorityCategory list filter (ADR-047) ────────────────────────────────────
+describe('cadres priorityCategory filter (ADR-047)', () => {
+  const PCF_TOKEN = 'PCFFIXTURE';
+  const created: number[] = [];
+
+  const makeGraded = async (suffix: string, grade: 'A' | 'B' | 'C' | 'jail' | 'death' | null): Promise<number> => {
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${PCF_TOKEN} ${suffix}`, phone: '+910000000801', thana: 'बीजापुर',
+        currentAddress: 'Pcf fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], priorityCategory: grade,
+      },
+    });
+    created.push(c.id);
+    return c.id;
+  };
+
+  afterAll(async () => {
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('filters to the selected grades and OR-s multiple values together', async () => {
+    const app = await makeApp();
+    const aId = await makeGraded('A', 'A');
+    const bId = await makeGraded('B', 'B');
+    const cId = await makeGraded('C', 'C');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?search=${PCF_TOKEN}&priorityCategory=A&priorityCategory=B&pageSize=50`,
+      headers: auth(superAdminToken),
+    });
+    const ids = (res.json() as ListBody).data.map((r) => r.id);
+    expect(ids).toEqual(expect.arrayContaining([aId, bId]));
+    expect(ids).not.toContain(cId);
+    await app.close();
+  });
 });
