@@ -199,6 +199,11 @@ afterAll(async () => {
     where: { entityType: 'cadre', entityId: { in: backfilled.map((c) => String(c.id)) } },
   });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: AVATAR_TOKEN } } });
+  // ADR-048. transfer()/transferThana() now also write Notification rows against
+  // these fixture users — delete them first or the user hard-delete below violates
+  // notifications_user_id_fkey.
+  const fixtureUsers = await prisma.user.findMany({ where: { phone: { in: PHONES } }, select: { id: true } });
+  await prisma.notification.deleteMany({ where: { userId: { in: fixtureUsers.map((u) => u.id) } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });

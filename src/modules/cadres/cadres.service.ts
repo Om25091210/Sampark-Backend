@@ -8,6 +8,14 @@ import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import type { StorageProvider } from '../../lib/storage.js';
+import type { PushProvider } from '../../lib/push.js';
+import { writeNotification } from '../../lib/notifications.js';
+import { officerReassignCopy, thanaTransferCopy } from '../../lib/notification-copy.js';
+import {
+  fireImmediateDispatch,
+  type NotificationDispatchDeps,
+  type NotificationDispatchPayload,
+} from '../../lib/notification-dispatch.js';
 import { randomUUID } from 'node:crypto';
 import { decodeBase64Image, sniffImageType, EXT_BY_TYPE } from '../../lib/images.js';
 import {
@@ -28,6 +36,8 @@ export interface CadresDeps {
   mediaUrlTtlSeconds: number;
   /** Per-image ceiling for the bulk avatar backfill; the single-upload route's cap. */
   maxAvatarBytes: number;
+  // ADR-048. Real push for the notifications transfer()/transferThana() write.
+  pushProvider: PushProvider;
 }
 
 export interface Paginated<T> {
@@ -203,7 +213,11 @@ export function makeCadresService({
   storage,
   mediaUrlTtlSeconds,
   maxAvatarBytes,
+  pushProvider,
 }: CadresDeps): CadresService {
+  // ADR-048. Shared deps for the best-effort immediate push dispatch fired after
+  // transfer()/transferThana()'s transaction commits.
+  const dispatchDeps: NotificationDispatchDeps = { prisma, pushProvider, log };
   /**
    * ADR-029. Signs each row's `avatarKey` into a fresh GET URL. Only rows that
    * actually carry a key cost an S3 call, so a page of cadres with no photos costs
@@ -420,6 +434,8 @@ export function makeCadresService({
 
       const fromOfficerId = cadre.assignedOfficerId;
 
+      let notify: { outboxEventId: number; payload: NotificationDispatchPayload } | undefined;
+
       // Mutation + audit + outbox commit atomically.
       await prisma.$transaction(async (tx) => {
         await tx.cadre.update({ where: { id: cadreId }, data: { assignedOfficerId: toOfficerId } });
@@ -437,7 +453,29 @@ export function makeCadresService({
           eventType: 'cadre.transferred',
           payload: { cadreId, fromOfficerId, toOfficerId, actorId },
         });
+
+        // ADR-048. Notify the newly assigned officer.
+        const copy = officerReassignCopy(cadre.name);
+        const notification = await writeNotification(tx, {
+          userId: toOfficerId,
+          type: 'thana_transfer',
+          title: copy.title,
+          body: copy.body,
+          cadreId,
+        });
+        const notifyEvent = await writeOutboxEvent(tx, {
+          aggregateType: 'notification',
+          aggregateId: String(notification.id),
+          eventType: 'notification.created',
+          payload: { notificationId: notification.id, userId: toOfficerId, title: copy.title, body: copy.body },
+        });
+        notify = {
+          outboxEventId: notifyEvent.id,
+          payload: { notificationId: notification.id, userId: toOfficerId, title: copy.title, body: copy.body },
+        };
       });
+
+      if (notify !== undefined) fireImmediateDispatch(dispatchDeps, notify.outboxEventId, notify.payload);
     },
 
     async transferThana(cadreId, newThana, actorId, scope) {
@@ -467,6 +505,8 @@ export function makeCadresService({
       // assignment or write a spurious audit row.
       if (fromThana === newThana) return;
 
+      const notify: { outboxEventId: number; payload: NotificationDispatchPayload }[] = [];
+
       await prisma.$transaction(async (tx) => {
         await tx.cadre.update({
           where: { id: cadreId },
@@ -486,7 +526,37 @@ export function makeCadresService({
           eventType: 'cadre.thana_transferred',
           payload: { cadreId, fromThana, toThana: newThana, clearedOfficerId: fromOfficerId, actorId },
         });
+
+        // ADR-048. The old station's officer no longer has scope over this cadre
+        // (assignedOfficerId is cleared above), so notify every active officer at
+        // the DESTINATION thana — there is no single new assignee to tell instead.
+        const copy = thanaTransferCopy(cadre.name, fromThana, newThana);
+        const destOfficers = await tx.user.findMany({
+          where: { role: 'officer', thana: newThana, deletedAt: null },
+          select: { id: true },
+        });
+        for (const officer of destOfficers) {
+          const notification = await writeNotification(tx, {
+            userId: officer.id,
+            type: 'thana_transfer',
+            title: copy.title,
+            body: copy.body,
+            cadreId,
+          });
+          const notifyEvent = await writeOutboxEvent(tx, {
+            aggregateType: 'notification',
+            aggregateId: String(notification.id),
+            eventType: 'notification.created',
+            payload: { notificationId: notification.id, userId: officer.id, title: copy.title, body: copy.body },
+          });
+          notify.push({
+            outboxEventId: notifyEvent.id,
+            payload: { notificationId: notification.id, userId: officer.id, title: copy.title, body: copy.body },
+          });
+        }
       });
+
+      for (const n of notify) fireImmediateDispatch(dispatchDeps, n.outboxEventId, n.payload);
     },
 
     async importCadres(rows, actorId) {

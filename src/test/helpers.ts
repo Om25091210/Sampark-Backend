@@ -18,6 +18,9 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     s3Region: 'ap-south-1',
     mediaUrlTtlSeconds: 604800,
     uploadMaxBytes: 10 * 1024 * 1024,
+    // ADR-048. Tests default to the mock push provider — no AWS credentials/network.
+    pushProvider: 'mock',
+    snsPlatformApplicationArn: undefined,
     ...overrides,
   };
 }

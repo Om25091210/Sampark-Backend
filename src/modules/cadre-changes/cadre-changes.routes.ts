@@ -37,6 +37,7 @@ export async function cadreChangesRoutes(app: FastifyInstance): Promise<void> {
     log: app.log,
     storage: app.storage,
     mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+    pushProvider: app.pushProvider,
   });
 
   // `AuthPrincipal.role` is a plain `string` (it comes off the JWT), but every
@@ -86,8 +87,9 @@ export async function cadreChangesRoutes(app: FastifyInstance): Promise<void> {
         summary: 'List change requests (approver queue, or an officer’s own record)',
         description:
           '`awaitingMe=true` returns only what the caller can sign next — the approver queue. ' +
-          '`submittedBy=me` returns the caller’s own proposals and what became of them: with no ' +
-          'notification system, this is the only way a submitter learns the outcome. ' +
+          '`submittedBy=me` returns the caller’s own proposals and what became of them — the full, ' +
+          'paginated history (ADR-048 also pushes a notification on approve/reject, but this stays ' +
+          'the detailed record, including `stale`, which the inbox does not notify on). ' +
           'Filters, not access boundaries — any authenticated user may read the list.',
         security: bearerAuth,
         querystring: zodToJson(listChangesQuery),

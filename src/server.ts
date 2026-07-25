@@ -3,25 +3,34 @@ import { loadEnv, toAppConfig } from './config/env.js';
 import { loggerOptions } from './plugins/logging.js';
 import { createQueue } from './db/queue.js';
 import { startOutboxWorker } from './workers/outbox.worker.js';
+import { startNotificationEscalationWorker } from './workers/notification-escalation.worker.js';
 
 // Composition root: parse env (fail fast), build the app, then listen.
 async function main(): Promise<void> {
   const env = loadEnv();
+  const config = toAppConfig(env);
   const app = await buildApp({
-    config: toAppConfig(env),
+    config,
     logger: loggerOptions(env.NODE_ENV),
   });
 
+  // ADR-048. buildApp already decorated app.pushProvider (its own default,
+  // config-driven). Reuse that SAME instance for the background workers below,
+  // rather than constructing a second, independent one.
+  const pushProvider = app.pushProvider;
+
   // Background job runner (pg-boss). Started alongside the API on the single server;
-  // failure to start the worker degrades to no async processing but must not take the
-  // API down (it still serves reads/writes; the outbox drains on the next boot).
+  // failure to start a worker degrades to no async processing for that worker but
+  // must not take the API down (it still serves reads/writes; each worker's queue
+  // drains on the next successful boot).
   const boss = createQueue(env.DATABASE_URL);
   boss.on('error', (err) => app.log.error({ err }, 'pg-boss error'));
   try {
     await boss.start();
-    await startOutboxWorker({ prisma: app.prisma, boss, log: app.log });
+    await startOutboxWorker({ prisma: app.prisma, pushProvider, boss, log: app.log });
+    await startNotificationEscalationWorker({ prisma: app.prisma, pushProvider, boss, log: app.log });
   } catch (err) {
-    app.log.error({ err }, 'failed to start outbox worker (API continues)');
+    app.log.error({ err }, 'failed to start background workers (API continues)');
   }
 
   const shutdown = async (signal: string): Promise<void> => {

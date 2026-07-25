@@ -47,9 +47,9 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_managed" {
 # It becomes necessary only if the secret moves to a customer-managed key.
 data "aws_iam_policy_document" "ecs_task_execution_secrets" {
   statement {
-    sid       = "ReadRuntimeSecret"
-    effect    = "Allow"
-    actions   = ["secretsmanager:GetSecretValue"]
+    sid     = "ReadRuntimeSecret"
+    effect  = "Allow"
+    actions = ["secretsmanager:GetSecretValue"]
     resources = [
       aws_secretsmanager_secret.app.arn,
       # ADR-034. The secret RDS owns, holding the rotating master password. Reading
@@ -137,6 +137,42 @@ resource "aws_iam_role_policy" "ecs_task_exec" {
   name   = "${local.name_prefix}-execute-command"
   role   = aws_iam_role.ecs_task.id
   policy = data.aws_iam_policy_document.ecs_task_exec.json
+}
+
+# ADR-048. The application process itself calls SNS at runtime (registering a device
+# token on login, publishing a push on a trigger) -- unlike Secrets Manager above,
+# this is a legitimate app-level AWS call, so it belongs on the TASK role, not the
+# execution role. CreatePlatformEndpoint targets the platform APPLICATION arn; the
+# other four actions target per-DEVICE endpoint arns, a distinct ARN namespace under
+# it (arn:aws:sns:<region>:<account>:endpoint/GCM/<app-name>/<uuid>) -- confirm both
+# patterns resolve as expected after the first apply rather than trusting them blind.
+data "aws_iam_policy_document" "ecs_task_sns" {
+  statement {
+    sid    = "CreateFcmEndpoints"
+    effect = "Allow"
+    actions = [
+      "sns:CreatePlatformEndpoint",
+    ]
+    resources = [aws_sns_platform_application.fcm.arn]
+  }
+
+  statement {
+    sid    = "ManageAndPublishToFcmEndpoints"
+    effect = "Allow"
+    actions = [
+      "sns:Publish",
+      "sns:DeleteEndpoint",
+      "sns:SetEndpointAttributes",
+      "sns:GetEndpointAttributes",
+    ]
+    resources = ["arn:aws:sns:${var.aws_region}:${local.account_id}:endpoint/GCM/${aws_sns_platform_application.fcm.name}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_task_sns" {
+  name   = "${local.name_prefix}-fcm-push"
+  role   = aws_iam_role.ecs_task.id
+  policy = data.aws_iam_policy_document.ecs_task_sns.json
 }
 
 # ---------------------------------------------------------------------------

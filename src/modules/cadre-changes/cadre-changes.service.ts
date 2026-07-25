@@ -6,6 +6,14 @@ import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import type { StorageProvider } from '../../lib/storage.js';
+import type { PushProvider } from '../../lib/push.js';
+import { writeNotification } from '../../lib/notifications.js';
+import { cadreChangeApprovedCopy, cadreChangeRejectedCopy } from '../../lib/notification-copy.js';
+import {
+  fireImmediateDispatch,
+  type NotificationDispatchDeps,
+  type NotificationDispatchPayload,
+} from '../../lib/notification-dispatch.js';
 import {
   canApproveNext,
   canSubmit,
@@ -26,6 +34,8 @@ export interface CadreChangesDeps {
   // can actually LOOK at a photo before approving it.
   storage: StorageProvider;
   mediaUrlTtlSeconds: number;
+  // ADR-048. Real push for the notification this module writes on approve/reject.
+  pushProvider: PushProvider;
 }
 
 export interface Actor {
@@ -197,18 +207,33 @@ export interface CadreChangesService {
 
 export function makeCadreChangesService({
   prisma,
+  log,
   storage,
   mediaUrlTtlSeconds,
+  pushProvider,
 }: CadreChangesDeps): CadreChangesService {
   // ADR-029. Re-signs an avatarKey into a short-lived preview URL for the approver.
   const signUrl = (key: string): Promise<string> => storage.presignGet(key, mediaUrlTtlSeconds);
+  // ADR-048. Shared deps for the best-effort immediate push dispatch fired after
+  // approve/reject's transaction commits — never call SNS from inside $transaction.
+  const dispatchDeps: NotificationDispatchDeps = { prisma, pushProvider, log };
 
-  /** Applies a request's values to the cadre, or marks it stale. Caller supplies the tx. */
+  /**
+   * Applies a request's values to the cadre, or marks it stale. Caller supplies the tx.
+   * ADR-048: when it actually applies (not stale), also returns the notify payload for
+   * the caller to fire — via fireImmediateDispatch — once the OUTER transaction (this
+   * function's own, or submit()'s enclosing one) has committed. Never dispatched from
+   * in here: this function only ever runs inside a transaction, and SNS must never be
+   * called from inside one.
+   */
   async function applyWithin(
     tx: Prisma.TransactionClient,
     req: CadreChangeRequest,
     actorId: number,
-  ): Promise<CadreChangeRequest> {
+  ): Promise<{
+    request: CadreChangeRequest;
+    notify?: { outboxEventId: number; payload: NotificationDispatchPayload };
+  }> {
     const cadre = await tx.cadre.findFirst({ where: { id: req.cadreId, deletedAt: null } });
     if (cadre === null) throw notFound('Cadre not found');
 
@@ -240,7 +265,7 @@ export function makeCadreChangesService({
         before: { status: req.status },
         after: { status: 'stale', driftedFields: drifted.map(([f]) => f) },
       });
-      return stale;
+      return { request: stale };
     }
 
     const data: Record<string, unknown> = {};
@@ -280,7 +305,43 @@ export function makeCadreChangesService({
       payload: { cadreId: req.cadreId, changeRequestId: req.id, fields: Object.keys(changes), actorId },
     });
 
-    return applied;
+    // ADR-048. Notify the submitter their change went live — in-app inbox row +
+    // real push. `cadre.name` is read BEFORE this update, which is the right value
+    // even when `name` itself is one of the changed fields: the notification
+    // describes the record by the identity it had at the moment of decision.
+    const copy = cadreChangeApprovedCopy(cadre.name);
+    const notification = await writeNotification(tx, {
+      userId: req.submittedById,
+      type: 'cadre_change_outcome',
+      title: copy.title,
+      body: copy.body,
+      cadreId: req.cadreId,
+      cadreChangeId: req.id,
+    });
+    const notifyEvent = await writeOutboxEvent(tx, {
+      aggregateType: 'notification',
+      aggregateId: String(notification.id),
+      eventType: 'notification.created',
+      payload: {
+        notificationId: notification.id,
+        userId: req.submittedById,
+        title: copy.title,
+        body: copy.body,
+      },
+    });
+
+    return {
+      request: applied,
+      notify: {
+        outboxEventId: notifyEvent.id,
+        payload: {
+          notificationId: notification.id,
+          userId: req.submittedById,
+          title: copy.title,
+          body: copy.body,
+        },
+      },
+    };
   }
 
   async function loadOrThrow(id: number): Promise<Row> {
@@ -365,6 +426,8 @@ export function makeCadreChangesService({
 
       const { needsAdmin, needsSuperAdmin } = requiredApprovalsFor(actor.role);
 
+      let notify: { outboxEventId: number; payload: NotificationDispatchPayload } | undefined;
+
       const created = await prisma.$transaction(async (tx) => {
         let req = await tx.cadreChangeRequest.create({
           data: {
@@ -390,10 +453,18 @@ export function makeCadreChangesService({
         // it applies in this same transaction. The request row is still written —
         // an unapproved-but-applied edit still belongs in the trail, and skipping
         // the row would make super_admin edits invisible to history.
-        if (!needsAdmin && !needsSuperAdmin) req = await applyWithin(tx, req, actor.id);
+        if (!needsAdmin && !needsSuperAdmin) {
+          const result = await applyWithin(tx, req, actor.id);
+          req = result.request;
+          notify = result.notify;
+        }
 
         return req;
       });
+
+      // ADR-048. Fired only after the transaction above has committed — never call
+      // SNS from inside $transaction.
+      if (notify !== undefined) fireImmediateDispatch(dispatchDeps, notify.outboxEventId, notify.payload);
 
       return toWire(await loadOrThrow(created.id), signUrl);
     },
@@ -471,6 +542,8 @@ export function makeCadreChangesService({
       const now = new Date();
       const adminStepOutstanding = req.needsAdmin && req.adminApprovedAt === null;
 
+      let notify: { outboxEventId: number; payload: NotificationDispatchPayload } | undefined;
+
       const updated = await prisma.$transaction(async (tx) => {
         const data: Prisma.CadreChangeRequestUpdateInput = adminStepOutstanding
           ? { adminApprovedBy: { connect: { id: actor.id } }, adminApprovedAt: now }
@@ -493,10 +566,16 @@ export function makeCadreChangesService({
         const stillWaiting =
           (next.needsAdmin && next.adminApprovedAt === null) ||
           (next.needsSuperAdmin && next.superAdminApprovedAt === null);
-        if (!stillWaiting) next = await applyWithin(tx, next, actor.id);
+        if (!stillWaiting) {
+          const result = await applyWithin(tx, next, actor.id);
+          next = result.request;
+          notify = result.notify;
+        }
 
         return next;
       });
+
+      if (notify !== undefined) fireImmediateDispatch(dispatchDeps, notify.outboxEventId, notify.payload);
 
       return toWire(await loadOrThrow(updated.id), signUrl);
     },
@@ -510,6 +589,8 @@ export function makeCadreChangesService({
       if (!canApproveNext(actor.role, req)) {
         throw forbidden('This change is not awaiting your decision');
       }
+
+      let notify: { outboxEventId: number; payload: NotificationDispatchPayload } | undefined;
 
       await prisma.$transaction(async (tx) => {
         // Any rung can reject, and rejection is terminal — the request does not
@@ -527,7 +608,41 @@ export function makeCadreChangesService({
           before: { status: 'pending' },
           after: { status: 'rejected', reason },
         });
+
+        // ADR-048. Always terminal — unlike approve(), there is no "mid-chain,
+        // don't notify yet" branch here.
+        const copy = cadreChangeRejectedCopy(req.cadre?.name ?? '', reason);
+        const notification = await writeNotification(tx, {
+          userId: req.submittedById,
+          type: 'cadre_change_outcome',
+          title: copy.title,
+          body: copy.body,
+          cadreId: req.cadreId,
+          cadreChangeId: id,
+        });
+        const notifyEvent = await writeOutboxEvent(tx, {
+          aggregateType: 'notification',
+          aggregateId: String(notification.id),
+          eventType: 'notification.created',
+          payload: {
+            notificationId: notification.id,
+            userId: req.submittedById,
+            title: copy.title,
+            body: copy.body,
+          },
+        });
+        notify = {
+          outboxEventId: notifyEvent.id,
+          payload: {
+            notificationId: notification.id,
+            userId: req.submittedById,
+            title: copy.title,
+            body: copy.body,
+          },
+        };
       });
+
+      if (notify !== undefined) fireImmediateDispatch(dispatchDeps, notify.outboxEventId, notify.payload);
 
       return toWire(await loadOrThrow(id), signUrl);
     },

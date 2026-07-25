@@ -77,6 +77,15 @@ resource "aws_ecs_task_definition" "backend" {
         { name = "DB_PORT", value = tostring(aws_db_instance.main.port) },
         { name = "DB_USER", value = aws_db_instance.main.username },
         { name = "DB_NAME", value = aws_db_instance.main.db_name },
+
+        # ADR-048. Real push notification delivery via AWS SNS + FCM V1 -- a
+        # deliberate, narrow, documented exception to the data-residency rule (see
+        # BC-THESIS-SAMPARK.md). Neither value is a secret: the ARN is not sensitive
+        # (it grants nothing on its own -- access is via the ecs_task IAM role, see
+        # iam.tf), so both live here alongside STORAGE_PROVIDER/S3_BUCKET rather than
+        # in the frozen secret blob.
+        { name = "PUSH_PROVIDER", value = "sns" },
+        { name = "SNS_PLATFORM_APPLICATION_ARN", value = aws_sns_platform_application.fcm.arn },
       ]
 
       # Resolved by the EXECUTION role at container start and injected as ordinary

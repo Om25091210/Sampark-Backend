@@ -47,7 +47,7 @@ enum AlertLevel {
 // `category = surrendered` rows carry a value.
 enum SurrenderOrigin {
   district // Bijapur district
-  other    // another district or state
+  other // another district or state
 }
 
 // ADR-026. Lifecycle of an officer/admin-proposed edit to a cadre record.
@@ -59,8 +59,8 @@ enum ChangeRequestStatus {
   pending
   applied
   rejected
-  cancelled  // withdrawn by the submitter before it was decided
-  stale      // the underlying value moved after submission; never applied
+  cancelled // withdrawn by the submitter before it was decided
+  stale // the underlying value moved after submission; never applied
 }
 
 enum ReportingPlace {
@@ -81,6 +81,17 @@ enum PersonStatus {
 enum Gender {
   male
   female
+}
+
+// In-app notification inbox (v1), also delivered as real push via AWS SNS + FCM V1
+// (ADR-048 — a deliberate, narrow, documented exception to root CLAUDE.md's data
+// residency rule; see BC-THESIS-SAMPARK.md). Lowercase to serialize verbatim on the
+// wire (CLAUDE.md rule 10/11), like every other enum here.
+enum NotificationType {
+  report_overdue
+  cadre_change_outcome
+  thana_transfer
+  broadcast
 }
 
 // ADR-046. The register's कैटेगरी column — a priority GRADE, distinct from
@@ -104,7 +115,7 @@ enum PriorityCategory {
 // ─── Users (officers + admins) ─────────────────────────────────────────────────
 
 model User {
-  id            Int       @id @default(autoincrement())
+  id              Int       @id @default(autoincrement())
   // ADR-042. The INSTITUTIONAL ID — e.g. "SDOPKUTRU01", "SHOGNGL07" — NOT a person's
   // name. Real names are deliberately not stored anywhere (client decision). Unique
   // because it is the account's identity AND the upsert key for POST /users/import.
@@ -113,50 +124,52 @@ model User {
   // audit row, change request and report attributes to this ID, so accountability is
   // only as granular as the ID. An ID held by several people resolves to the ID, never
   // to the person. See ADR-042 Consequences.
-  name          String    @unique
+  name            String    @unique
   // ADR-042. Nullable: the SMS-OTP track is gone and these institutional accounts have
   // no phone. Kept (unique, nullable) rather than dropped so historical rows and any
   // future contact use keep a home — Postgres allows many NULLs under a unique index.
-  phone         String?   @unique
+  phone           String?   @unique
   // ADR-042. The login credential. `<id-lowercased>@sampark.internal` — a non-routable
   // ICANN-reserved private TLD; these inboxes do not exist, which is WHY password
   // reset is super_admin-driven (Phase B) and never self-service by email.
-  email         String?   @unique
+  email           String?   @unique
   // ADR-042. scrypt (node:crypto) — see lib/password.ts. NULL means "no password set
   // yet": an imported account cannot log in until a super_admin sets one (Phase B).
-  passwordHash  String?   @map("password_hash")
+  passwordHash    String?   @map("password_hash")
   // ADR-042/SDR-001. TOTP applies to admin + super_admin ONLY (14 accounts), never the
   // 60 field IDs. `totpConfirmedAt` distinguishes "secret generated, enrolment never
   // completed" from "enrolled" — without it a half-finished enrolment locks the
   // account out, because login would stop re-offering the provisioning URI.
-  totpSecret    String?   @map("totp_secret")
+  totpSecret      String?   @map("totp_secret")
   totpConfirmedAt DateTime? @map("totp_confirmed_at")
-  role          Role      @default(officer)
-  designation   String?
+  role            Role      @default(officer)
+  designation     String?
   // ADR-042. Scope fields for the org hierarchy → Role mapping:
   //   HQ         = super_admin, thana + subDivision BOTH null  -> unrestricted
   //   SDOP       = admin,       subDivision set                -> that sub-division
   //   Thana/SHO  = officer,     thana set                      -> that thana
   // These are compared against Cadre.thana / Cadre.subDivision, so the values must
   // match those columns EXACTLY — see Phase 0 normalisation (ADR-043).
-  thana         String?
-  subDivision   String?   @map("sub_division")
-  avatarUrl     String?   @map("avatar_url")
-  badgeImageUrl String?   @map("badge_image_url")
-  deletedAt     DateTime? @map("deleted_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  thana           String?
+  subDivision     String?   @map("sub_division")
+  avatarUrl       String?   @map("avatar_url")
+  badgeImageUrl   String?   @map("badge_image_url")
+  deletedAt       DateTime? @map("deleted_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
 
   reports        Report[]       @relation("ReportReporter")
   assignedCadres Cadre[]        @relation("CadreAssignedOfficer")
   refreshTokens  RefreshToken[]
+  notifications  Notification[]
+  deviceTokens   DeviceToken[]
 
-  lastEditedCadres       Cadre[]              @relation("CadreLastEditor") // ADR-027
+  lastEditedCadres     Cadre[]              @relation("CadreLastEditor") // ADR-027
   // ADR-026
-  submittedChanges       CadreChangeRequest[] @relation("ChangeSubmitter")
-  adminApprovedChanges   CadreChangeRequest[] @relation("ChangeAdminApprover")
-  superApprovedChanges   CadreChangeRequest[] @relation("ChangeSuperAdminApprover")
-  decidedChanges         CadreChangeRequest[] @relation("ChangeDecider")
+  submittedChanges     CadreChangeRequest[] @relation("ChangeSubmitter")
+  adminApprovedChanges CadreChangeRequest[] @relation("ChangeAdminApprover")
+  superApprovedChanges CadreChangeRequest[] @relation("ChangeSuperAdminApprover")
+  decidedChanges       CadreChangeRequest[] @relation("ChangeDecider")
 
   @@map("users")
 }
@@ -164,7 +177,7 @@ model User {
 // ─── Cadres (surrendered / jail / thana persons) ───────────────────────────────
 
 model Cadre {
-  id                 Int            @id @default(autoincrement())
+  id                 Int               @id @default(autoincrement())
   // ADR-025. The official register serial number carried over from the paper records.
   // Deliberately NOT `id`: `id` is a surrogate autoincrement PK with gaps from
   // deletes, and the ~1,790-row import will reassign every PK — a "serial number"
@@ -172,12 +185,12 @@ model Cadre {
   // because existing rows predate the import that supplies it; unique because a
   // register number that repeats identifies nothing (a failed import surfacing
   // duplicate serials is the point, not a problem).
-  serialNumber       String?        @unique @map("serial_number")
+  serialNumber       String?           @unique @map("serial_number")
   name               String
   phone              String
   thana              String
-  currentAddress     String         @map("current_address")
-  permanentAddress   String?        @map("permanent_address")
+  currentAddress     String            @map("current_address")
+  permanentAddress   String?           @map("permanent_address")
   designation        String
   category           CadreCategory
   // ADR-046. Priority GRADE from the register's कैटेगरी column — separate from
@@ -186,45 +199,45 @@ model Cadre {
   // route) and the ADR-038 import supply it — same posture as serialNumber/dateOfBirth.
   priorityCategory   PriorityCategory? @map("priority_category")
   filter             CadreFilter?
-  alertLevel         AlertLevel     @map("alert_level")
-  avatarUrl          String?        @map("avatar_url")
-  alertDate          DateTime?      @map("alert_date")
+  alertLevel         AlertLevel        @map("alert_level")
+  avatarUrl          String?           @map("avatar_url")
+  alertDate          DateTime?         @map("alert_date")
   incident           String?
-  verificationOffice String?        @map("verification_office")
-  supervisoryOffice  String?        @map("supervisory_office")
-  alertTag           String?        @map("alert_tag")
+  verificationOffice String?           @map("verification_office")
+  supervisoryOffice  String?           @map("supervisory_office")
+  alertTag           String?           @map("alert_tag")
   aliases            String[]
-  surrenderDate      DateTime?        @map("surrender_date")
-  surrenderLocation  String?          @map("surrender_location")
-  surrenderOrigin    SurrenderOrigin? @map("surrender_origin")
-  surrenderYear      String?          @map("surrender_year")
+  surrenderDate      DateTime?         @map("surrender_date")
+  surrenderLocation  String?           @map("surrender_location")
+  surrenderOrigin    SurrenderOrigin?  @map("surrender_origin")
+  surrenderYear      String?           @map("surrender_year")
   regiment           String?
-  familyGroupInfo    String?        @map("family_group_info")
-  subDivision        String?        @map("sub_division")
+  familyGroupInfo    String?           @map("family_group_info")
+  subDivision        String?           @map("sub_division")
   // ADR-040. Home district (dropdown on the edit form: the 7 Bastar-region districts).
   // Nullable like subDivision — existing rows predate it; the Apps Script backfills it.
-  district           String?        @map("district")
+  district           String?           @map("district")
   // ADR-036. Date of birth, stored — age is DERIVED from it on read, never stored.
   // A stored age is wrong the day after it is written and has no way to know it;
   // a birth date is a fact that does not rot. Nullable: existing rows predate it and
   // the ~1,790-row import supplies it later. Manually enterable now (BE#6), not
   // gated on the import.
-  dateOfBirth        DateTime?      @map("date_of_birth") @db.Date
+  dateOfBirth        DateTime?         @map("date_of_birth") @db.Date
   // ADR-036. Immediate family, as three plain columns (BE#7). Deliberately NOT a
   // child table or a repeatable relation list: the register records exactly these
   // three names, and a `cadre_relations` table would be schema weight for a
   // fixed-arity fact. `familyGroupInfo` above stays — it is the free-text
   // "who they live with" note, a different thing from a parent's name.
-  fatherName         String?        @map("father_name")
-  motherName         String?        @map("mother_name")
-  spouseName         String?        @map("spouse_name")
+  fatherName         String?           @map("father_name")
+  motherName         String?           @map("mother_name")
+  spouseName         String?           @map("spouse_name")
   // ADR-038. Demographic facts carried over from the paper register by the one-time
   // historical import (Design-Docs#7). Both nullable for the same reason
   // serialNumber and dateOfBirth are: existing rows predate the import that supplies
   // them, and caste is only ~82% filled in the source. `gender` is a two-value enum
   // (पुरूष/महिला); `caste` is free text (जाति), never an enum — see the Gender enum note.
-  gender             Gender?        @map("gender")
-  caste              String?        @map("caste")
+  gender             Gender?           @map("gender")
+  caste              String?           @map("caste")
   // ADR-029. The four hardcopy documents, tracked INDIVIDUALLY. ADR-026 shipped
   // these as one `hardcopyDocsExist` boolean; the client asked for them separately,
   // and they were right — "the paperwork exists" is unanswerable when the Aadhaar
@@ -235,16 +248,16 @@ model Cadre {
   // asserting a document physically exists, which is a claim someone above the
   // officer signs off on. Default false = "not confirmed present", never null — a
   // tri-state nobody asked for.
-  hasAadhaar         Boolean        @default(false) @map("has_aadhaar")
-  hasBankAccount     Boolean        @default(false) @map("has_bank_account")
-  hasAbProforma      Boolean        @default(false) @map("has_ab_proforma")
-  hasAgreementLetter Boolean        @default(false) @map("has_agreement_letter")
+  hasAadhaar         Boolean           @default(false) @map("has_aadhaar")
+  hasBankAccount     Boolean           @default(false) @map("has_bank_account")
+  hasAbProforma      Boolean           @default(false) @map("has_ab_proforma")
+  hasAgreementLetter Boolean           @default(false) @map("has_agreement_letter")
   // ADR-029. Durable S3 key for the cadre's photo. ADR-016's lesson: store the KEY,
   // never a presigned URL (which expires ≤7d and would rot in the column). The
   // legacy `avatarUrl` above stays for rows that predate this; the serializer
   // prefers a freshly-signed `avatarKey` and falls back to it.
-  avatarKey          String?        @map("avatar_key")
-  assignedOfficerId  Int?           @map("assigned_officer_id")
+  avatarKey          String?           @map("avatar_key")
+  assignedOfficerId  Int?              @map("assigned_officer_id")
   // ADR-027. Who last changed this record's contents, and when. Deliberately NOT
   // `updatedAt`: that moves on every write including assignment transfers, so it
   // cannot answer "has someone edited this cadre's details recently?" — which is
@@ -254,16 +267,25 @@ model Cadre {
   // not a function of existing data — it is a fact recorded at write time, and only
   // the two write paths (a change request applying, a direct tag/alias write) ever
   // set it. Nothing else can make it drift.
-  lastEditedAt       DateTime?      @map("last_edited_at")
-  lastEditedById     Int?           @map("last_edited_by_id")
-  deletedAt          DateTime?      @map("deleted_at")
-  createdAt          DateTime       @default(now()) @map("created_at")
-  updatedAt          DateTime       @updatedAt @map("updated_at")
+  lastEditedAt       DateTime?         @map("last_edited_at")
+  lastEditedById     Int?              @map("last_edited_by_id")
+  // In-app notification escalation dedupe. Mirrors the lastEditedAt precedent above: a
+  // fact recorded AT SCAN TIME by the escalation worker, not derived from existing data
+  // (the tier itself is derived on read — see lib/recency.ts). Null = not currently
+  // escalated (reset when a new report lands and the cadre returns to `current`). Plain
+  // string, not a DB enum — like alertTag, the value set ('overdue1m'|'overdue2m'|
+  // 'overdue3m') is owned by application code (RecencyTier), not a DB-level concept.
+  // Lets the worker notify once per tier ENTRY instead of re-firing every scan.
+  lastEscalationTier String?           @map("last_escalation_tier")
+  deletedAt          DateTime?         @map("deleted_at")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
 
   assignedOfficer User?                @relation("CadreAssignedOfficer", fields: [assignedOfficerId], references: [id])
   lastEditedBy    User?                @relation("CadreLastEditor", fields: [lastEditedById], references: [id]) // ADR-027
   reports         Report[]
   changeRequests  CadreChangeRequest[] // ADR-026
+  notifications   Notification[]
 
   @@index([category])
   @@index([alertLevel])
@@ -365,11 +387,12 @@ model CadreChangeRequest {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  cadre                Cadre @relation(fields: [cadreId], references: [id])
-  submittedBy          User  @relation("ChangeSubmitter", fields: [submittedById], references: [id])
-  adminApprovedBy      User? @relation("ChangeAdminApprover", fields: [adminApprovedById], references: [id])
-  superAdminApprovedBy User? @relation("ChangeSuperAdminApprover", fields: [superAdminApprovedById], references: [id])
-  decidedBy            User? @relation("ChangeDecider", fields: [decidedById], references: [id])
+  cadre                Cadre          @relation(fields: [cadreId], references: [id])
+  submittedBy          User           @relation("ChangeSubmitter", fields: [submittedById], references: [id])
+  adminApprovedBy      User?          @relation("ChangeAdminApprover", fields: [adminApprovedById], references: [id])
+  superAdminApprovedBy User?          @relation("ChangeSuperAdminApprover", fields: [superAdminApprovedById], references: [id])
+  decidedBy            User?          @relation("ChangeDecider", fields: [decidedById], references: [id])
+  notifications        Notification[]
 
   // The approver queue reads pending-first, newest-first.
   @@index([status, submittedAt])
@@ -447,4 +470,59 @@ model OutboxEvent {
 
   @@index([publishedAt])
   @@map("outbox_events")
+}
+
+// ─── Notifications (in-app inbox + real push via ADR-048) ─────────────────────
+
+model Notification {
+  id            Int              @id @default(autoincrement())
+  userId        Int              @map("user_id")
+  type          NotificationType
+  // Server-templated Hindi copy (src/lib/notification-copy.ts), written once at
+  // creation — never re-derived client-side.
+  title         String
+  body          String
+  cadreId       Int?             @map("cadre_id")
+  cadreChangeId Int?             @map("cadre_change_id")
+  // Extra render-time facts that aren't relations (tier label, thana names, reject
+  // reason) — also what rides along in the SNS/FCM push payload's `data` field.
+  data          Json?
+  readAt        DateTime?        @map("read_at")
+  deletedAt     DateTime?        @map("deleted_at")
+  createdAt     DateTime         @default(now()) @map("created_at")
+
+  user        User                @relation(fields: [userId], references: [id])
+  cadre       Cadre?              @relation(fields: [cadreId], references: [id])
+  cadreChange CadreChangeRequest? @relation(fields: [cadreChangeId], references: [id])
+
+  // The unread-count/list query: WHERE userId = ? AND readAt IS NULL ORDER BY createdAt DESC.
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+// ADR-048. One row per physical app install (a raw FCM device registration token),
+// used to deliver a Notification as a real push via AWS SNS.
+model DeviceToken {
+  id          Int       @id @default(autoincrement())
+  userId      Int       @map("user_id")
+  // Globally unique, NOT a composite (userId, token) key: SNS's CreatePlatformEndpoint
+  // is idempotent per token, so one token maps to exactly one endpointArn regardless of
+  // which user "owns" it in our DB. Re-registering the same token under a different user
+  // (a handset handed to a new officer) REASSIGNS this row rather than colliding or
+  // orphaning a second one.
+  token       String    @unique
+  endpointArn String    @unique @map("endpoint_arn")
+  // Android-only Phase 1; kept as a plain string (not an enum) for a future iOS value.
+  platform    String    @default("android")
+  lastSeenAt  DateTime  @default(now()) @map("last_seen_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  // Set when the SNS endpoint is confirmed gone (EndpointDisabledException) or the
+  // user explicitly unregisters (logout) — never hard-deleted, same soft-delete
+  // discipline as every other domain row.
+  deletedAt   DateTime? @map("deleted_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, deletedAt])
+  @@map("device_tokens")
 }

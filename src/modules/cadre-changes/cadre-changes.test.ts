@@ -490,7 +490,7 @@ describe('cadre change requests (ADR-026)', () => {
     await app.close();
   });
 
-  it('submittedBy=me is how a submitter learns the outcome (no notifications exist)', async () => {
+  it('submittedBy=me is the full, paginated outcome record (ADR-048 notifies too, but this is the detailed history)', async () => {
     const app = await makeApp();
     const req = await submit(app, officerToken, { phone: '+910000000092' });
     await app.inject({ method: 'POST', url: `/api/v1/changes/${req.id}/approve`, headers: auth(adminToken) });

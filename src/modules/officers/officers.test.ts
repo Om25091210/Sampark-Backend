@@ -87,6 +87,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // ADR-048. transfer()/transferThana() now also write Notification rows against
+  // these fixture users — delete them first or the user hard-delete below violates
+  // notifications_user_id_fkey.
+  const userIds = await prisma.user.findMany({ where: { phone: { in: PHONES } }, select: { id: true } });
+  await prisma.notification.deleteMany({ where: { userId: { in: userIds.map((u) => u.id) } } });
   await prisma.cadre.deleteMany({ where: { id: cadreId } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();

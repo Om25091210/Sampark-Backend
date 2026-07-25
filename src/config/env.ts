@@ -50,6 +50,14 @@ const EnvSchema = z.object({
   MEDIA_URL_TTL_SECONDS: z.coerce.number().int().positive().max(604800).default(604800),
   // Hard cap on an uploaded photo (bytes). Default 10 MB.
   UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+
+  // ADR-048. Real push notification delivery via AWS SNS Mobile Push (FCM V1
+  // credentials) — a deliberate, narrow, documented exception to the data-residency
+  // rule (see BC-THESIS-SAMPARK.md). `mock` never calls AWS (dev/test); `sns` requires
+  // SNS_PLATFORM_APPLICATION_ARN. Reuses S3_REGION for the SNS client — same AWS
+  // account/region (ap-south-1), no reason to duplicate the config surface.
+  PUSH_PROVIDER: z.enum(['mock', 'sns']).default('mock'),
+  SNS_PLATFORM_APPLICATION_ARN: z.string().min(1).optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -82,6 +90,8 @@ export interface AppConfig {
   s3Region: string;
   mediaUrlTtlSeconds: number;
   uploadMaxBytes: number;
+  pushProvider: Env['PUSH_PROVIDER'];
+  snsPlatformApplicationArn?: string;
 }
 
 export function toAppConfig(env: Env): AppConfig {
@@ -97,5 +107,7 @@ export function toAppConfig(env: Env): AppConfig {
     s3Region: env.S3_REGION,
     mediaUrlTtlSeconds: env.MEDIA_URL_TTL_SECONDS,
     uploadMaxBytes: env.UPLOAD_MAX_BYTES,
+    pushProvider: env.PUSH_PROVIDER,
+    snsPlatformApplicationArn: env.SNS_PLATFORM_APPLICATION_ARN,
   };
 }

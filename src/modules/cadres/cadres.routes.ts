@@ -37,6 +37,7 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     // The bulk backfill holds each image to the same per-file ceiling the multipart
     // upload route enforces, so one photo cannot arrive by a laxer path than another.
     maxAvatarBytes: app.config.uploadMaxBytes,
+    pushProvider: app.pushProvider,
   });
 
   // SDR-007. Auth for the bulk historical import, LOCAL to this one route — never a

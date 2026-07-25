@@ -6,6 +6,8 @@ import type { PrismaClient } from '@prisma/client';
 import type { AppConfig } from './config/env.js';
 import type { StorageProvider } from './lib/storage.js';
 import { createStorageProvider } from './lib/storage.js';
+import type { PushProvider } from './lib/push.js';
+import { createPushProvider } from './lib/push.js';
 import { loggerOptions } from './plugins/logging.js';
 import errorHandlerPlugin from './plugins/error-handler.js';
 import prismaPlugin from './plugins/prisma.js';
@@ -19,11 +21,15 @@ import { reportsRoutes } from './modules/reports/reports.routes.js';
 import { reportsMediaRoutes } from './modules/reports-media/reports-media.routes.js';
 import { statsRoutes } from './modules/stats/stats.routes.js';
 import { usersRoutes } from './modules/users/users.routes.js';
+import { notificationsRoutes } from './modules/notifications/notifications.routes.js';
+import { devicesRoutes } from './modules/devices/devices.routes.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
     config: AppConfig;
     storage: StorageProvider;
+    // ADR-048. Real push delivery via AWS SNS + FCM V1 (mock in dev/test).
+    pushProvider: PushProvider;
   }
 }
 
@@ -34,6 +40,8 @@ export interface BuildAppOptions {
   prisma?: PrismaClient;
   /** Injected storage provider (tests capture uploads); defaults from config. */
   storage?: StorageProvider;
+  /** Injected push provider (tests use/inspect the mock); defaults from config. */
+  pushProvider?: PushProvider;
   /** Logger config; tests pass `false` to silence output. */
   logger?: FastifyServerOptions['logger'];
 }
@@ -50,6 +58,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
 
   app.decorate('config', opts.config);
   app.decorate('storage', opts.storage ?? createStorageProvider(opts.config, app.log));
+  app.decorate('pushProvider', opts.pushProvider ?? createPushProvider(opts.config, app.log));
 
   // Doc-only schemas: routes attach Zod-derived JSON Schema purely so @fastify/swagger
   // can display request shapes. Validation stays with each route's Zod `.parse()`, so
@@ -87,6 +96,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           { name: 'Reports', description: 'Field reports filed against a cadre' },
           { name: 'Reports Media', description: 'Report photo upload + PDF export' },
           { name: 'Stats', description: 'Dashboard summary counts' },
+          { name: 'Notifications', description: 'In-app inbox + real push (ADR-048)' },
+          { name: 'Devices', description: 'FCM device token registration (ADR-048)' },
         ],
         components: {
           securitySchemes: {
@@ -113,6 +124,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       await api.register(reportsMediaRoutes);
       await api.register(statsRoutes);
       await api.register(usersRoutes); // Phase B: account provisioning (super_admin)
+      await api.register(notificationsRoutes); // ADR-048: in-app inbox + push
+      await api.register(devicesRoutes); // ADR-048: FCM device token registration
     },
     { prefix: '/api/v1' },
   );
