@@ -57,7 +57,13 @@ export const createReportBody = z.object({
   specific_location: z.string().trim().min(1).max(500),
   person_status: z.enum(['alive', 'dead']),
   current_phone: z.string().trim().min(1).max(20),
+  // ADR-050. The three-field split of the old single "वर्तमान विवरण" field.
+  // current_activity ("वर्तमान में क्या कार्य कर रहा है") stays required — it is
+  // the same column/question the old field always asked. The other two are new
+  // and optional: not every report has a related-Maoists angle or extra notes.
   current_activity: z.string().trim().min(1).max(1000),
+  surrender_network_details: z.string().trim().max(1000).optional(),
+  other_information: z.string().trim().max(1000).optional(),
   // The date the officer picked in the form — the date the reporting actually
   // happened, which is NOT the row's insert time: an offline report composed on
   // Monday may only drain on Thursday. Persisted to `reportedAt`; `createdAt`

@@ -249,6 +249,39 @@ describe('reports', () => {
     await app.close();
   });
 
+  // ── Structured description fields (ADR-050) ────────────────────────────────
+
+  it('create with surrender_network_details and other_information → both round-trip on the wire', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+      headers: auth(officerToken),
+      payload: {
+        ...validBody(),
+        surrender_network_details: 'दो अन्य साथियों के साथ समर्पण की जानकारी दी',
+        other_information: 'परिवार से मुलाकात हुई',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as WireReportBody;
+    expect(body.surrenderNetworkDetails).toBe('दो अन्य साथियों के साथ समर्पण की जानकारी दी');
+    expect(body.otherInformation).toBe('परिवार से मुलाकात हुई');
+    await app.close();
+  });
+
+  it('create without surrender_network_details / other_information → both omitted from the wire, not null', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+      headers: auth(officerToken), payload: validBody(),
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as WireReportBody;
+    expect(body).not.toHaveProperty('surrenderNetworkDetails');
+    expect(body).not.toHaveProperty('otherInformation');
+    await app.close();
+  });
+
   it('GET detail returns the report; unknown id → 404', async () => {
     const app = await makeApp();
     const created = await app.inject({

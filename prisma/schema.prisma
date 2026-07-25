@@ -300,31 +300,41 @@ model Cadre {
 // ─── Reports (field reporting against a cadre) ─────────────────────────────────
 
 model Report {
-  id               Int            @id @default(autoincrement())
-  cadreId          Int            @map("cadre_id")
-  reportingPlace   ReportingPlace @map("reporting_place")
-  specificLocation String         @map("specific_location")
-  personStatus     PersonStatus   @map("person_status")
-  currentPhone     String         @map("current_phone")
-  currentActivity  String         @map("current_activity")
+  id                      Int            @id @default(autoincrement())
+  cadreId                 Int            @map("cadre_id")
+  reportingPlace          ReportingPlace @map("reporting_place")
+  specificLocation        String         @map("specific_location")
+  personStatus            PersonStatus   @map("person_status")
+  currentPhone            String         @map("current_phone")
+  // ADR-050. This is the "वर्तमान में क्या कार्य कर रहा है" (current activity) field
+  // of the three-field split — kept as this SAME column, not a new one. The old
+  // single "वर्तमान विवरण" form's placeholder already asked for exactly this
+  // ("वर्तमान कार्य दर्ज करें"), so every pre-split row's value is already the
+  // correct answer to the new, narrower question; nothing needed migrating.
+  currentActivity         String         @map("current_activity")
+  // ADR-050. New: "अन्य माओवादियों से समर्पण हुआ विवरण" — details of surrender in
+  // relation to other Maoists. Nullable — existing rows predate the split.
+  surrenderNetworkDetails String?        @map("surrender_network_details")
+  // ADR-050. New: "अन्य जानकारी" — the free-form catch-all. Nullable, same reason.
+  otherInformation        String?        @map("other_information")
   // Legacy single-photo URL (may be an expired presigned URL on old rows). New
   // writes populate photoKeys instead; kept for backward-compatible reads.
-  photoUrl         String?        @map("photo_url")
+  photoUrl                String?        @map("photo_url")
   // ADR-016: durable S3 object keys for report photos. Keys are stored (never the
   // presigned URL, which expires ≤7d); reads re-sign each key to a fresh GET URL.
-  photoKeys        String[]       @default([]) @map("photo_keys")
-  gpsLatitude      Float?         @map("gps_latitude")
-  gpsLongitude     Float?         @map("gps_longitude")
-  gpsAddress       String?        @map("gps_address")
-  isHomeAddress    Boolean?       @map("is_home_address")
-  reportedById     Int            @map("reported_by_id")
-  reportedAt       DateTime       @default(now()) @map("reported_at")
-  syncedAt         DateTime?      @map("synced_at")
+  photoKeys               String[]       @default([]) @map("photo_keys")
+  gpsLatitude             Float?         @map("gps_latitude")
+  gpsLongitude            Float?         @map("gps_longitude")
+  gpsAddress              String?        @map("gps_address")
+  isHomeAddress           Boolean?       @map("is_home_address")
+  reportedById            Int            @map("reported_by_id")
+  reportedAt              DateTime       @default(now()) @map("reported_at")
+  syncedAt                DateTime?      @map("synced_at")
   // ADR-013: client-supplied UUID; unique + retained for the report's lifetime (no expiry).
-  idempotencyKey   String?        @unique @map("idempotency_key")
-  deletedAt        DateTime?      @map("deleted_at")
-  createdAt        DateTime       @default(now()) @map("created_at")
-  updatedAt        DateTime       @updatedAt @map("updated_at")
+  idempotencyKey          String?        @unique @map("idempotency_key")
+  deletedAt               DateTime?      @map("deleted_at")
+  createdAt               DateTime       @default(now()) @map("created_at")
+  updatedAt               DateTime       @updatedAt @map("updated_at")
 
   cadre      Cadre @relation(fields: [cadreId], references: [id])
   reportedBy User  @relation("ReportReporter", fields: [reportedById], references: [id])

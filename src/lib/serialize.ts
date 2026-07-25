@@ -274,6 +274,10 @@ export interface WireReport {
   personStatus: Report['personStatus'];
   currentPhone: string;
   currentActivity: string;
+  /** ADR-050. "अन्य माओवादियों से समर्पण हुआ विवरण". Omitted when null. */
+  surrenderNetworkDetails?: string;
+  /** ADR-050. "अन्य जानकारी" — free-form catch-all. Omitted when null. */
+  otherInformation?: string;
   /** Legacy single-photo URL, passed through for old rows. Prefer `photoUrls`. */
   photoUrl?: string;
   /** Fresh presigned GET URLs, re-signed from the stored S3 keys on every read (ADR-016). */
@@ -302,6 +306,8 @@ export async function toWireReport(r: ReportWithCadre, signUrl?: SignUrl): Promi
     personStatus: r.personStatus,
     currentPhone: r.currentPhone,
     currentActivity: r.currentActivity,
+    surrenderNetworkDetails: r.surrenderNetworkDetails ?? undefined,
+    otherInformation: r.otherInformation ?? undefined,
     photoUrl: r.photoUrl ?? undefined,
     isHomeAddress: r.isHomeAddress ?? undefined,
     reportedAt: r.reportedAt.toISOString(),

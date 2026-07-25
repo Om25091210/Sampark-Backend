@@ -94,6 +94,8 @@ export function makeReportsMediaService(deps: ReportsMediaDeps): ReportsMediaSer
           personStatus: r.personStatus,
           currentPhone: r.currentPhone,
           currentActivity: r.currentActivity,
+          surrenderNetworkDetails: r.surrenderNetworkDetails ?? undefined,
+          otherInformation: r.otherInformation ?? undefined,
           reporterName: r.reportedBy.name,
         })),
       });

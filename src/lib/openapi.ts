@@ -75,6 +75,8 @@ export const EXAMPLE_REPORT = {
   personStatus: 'alive',
   currentPhone: '+919812345678',
   currentActivity: 'खेती कर रहा है',
+  surrenderNetworkDetails: 'दो अन्य साथियों के साथ समर्पण की जानकारी दी',
+  otherInformation: 'परिवार से मुलाकात हुई',
   photoUrls: [
     'https://sampark-media.s3.ap-south-1.amazonaws.com/reports/cadre-12/9f1c….jpg?X-Amz-…',
   ],

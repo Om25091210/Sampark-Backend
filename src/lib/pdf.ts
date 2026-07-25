@@ -26,6 +26,10 @@ export interface ReportExportRow {
   personStatus: 'alive' | 'dead';
   currentPhone: string;
   currentActivity: string;
+  // ADR-050. The other two fields of the three-field split. Optional — nullable
+  // on rows created before the split, and not every report fills them.
+  surrenderNetworkDetails?: string;
+  otherInformation?: string;
   reporterName: string;
 }
 
@@ -70,9 +74,12 @@ export async function generateReportsPdf(data: ReportExportData): Promise<Buffer
     { text: `कुल रिपोर्ट: ${data.reports.length}`, style: 'meta', bold: true },
   ];
 
-  const tableHeader = ['क्रम', 'दिनांक', 'स्थान', 'विशिष्ट स्थान', 'स्थिति', 'फ़ोन', 'गतिविधि', 'रिपोर्टकर्ता'].map(
-    (text) => ({ text, style: 'th' }),
-  );
+  // ADR-050. Three distinct description columns, not one blob — mirrors the
+  // mobile create-report form's three-field split.
+  const tableHeader = [
+    'क्रम', 'दिनांक', 'स्थान', 'विशिष्ट स्थान', 'स्थिति', 'फ़ोन',
+    'वर्तमान गतिविधि', 'अन्य माओवादियों से समर्पण विवरण', 'अन्य जानकारी', 'रिपोर्टकर्ता',
+  ].map((text) => ({ text, style: 'th' }));
 
   const tableRows = data.reports.map((r, i) => [
     { text: String(i + 1), style: 'td' },
@@ -82,6 +89,8 @@ export async function generateReportsPdf(data: ReportExportData): Promise<Buffer
     { text: STATUS_LABEL[r.personStatus], style: 'td' },
     { text: r.currentPhone, style: 'td' },
     { text: r.currentActivity, style: 'td' },
+    { text: r.surrenderNetworkDetails || '—', style: 'td' },
+    { text: r.otherInformation || '—', style: 'td' },
     { text: r.reporterName, style: 'td' },
   ]);
 
@@ -91,7 +100,7 @@ export async function generateReportsPdf(data: ReportExportData): Promise<Buffer
       : {
           table: {
             headerRows: 1,
-            widths: ['auto', 'auto', 'auto', '*', 'auto', 'auto', '*', 'auto'],
+            widths: ['auto', 'auto', 'auto', '*', 'auto', 'auto', '*', '*', '*', 'auto'],
             body: [tableHeader, ...tableRows],
           },
           layout: 'lightHorizontalLines',

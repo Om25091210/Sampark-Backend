@@ -225,6 +225,8 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
         personStatus: body.person_status,
         currentPhone: body.current_phone,
         currentActivity: body.current_activity,
+        surrenderNetworkDetails: body.surrender_network_details ?? null,
+        otherInformation: body.other_information ?? null,
         // Officer-declared event date. `undefined` falls through to the schema's
         // @default(now()) for clients that don't send one.
         reportedAt: resolveReportedAt(body.selected_date, log),
