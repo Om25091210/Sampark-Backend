@@ -144,7 +144,7 @@ export function makeNotificationsService(deps: NotificationsDeps): Notifications
         thanas = actor.role === 'admin' && actor.scope.kind !== 'all' ? [...actor.scope.thanas] : undefined;
       }
 
-      const recipients = await prisma.user.findMany({
+      const officerRecipients = await prisma.user.findMany({
         where: {
           role: 'officer',
           deletedAt: null,
@@ -153,11 +153,16 @@ export function makeNotificationsService(deps: NotificationsDeps): Notifications
         select: { id: true },
       });
 
+      // The sender always gets a confirmation copy of their own broadcast — an
+      // admin/super_admin broadcasting isn't `role: 'officer'`, so the query above
+      // never includes them on its own.
+      const recipientIds = [...officerRecipients.map((r) => r.id), actor.id];
+
       const created = await prisma.$transaction(async (tx) => {
         const rows: { notificationId: number; userId: number; outboxEventId: number }[] = [];
-        for (const recipient of recipients) {
+        for (const recipientId of recipientIds) {
           const n = await writeNotification(tx, {
-            userId: recipient.id,
+            userId: recipientId,
             type: 'broadcast',
             title: body.title,
             body: body.body,
@@ -169,13 +174,13 @@ export function makeNotificationsService(deps: NotificationsDeps): Notifications
             eventType: 'notification.created',
             payload: {
               notificationId: n.id,
-              userId: recipient.id,
+              userId: recipientId,
               title: body.title,
               body: body.body,
               data: { target: body.target },
             },
           });
-          rows.push({ notificationId: n.id, userId: recipient.id, outboxEventId: event.id });
+          rows.push({ notificationId: n.id, userId: recipientId, outboxEventId: event.id });
         }
 
         await writeAuditLog(tx, {
@@ -183,7 +188,7 @@ export function makeNotificationsService(deps: NotificationsDeps): Notifications
           action: 'notification.broadcast',
           entityType: 'notification',
           entityId: 'broadcast',
-          after: { title: body.title, target: body.target, recipientCount: recipients.length },
+          after: { title: body.title, target: body.target, recipientCount: recipientIds.length },
         });
 
         return rows;
@@ -201,7 +206,7 @@ export function makeNotificationsService(deps: NotificationsDeps): Notifications
         });
       }
 
-      return { recipientCount: recipients.length };
+      return { recipientCount: recipientIds.length };
     },
   };
 }

@@ -212,12 +212,15 @@ describe('notifications (ADR-048 in-app inbox)', () => {
       payload: { title: 'सूचना', body: 'सूचना पाठ', target: 'all' },
     });
     expect(res.statusCode).toBe(201);
-    expect(res.json().recipient_count).toBe(1); // only officerIn, whose thana is in the admin's sub-division
+    // officerIn (whose thana is in the admin's sub-division) + the broadcasting admin's own copy
+    expect(res.json().recipient_count).toBe(2);
 
     const insideRows = await prisma.notification.findMany({ where: { userId: officerInId } });
     expect(insideRows.length).toBe(1);
     const outsideRows = await prisma.notification.findMany({ where: { userId: officerOutId } });
     expect(outsideRows.length).toBe(0);
+    const senderRows = await prisma.notification.findMany({ where: { userId: adminId } });
+    expect(senderRows.length).toBe(1);
   });
 
   it('admin cannot target a thana outside their own sub-division (400)', async () => {
@@ -251,6 +254,6 @@ describe('notifications (ADR-048 in-app inbox)', () => {
       payload: { title: 'x', body: 'y', target: 'sub_division', sub_division: 'कुटरू' },
     });
     expect(res.statusCode).toBe(201);
-    expect(res.json().recipient_count).toBe(1);
+    expect(res.json().recipient_count).toBe(2); // officerIn + the broadcasting super_admin's own copy
   });
 });
