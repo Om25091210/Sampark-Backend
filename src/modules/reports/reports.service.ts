@@ -4,7 +4,7 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import { toWireReport, type WireReport } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
-import { notFound } from '../../lib/errors.js';
+import { badRequest, notFound } from '../../lib/errors.js';
 import type { StorageProvider } from '../../lib/storage.js';
 import type {
   CreateReportBody,
@@ -88,11 +88,18 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
   // Confirms the cadre exists, is not soft-deleted, AND is inside the caller's scope;
   // throws 404 otherwise. Out-of-scope reads 404 rather than 403 so cadre ids stay
   // unenumerable. This is the single chokepoint for every per-cadre report route.
-  async function assertCadre(cadreId: number, scope: CadreScope): Promise<void> {
+  // Returns category/priorityCategory too — create() needs them for the
+  // jail/death reportability check (ADR-049) without a second query.
+  async function assertCadre(
+    cadreId: number,
+    scope: CadreScope,
+  ): Promise<{ category: string; priorityCategory: string | null }> {
     const cadre = await prisma.cadre.findFirst({
       where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(scope) },
+      select: { category: true, priorityCategory: true },
     });
     if (cadre === null) throw notFound('Cadre not found');
+    return cadre;
   }
 
   return {
@@ -193,7 +200,22 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
         if (existing !== null) return { report: await toWireReport(existing, signUrl), created: false };
       }
 
-      await assertCadre(cadreId, scope);
+      const cadre = await assertCadre(cadreId, scope);
+
+      // ADR-049. A cadre in jail custody (Cadre.category) or graded jail/death on
+      // the register (Cadre.priorityCategory) cannot be field-reported — there is
+      // no reporting due for either (see ADR-046 §3). Checked here, not just in
+      // the mobile UI, per the project's API-enforced-authorization rule.
+      if (
+        cadre.category === 'jail' ||
+        cadre.priorityCategory === 'jail' ||
+        cadre.priorityCategory === 'death'
+      ) {
+        throw badRequest(
+          'Reports cannot be filed for a jail-custody or deceased cadre',
+          'CADRE_NOT_REPORTABLE',
+        );
+      }
 
       const data: Prisma.ReportCreateInput = {
         cadre: { connect: { id: cadreId } },

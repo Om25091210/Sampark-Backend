@@ -377,4 +377,67 @@ describe('reports', () => {
     expect(res.statusCode).toBe(404);
     await app.close();
   });
+
+  // ── ADR-049: jail/death cadres cannot be reported ──────────────────────────
+
+  describe('reportability (ADR-049)', () => {
+    it('create against a jail-custody cadre (category) → 400 CADRE_NOT_REPORTABLE', async () => {
+      const jail = await prisma.cadre.create({
+        data: {
+          name: 'TEST CADRE JAIL', phone: '+910000000002', thana: 'बीजापुर सदर',
+          currentAddress: 'Test address', designation: 'Test', category: 'jail',
+          alertLevel: 'normal', aliases: [], assignedOfficerId: officerId, avatarUrl: 'https://x/a.jpg',
+        },
+      });
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${jail.id}/reports`,
+        headers: auth(officerToken), payload: { ...validBody(), cadre_id: jail.id },
+      });
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as { error: { code: string } }).error.code).toBe('CADRE_NOT_REPORTABLE');
+      await prisma.cadre.delete({ where: { id: jail.id } });
+      await app.close();
+    });
+
+    it('create against a priorityCategory=death cadre → 400 CADRE_NOT_REPORTABLE', async () => {
+      const dead = await prisma.cadre.create({
+        data: {
+          name: 'TEST CADRE DEATH', phone: '+910000000003', thana: 'बीजापुर सदर',
+          currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
+          priorityCategory: 'death',
+          alertLevel: 'normal', aliases: [], assignedOfficerId: officerId, avatarUrl: 'https://x/a.jpg',
+        },
+      });
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${dead.id}/reports`,
+        headers: auth(officerToken), payload: { ...validBody(), cadre_id: dead.id },
+      });
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as { error: { code: string } }).error.code).toBe('CADRE_NOT_REPORTABLE');
+      await prisma.cadre.delete({ where: { id: dead.id } });
+      await app.close();
+    });
+
+    it('create against a priorityCategory=jail cadre (distinct from Cadre.category) → 400 CADRE_NOT_REPORTABLE', async () => {
+      const jailGrade = await prisma.cadre.create({
+        data: {
+          name: 'TEST CADRE JAIL GRADE', phone: '+910000000004', thana: 'बीजापुर सदर',
+          currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
+          priorityCategory: 'jail',
+          alertLevel: 'normal', aliases: [], assignedOfficerId: officerId, avatarUrl: 'https://x/a.jpg',
+        },
+      });
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${jailGrade.id}/reports`,
+        headers: auth(officerToken), payload: { ...validBody(), cadre_id: jailGrade.id },
+      });
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as { error: { code: string } }).error.code).toBe('CADRE_NOT_REPORTABLE');
+      await prisma.cadre.delete({ where: { id: jailGrade.id } });
+      await app.close();
+    });
+  });
 });
