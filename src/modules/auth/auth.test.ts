@@ -51,6 +51,9 @@ beforeAll(async () => {
   // SDR-002 state is keyed by EMAIL and outlives the users it locked, so a lockout
   // left by an earlier run makes this suite fail in isolation. Purge it up front.
   await prisma.loginAttempt.deleteMany({});
+  // ADR-048: a parallel suite's trigger can leave a Notification pointing at a
+  // same-named fixture from a prior run — clear it before the FK'd user goes.
+  await prisma.notification.deleteMany({ where: { user: { name: { in: IDS } } } });
   await prisma.user.deleteMany({ where: { name: { in: IDS } } });
   const hash = await hashPassword(PASSWORD);
 
@@ -79,6 +82,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   await prisma.refreshToken.deleteMany({ where: { userId: { in: [officerId, adminId] } } });
+  await prisma.notification.deleteMany({ where: { user: { name: { in: IDS } } } });
   await prisma.user.deleteMany({ where: { name: { in: IDS } } });
   await prisma.$disconnect();
 });

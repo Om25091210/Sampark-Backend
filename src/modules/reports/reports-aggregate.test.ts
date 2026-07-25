@@ -89,6 +89,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await prisma.report.deleteMany({ where: { cadreId: { in: [cadre1Id, cadre2Id] } } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: CADRE_NAME } } });
+  await prisma.notification.deleteMany({ where: { user: { phone: { in: PHONES } } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });

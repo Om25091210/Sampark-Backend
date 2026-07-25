@@ -40,6 +40,7 @@ async function ids(url: string, token: string): Promise<number[]> {
 
 beforeAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
+  await prisma.notification.deleteMany({ where: { user: { phone: { in: PHONES } } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
 
   const mk = async (phone: string, role: string, name: string, scope: object) =>
@@ -70,6 +71,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
+  await prisma.notification.deleteMany({ where: { user: { phone: { in: PHONES } } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });

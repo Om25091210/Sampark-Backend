@@ -123,6 +123,7 @@ afterAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
   // Both fixture users — leaving the admin behind would let it drift into another
   // file's assertions (Sampark-Backend#3).
+  await prisma.notification.deleteMany({ where: { user: { phone: { in: [PHONE, ADMIN_PHONE, HQ_PHONE] } } } });
   await prisma.user.deleteMany({ where: { phone: { in: [PHONE, ADMIN_PHONE, HQ_PHONE] } } });
   await prisma.$disconnect();
 });

@@ -50,6 +50,9 @@ async function purgeUsers(names: string[]): Promise<void> {
   await prisma.refreshToken.deleteMany({ where: { userId: { in: ids } } });
   await prisma.auditLog.deleteMany({ where: { entityType: 'user', entityId: { in: ids.map(String) } } });
   if (emails.length > 0) await prisma.loginAttempt.deleteMany({ where: { email: { in: emails } } });
+  // ADR-048: a parallel suite's trigger (transfer/broadcast/escalation) can write a
+  // Notification referencing one of these fixture users before this file tears them down.
+  await prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await prisma.user.deleteMany({ where: { id: { in: ids } } });
 }
 

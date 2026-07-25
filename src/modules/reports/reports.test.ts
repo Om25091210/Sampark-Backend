@@ -77,6 +77,7 @@ afterEach(purgeReports);
 afterAll(async () => {
   await purgeReports();
   await prisma.cadre.deleteMany({ where: { id: cadreId } });
+  await prisma.notification.deleteMany({ where: { user: { phone: { in: PHONES } } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
 });
