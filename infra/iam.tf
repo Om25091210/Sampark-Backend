@@ -142,30 +142,33 @@ resource "aws_iam_role_policy" "ecs_task_exec" {
 # ADR-048. The application process itself calls SNS at runtime (registering a device
 # token on login, publishing a push on a trigger) -- unlike Secrets Manager above,
 # this is a legitimate app-level AWS call, so it belongs on the TASK role, not the
-# execution role. CreatePlatformEndpoint targets the platform APPLICATION arn; the
-# other four actions target per-DEVICE endpoint arns, a distinct ARN namespace under
-# it (arn:aws:sns:<region>:<account>:endpoint/GCM/<app-name>/<uuid>) -- confirm both
-# patterns resolve as expected after the first apply rather than trusting them blind.
+# execution role.
+#
+# CORRECTED 2026-07-25, discovered via a live SNS:Publish AuthorizationErrorException:
+# despite Publish/DeleteEndpoint/SetEndpointAttributes/GetEndpointAttributes
+# taking a per-DEVICE endpoint ARN as their API parameter (TargetArn /
+# EndpointArn, arn:aws:sns:<region>:<account>:endpoint/GCM/<app-name>/<uuid>), AWS
+# evaluates IAM resource-level permissions for ALL FIVE of these SNS mobile-push
+# actions -- including Publish -- against the PLATFORM APPLICATION arn, never the
+# endpoint's own arn. A Resource scoped to `endpoint/GCM/<app-name>/*` (the previous
+# version of this policy) LOOKS correct and passes `aws iam simulate-principal-policy`
+# (which only pattern-matches the policy document against whatever ARN you hand it),
+# but the live API denies every call with "no identity-based policy allows the
+# SNS:Publish action" citing the app arn as the resource -- simulate-principal-policy
+# cannot catch this because it has no model of SNS's actual runtime authorization
+# target, only the policy text. One statement, one resource, for all five actions.
 data "aws_iam_policy_document" "ecs_task_sns" {
   statement {
-    sid    = "CreateFcmEndpoints"
+    sid    = "ManageFcmPlatformApplication"
     effect = "Allow"
     actions = [
       "sns:CreatePlatformEndpoint",
-    ]
-    resources = [aws_sns_platform_application.fcm.arn]
-  }
-
-  statement {
-    sid    = "ManageAndPublishToFcmEndpoints"
-    effect = "Allow"
-    actions = [
       "sns:Publish",
       "sns:DeleteEndpoint",
       "sns:SetEndpointAttributes",
       "sns:GetEndpointAttributes",
     ]
-    resources = ["arn:aws:sns:${var.aws_region}:${local.account_id}:endpoint/GCM/${aws_sns_platform_application.fcm.name}/*"]
+    resources = [aws_sns_platform_application.fcm.arn]
   }
 }
 

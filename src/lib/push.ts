@@ -92,17 +92,20 @@ class SnsPushProvider implements PushProvider {
   }
 
   async publish(endpointArn: string, msg: PushMessage): Promise<void> {
-    // FCM V1 envelope. Data values must be strings (FCM's data-message contract);
-    // stringify here once so every call site gets it free.
+    // SNS's GCM/FCM message JSON, not the FCM v1 HTTP API's own request body: SNS
+    // expects `notification`/`data` at the TOP LEVEL of the GCM payload, not nested
+    // under a `message` envelope (that shape is for calling FCM directly, and SNS
+    // rejects it with "data or notification key is expected in the json message" --
+    // confirmed live against the platform endpoint, 2026-07-25). Data values must be
+    // strings (FCM's data-message contract); stringify here once so every call site
+    // gets it free.
     const stringData =
       msg.data !== undefined
         ? Object.fromEntries(Object.entries(msg.data).map(([k, v]) => [k, String(v)]))
         : undefined;
     const fcmV1Message = {
-      message: {
-        notification: { title: msg.title, body: msg.body },
-        ...(stringData !== undefined ? { data: stringData } : {}),
-      },
+      notification: { title: msg.title, body: msg.body },
+      ...(stringData !== undefined ? { data: stringData } : {}),
     };
     try {
       await this.client.send(
