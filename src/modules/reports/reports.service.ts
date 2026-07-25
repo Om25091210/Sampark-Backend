@@ -1,11 +1,15 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { cadreScopeWhere, type CadreScope } from '../../lib/scope.js';
-import { Prisma, type PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient, type Role } from '@prisma/client';
 import { toWireReport, type WireReport } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import type { StorageProvider } from '../../lib/storage.js';
+// ADR-052. Report-time phone sync reuses the SAME approval-ladder write path the
+// manual cadre-edit form calls — phone stays an APPROVAL field (ADR-026); this is
+// a new way to PROPOSE a change, never a new way to bypass approval.
+import type { Actor, CadreChangesService } from '../cadre-changes/cadre-changes.service.js';
 import type {
   CreateReportBody,
   ListReportsQuery,
@@ -18,6 +22,9 @@ export interface ReportsDeps {
   // Storage + TTL power the per-read re-signing of photo keys (ADR-016).
   storage: StorageProvider;
   mediaUrlTtlSeconds: number;
+  // ADR-052. Only `submit` is needed — report creation proposes a phone change
+  // exactly the way the manual edit form does, never applies one directly.
+  cadreChanges: Pick<CadreChangesService, 'submit'>;
 }
 
 export interface Paginated<T> {
@@ -41,7 +48,13 @@ export interface ReportsService {
   listByCadre(cadreId: number, query: ListReportsQuery, scope: CadreScope): Promise<Paginated<WireReport>>;
   list(query: ResolvedListAllReportsQuery, scope: CadreScope): Promise<Paginated<WireReport>>;
   getById(cadreId: number, reportId: number, scope: CadreScope): Promise<WireReport>;
-  create(cadreId: number, body: CreateReportBody, reporterId: number, scope: CadreScope): Promise<CreateReportResult>;
+  create(
+    cadreId: number,
+    body: CreateReportBody,
+    reporterId: number,
+    scope: CadreScope,
+    reporterRole: Role,
+  ): Promise<CreateReportResult>;
 }
 
 // Load the report together with its cadre so the wire entity can carry the
@@ -80,7 +93,13 @@ function resolveReportedAt(selectedDate: string | undefined, log: FastifyBaseLog
   return picked;
 }
 
-export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }: ReportsDeps): ReportsService {
+export function makeReportsService({
+  prisma,
+  log,
+  storage,
+  mediaUrlTtlSeconds,
+  cadreChanges,
+}: ReportsDeps): ReportsService {
   // Re-signs a stored S3 key into a fresh presigned GET URL (ADR-016). Passed to
   // the serializer so every read hands out non-expired photo URLs.
   const signUrl = (key: string): Promise<string> => storage.presignGet(key, mediaUrlTtlSeconds);
@@ -88,15 +107,15 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
   // Confirms the cadre exists, is not soft-deleted, AND is inside the caller's scope;
   // throws 404 otherwise. Out-of-scope reads 404 rather than 403 so cadre ids stay
   // unenumerable. This is the single chokepoint for every per-cadre report route.
-  // Returns category/priorityCategory too — create() needs them for the
-  // jail/death reportability check (ADR-049) without a second query.
+  // Returns category/priorityCategory (ADR-049 reportability check) and phone
+  // (ADR-052 report-time phone sync) too, so create() needs no second query.
   async function assertCadre(
     cadreId: number,
     scope: CadreScope,
-  ): Promise<{ category: string; priorityCategory: string | null }> {
+  ): Promise<{ category: string; priorityCategory: string | null; phone: string }> {
     const cadre = await prisma.cadre.findFirst({
       where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(scope) },
-      select: { category: true, priorityCategory: true },
+      select: { category: true, priorityCategory: true, phone: true },
     });
     if (cadre === null) throw notFound('Cadre not found');
     return cadre;
@@ -188,7 +207,7 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
       return toWireReport(report, signUrl);
     },
 
-    async create(cadreId, body, reporterId, scope) {
+    async create(cadreId, body, reporterId, scope, reporterRole) {
       // Idempotent replay: a report already exists for this key → return it (200),
       // never a duplicate. Checked before the cadre assertion so a replay stays
       // cheap and succeeds even if the cadre was later soft-deleted.
@@ -258,6 +277,29 @@ export function makeReportsService({ prisma, log, storage, mediaUrlTtlSeconds }:
           });
           return created;
         });
+
+        // ADR-052. Report-time phone sync: propose it through the SAME
+        // approval-ladder path the manual cadre-edit form uses (phone stays an
+        // APPROVAL field, ADR-026) — this is a new way to PROPOSE a change, never
+        // a new way to bypass approval. Best-effort only, and only for a fresh
+        // create (never a replay): an unrelated in-flight phone change (409
+        // CHANGE_PENDING) or any other failure here must never fail the report
+        // itself — filing the report is this endpoint's job, not editing the cadre.
+        if (body.current_phone !== cadre.phone) {
+          try {
+            await cadreChanges.submit(
+              cadreId,
+              { changes: { phone: body.current_phone } },
+              { id: reporterId, role: reporterRole, scope },
+            );
+          } catch (err) {
+            log.warn(
+              { err, cadreId, reportId: report.id },
+              'report-time phone sync to cadre record failed; report was still created',
+            );
+          }
+        }
+
         return { report: await toWireReport(report, signUrl), created: true };
       } catch (err) {
         // Concurrent replay lost the race on the unique idempotency key: fetch and

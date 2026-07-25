@@ -8,14 +8,17 @@ import { signAccessToken } from '../../lib/tokens.js';
 
 const prisma = new PrismaClient();
 const config = testConfig();
-const PHONES = ['+919000000030', '+919000000031'];
+const PHONES = ['+919000000030', '+919000000031', '+919000000032'];
 const CADRE_NAME = 'TEST CADRE REPORTS';
 
 let officerId = 0;
 let viewerId = 0;
+let superAdminId = 0;
 let cadreId = 0;
 let officerToken = '';
 let viewerToken = '';
+let superAdminToken = '';
+const CADRE_ORIGINAL_PHONE = '+910000000001';
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 const makeApp = (): Promise<FastifyInstance> => buildApp({ config, prisma, logger: false });
@@ -41,6 +44,18 @@ async function purgeReports(): Promise<void> {
     await prisma.outboxEvent.deleteMany({ where: { aggregateType: 'report', aggregateId: { in: ids } } });
   }
   await prisma.report.deleteMany({ where: { cadreId } });
+
+  // ADR-052: validBody()'s current_phone differs from the fixture cadre's phone
+  // by design (to exercise the sync), so every create() also proposes a phone
+  // change in the background. Purge those too, same pattern as
+  // cadre-changes.test.ts, so a pending phone request from one test doesn't
+  // collide (409 CHANGE_PENDING, silently swallowed) with the next.
+  const changeRows = await prisma.cadreChangeRequest.findMany({ where: { cadreId }, select: { id: true } });
+  const changeIds = changeRows.map((r) => String(r.id));
+  if (changeIds.length > 0) {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'cadre_change_request', entityId: { in: changeIds } } });
+  }
+  await prisma.cadreChangeRequest.deleteMany({ where: { cadreId } });
 }
 
 beforeAll(async () => {
@@ -55,13 +70,18 @@ beforeAll(async () => {
     where: { phone: PHONES[1] }, update: { deletedAt: null, role: 'viewer', name: 'Report Viewer' },
     create: { phone: PHONES[1]!, name: 'Report Viewer', role: 'viewer' },
   });
+  const superAdmin = await prisma.user.upsert({
+    where: { phone: PHONES[2] }, update: { deletedAt: null, role: 'super_admin', name: 'Report SuperAdmin' },
+    create: { phone: PHONES[2]!, name: 'Report SuperAdmin', role: 'super_admin' },
+  });
   officerId = officer.id;
   viewerId = viewer.id;
+  superAdminId = superAdmin.id;
 
   await prisma.cadre.deleteMany({ where: { name: CADRE_NAME } });
   const cadre = await prisma.cadre.create({
     data: {
-      name: CADRE_NAME, phone: '+910000000001', thana: 'बीजापुर सदर',
+      name: CADRE_NAME, phone: CADRE_ORIGINAL_PHONE, thana: 'बीजापुर सदर',
       currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
       alertLevel: 'normal', aliases: [], assignedOfficerId: officerId, avatarUrl: 'https://x/a.jpg',
     },
@@ -70,6 +90,7 @@ beforeAll(async () => {
 
   officerToken = await signAccessToken({ sub: officerId, role: 'officer' }, config.jwtSecret, '15m');
   viewerToken = await signAccessToken({ sub: viewerId, role: 'viewer' }, config.jwtSecret, '15m');
+  superAdminToken = await signAccessToken({ sub: superAdminId, role: 'super_admin' }, config.jwtSecret, '15m');
 });
 
 afterEach(purgeReports);
@@ -470,6 +491,89 @@ describe('reports', () => {
       expect(res.statusCode).toBe(400);
       expect((res.json() as { error: { code: string } }).error.code).toBe('CADRE_NOT_REPORTABLE');
       await prisma.cadre.delete({ where: { id: jailGrade.id } });
+      await app.close();
+    });
+  });
+
+  // ── ADR-052: report-time phone mismatch proposes a change, never writes directly ──
+
+  describe('report-time phone sync (ADR-052)', () => {
+    it('officer report with a different current_phone → a pending phone CadreChangeRequest, cadre.phone unchanged', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: validBody(), // current_phone !== CADRE_ORIGINAL_PHONE
+      });
+      expect(res.statusCode).toBe(201);
+
+      const change = await prisma.cadreChangeRequest.findFirst({ where: { cadreId, status: 'pending' } });
+      expect(change).not.toBeNull();
+      expect((change!.changes as Record<string, { old: string; new: string }>).phone).toEqual({
+        old: CADRE_ORIGINAL_PHONE,
+        new: '+919812345678',
+      });
+      expect(change!.submittedById).toBe(officerId);
+      // Officer submitted → needs both rungs, so it must NOT have applied yet.
+      expect(change!.needsAdmin).toBe(true);
+      expect(change!.needsSuperAdmin).toBe(true);
+
+      const cadre = await prisma.cadre.findUnique({ where: { id: cadreId }, select: { phone: true } });
+      expect(cadre?.phone).toBe(CADRE_ORIGINAL_PHONE);
+      await app.close();
+    });
+
+    it('report with current_phone === cadre.phone → no change request proposed', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: { ...validBody(), current_phone: CADRE_ORIGINAL_PHONE },
+      });
+      expect(res.statusCode).toBe(201);
+      const change = await prisma.cadreChangeRequest.findFirst({ where: { cadreId } });
+      expect(change).toBeNull();
+      await app.close();
+    });
+
+    it('super_admin report with a different current_phone → applies immediately, same as any other super_admin edit', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(superAdminToken), payload: validBody(),
+      });
+      expect(res.statusCode).toBe(201);
+
+      const cadre = await prisma.cadre.findUnique({ where: { id: cadreId }, select: { phone: true } });
+      expect(cadre?.phone).toBe('+919812345678');
+
+      const change = await prisma.cadreChangeRequest.findFirst({ where: { cadreId }, orderBy: { id: 'desc' } });
+      expect(change?.status).toBe('applied');
+
+      // Restore the fixture so later/re-runs see the original phone again.
+      await prisma.cadre.update({ where: { id: cadreId }, data: { phone: CADRE_ORIGINAL_PHONE } });
+      await app.close();
+    });
+
+    it('a report that collides with an already-pending phone change still succeeds (201) — the collision is swallowed, not surfaced', async () => {
+      const app = await makeApp();
+      const first = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: validBody(),
+      });
+      expect(first.statusCode).toBe(201);
+
+      // Second report, same mismatch → submit() would 409 CHANGE_PENDING internally;
+      // the report itself must not fail because of it.
+      const second = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken),
+        payload: { ...validBody(), specific_location: 'दूसरी रिपोर्ट' },
+      });
+      expect(second.statusCode).toBe(201);
+
+      // Still exactly one pending phone request — the second attempt did not
+      // create a duplicate or clobber the first.
+      const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
+      expect(pending).toHaveLength(1);
       await app.close();
     });
   });

@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import type { Role } from '@prisma/client';
 import { makeReportsService } from './reports.service.js';
-import { badRequest } from '../../lib/errors.js';
+import { makeCadreChangesService } from '../cadre-changes/cadre-changes.service.js';
+import { badRequest, forbidden } from '../../lib/errors.js';
 import {
   createReportBody,
   listAllReportsQuery,
@@ -19,12 +21,29 @@ import {
 // Reports filed against a cadre. All routes require authentication; creating a
 // report is officer+ (viewers are read-only).
 export async function reportsRoutes(app: FastifyInstance): Promise<void> {
+  // ADR-052. Report creation proposes a report-time phone mismatch through the
+  // SAME change-request path the manual cadre-edit form uses — a second
+  // instance sharing the same underlying deps, not a separate write mechanism.
+  const cadreChanges = makeCadreChangesService({
+    prisma: app.prisma,
+    log: app.log,
+    storage: app.storage,
+    mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+    pushProvider: app.pushProvider,
+  });
+
   const service = makeReportsService({
     prisma: app.prisma,
     log: app.log,
     storage: app.storage,
     mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+    cadreChanges,
   });
+
+  // `AuthPrincipal.role` is a plain string off the JWT; the create-report route
+  // is already gated to officer/admin/super_admin by requireRole below, so the
+  // cast here is safe — mirrors the same narrowing cadre-changes.routes.ts does.
+  const ROLES: readonly string[] = ['super_admin', 'admin', 'officer', 'viewer'];
 
   // Aggregate feed across every cadre (ADR-021) — the officer's own reporting
   // record via `reportedBy=me`. Not a privilege boundary: the per-cadre feed below
@@ -118,7 +137,16 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
         throw badRequest('cadre_id in body does not match the URL', 'CADRE_ID_MISMATCH');
       }
 
-      const { report, created } = await service.create(cadreId, body, request.authUser!.sub, request.scope!);
+      const role = request.authUser!.role;
+      if (!ROLES.includes(role)) throw forbidden('Unrecognised role on token');
+
+      const { report, created } = await service.create(
+        cadreId,
+        body,
+        request.authUser!.sub,
+        request.scope!,
+        role as Role,
+      );
       // 201 for a fresh create; 200 for an idempotent replay (ADR-013).
       return reply.code(created ? 201 : 200).send(report);
     },
