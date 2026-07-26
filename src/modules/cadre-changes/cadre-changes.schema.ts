@@ -46,6 +46,16 @@ const fieldValue = {
   fatherName: z.string().trim().max(200).nullable(),
   motherName: z.string().trim().max(200).nullable(),
   spouseName: z.string().trim().max(200).nullable(),
+  // ADR-038 / ADR-053. Demographic facts from the paper register. `gender` is the
+  // closed two-value enum (ADR-038 §2); `caste` stays free text — never an enum —
+  // for the same reason ADR-038 gave: the next spelling the register records must
+  // not be rejected.
+  gender: z.enum(['male', 'female']).nullable(),
+  caste: z.string().trim().max(200).nullable(),
+  // ADR-046 §2 / ADR-053. Wire casing is deliberate and untouched: uppercase grade
+  // letters, lowercase jail/death — do NOT normalise to match the lowercase-enum
+  // convention every other enum here follows.
+  priorityCategory: z.enum(['A', 'B', 'C', 'jail', 'death']).nullable(),
 } as const satisfies Record<(typeof APPROVAL_FIELDS)[number], z.ZodTypeAny>;
 
 export const changeableFieldsSchema = z.object(fieldValue).partial();

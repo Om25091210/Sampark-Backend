@@ -21,8 +21,11 @@ import type { Role } from '@prisma/client';
 // Anything absent from BOTH lists is not writable through the API at all.
 // `serialNumber` is the deliberate example: it comes from the paper register via
 // the import (Design-Docs#7) and is not something a user invents or edits.
-// `category` and `alertLevel` are also absent — reclassifying a cadre is a bigger
-// decision than an edit form, and needs its own ADR before it gets a write path.
+// `category`, `alertLevel` and `filter` (DVCM/ACM/PM) are also absent — `category`/
+// `alertLevel` because reclassifying a cadre is a bigger decision than an edit form
+// and needs its own ADR before it gets a write path; `filter` because it is set only
+// at import and read only as a `GET /cadres` query facet (ADR-033 §5), never a
+// user-editable fact — the same class of column as the other two, not an oversight.
 
 export const DIRECT_FIELDS = ['alertTag', 'aliases'] as const;
 
@@ -62,6 +65,17 @@ export const APPROVAL_FIELDS = [
   'fatherName',
   'motherName',
   'spouseName',
+  // ADR-038 promised these editable "through the normal path" when they shipped;
+  // ADR-053 is that follow-through. Demographic facts of record, same bucket as the
+  // ADR-036 fields above.
+  'gender',
+  'caste',
+  // ADR-046 shipped this deliberately backfill-only, on the condition that a manual
+  // editor could follow "under its own ADR if the field starts drifting from the
+  // paper record" — ADR-053 is that ADR. A wrong grade silently changes reporting
+  // cadence and dashboard tiles, so it gets the same two-person review as any other
+  // identity-adjacent fact, not a DIRECT write.
+  'priorityCategory',
 ] as const;
 
 export type DirectField = (typeof DIRECT_FIELDS)[number];
