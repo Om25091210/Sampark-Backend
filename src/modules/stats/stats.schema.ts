@@ -84,3 +84,44 @@ export const officerStatsResponse = z.object({
 });
 
 export type OfficerStats = z.infer<typeof officerStatsResponse>;
+
+// ─── Hierarchy rollup (ADR-055) ────────────────────────────────────────────────
+//
+// The rolled-up view nobody above an officer had: an SDOP sees each of their own
+// officers side by side; HQ sees each SDOP's consolidated number. Same admin+ gate
+// as `/stats/dashboard` (ADR-030) — this is also an aggregate over people other
+// than the caller, not something an officer could assemble from what they can see.
+export const hierarchyRow = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  // Exactly one of the two is set, matching `level`: an officer row carries `thana`
+  // (their station), an admin row carries `subDivision` (their SDOP division).
+  thana: z.string().nullable(),
+  subDivision: z.string().nullable(),
+  assignedCadres: z.number().int(),
+  // Same flat 30-day rule `/stats/me` uses (not the ADR-046 per-category cadence) —
+  // this screen's numbers must never disagree with an officer's own reading of them.
+  overdueCadres: z.number().int(),
+  currentCadres: z.number().int(),
+  reportingCompletion: z.number().int(),
+});
+
+export type HierarchyRow = z.infer<typeof hierarchyRow>;
+
+export const hierarchyStatsResponse = z.object({
+  // 'officers' for an SDOP caller, 'admins' for HQ — tells the client which of a
+  // row's `thana`/`subDivision` fields is the meaningful one.
+  level: z.enum(['officers', 'admins']),
+  rows: z.array(hierarchyRow),
+  // SUM(currentCadres) / SUM(assignedCadres) across `rows` — the aggregate ratio,
+  // never an average of each row's own percentage (ADR-055 Context §1).
+  totalAssigned: z.number().int(),
+  totalCurrent: z.number().int(),
+  overallCompletion: z.number().int(),
+  // Cadres in the caller's scope with no assigned officer. Excluded from the ratio
+  // above — a staffing gap is not a specific officer's reporting lapse (ADR-055
+  // Context §2) — and surfaced here instead of averaged away.
+  unassignedCadres: z.number().int(),
+});
+
+export type HierarchyStats = z.infer<typeof hierarchyStatsResponse>;

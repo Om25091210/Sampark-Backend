@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../app.js';
 import { testConfig } from '../../test/helpers.js';
 import { signAccessToken } from '../../lib/tokens.js';
-import type { OfficerStats } from './stats.schema.js';
+import type { HierarchyStats, OfficerStats } from './stats.schema.js';
 
 const prisma = new PrismaClient();
 const config = testConfig();
@@ -19,12 +19,28 @@ const ADMIN_PHONE = '+919000000061';
 const HQ_PHONE = '+919000000062';
 const TOKEN = 'STATFIXTURE';
 
+// ADR-055. A SECOND admin/officer pair, posted to a REAL sub-division/thana (unlike
+// the fixtures above, whose thana 'स्टैट' and subDivision-less admin are deliberately
+// outside the jurisdiction table) — /stats/hierarchy's officer→sub-division bucketing
+// only exercises real code paths when the thana actually resolves to one of the 9.
+// 'गंगालूर' is a single-thana sub-division, so this admin's scope is exactly one thana.
+const SDOP_ADMIN_PHONE = '+919000000063';
+const SDOP_OFFICER_PHONE = '+919000000064';
+const SDOP_SUB_DIVISION = 'गंगालूर';
+const SDOP_THANA = 'गंगालूर';
+
 let officerId = 0;
 let officerToken = '';
 let adminId = 0;
 let adminToken = '';
 let hqToken = '';
+let sdopAdminId = 0;
+let sdopAdminName = '';
+let sdopAdminToken = '';
+let sdopOfficerId = 0;
+let sdopOfficerName = '';
 const cadreIds: number[] = [];
+const sdopCadreIds: number[] = [];
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 const makeApp = (): Promise<FastifyInstance> => buildApp({ config, prisma, logger: false });
@@ -74,6 +90,25 @@ beforeAll(async () => {
   ).id;
   hqToken = await signAccessToken({ sub: hqId, role: 'super_admin' }, config.jwtSecret, '15m');
 
+  // ADR-055 fixtures — a real SDOP/officer pair so the hierarchy endpoint's scope
+  // resolution and sub-division bucketing exercise their actual code paths.
+  const sdopAdmin = await prisma.user.upsert({
+    where: { phone: SDOP_ADMIN_PHONE },
+    update: { deletedAt: null, role: 'admin', name: 'Hierarchy SDOP', subDivision: SDOP_SUB_DIVISION },
+    create: { phone: SDOP_ADMIN_PHONE, name: 'Hierarchy SDOP', role: 'admin', subDivision: SDOP_SUB_DIVISION },
+  });
+  sdopAdminId = sdopAdmin.id;
+  sdopAdminName = sdopAdmin.name;
+  sdopAdminToken = await signAccessToken({ sub: sdopAdminId, role: 'admin' }, config.jwtSecret, '15m');
+
+  const sdopOfficer = await prisma.user.upsert({
+    where: { phone: SDOP_OFFICER_PHONE },
+    update: { deletedAt: null, role: 'officer', name: 'Hierarchy Officer', thana: SDOP_THANA },
+    create: { phone: SDOP_OFFICER_PHONE, name: 'Hierarchy Officer', role: 'officer', thana: SDOP_THANA },
+  });
+  sdopOfficerId = sdopOfficer.id;
+  sdopOfficerName = sdopOfficer.name;
+
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
 
   const base = {
@@ -116,15 +151,38 @@ beforeAll(async () => {
       reportedAt: new Date(Date.now() - 40 * DAY_MS), // older than 30 days -> still pending
     },
   });
+
+  // ADR-055. Two cadres assigned to the SDOP's officer: one current, one overdue —
+  // so /stats/hierarchy's officer row and rollup have known, exact numbers.
+  const sdopBase = {
+    phone: '+910000000301', thana: SDOP_THANA, currentAddress: 'Hierarchy fixture',
+    designation: 'Fixture', aliases: [] as string[], assignedOfficerId: sdopOfficerId,
+  };
+  const sCurrent = await prisma.cadre.create({
+    data: { ...sdopBase, name: `${TOKEN}-SDOP-CURRENT`, category: 'thana', alertLevel: 'normal' },
+  });
+  const sOverdue = await prisma.cadre.create({
+    data: { ...sdopBase, name: `${TOKEN}-SDOP-OVERDUE`, category: 'thana', alertLevel: 'normal' },
+  });
+  sdopCadreIds.push(sCurrent.id, sOverdue.id);
+  await prisma.report.create({
+    data: {
+      cadreId: sCurrent.id, reportedById: sdopOfficerId, reportingPlace: 'thana',
+      specificLocation: 'x', personStatus: 'alive', currentPhone: '+910', currentActivity: 'y',
+      reportedAt: new Date(Date.now() - 2 * DAY_MS), // within 30 days -> current
+    },
+  });
+  // sOverdue gets no report at all -> never-reported, counts as overdue.
 });
 
 afterAll(async () => {
-  await prisma.report.deleteMany({ where: { cadreId: { in: cadreIds } } });
+  await prisma.report.deleteMany({ where: { cadreId: { in: [...cadreIds, ...sdopCadreIds] } } });
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
-  // Both fixture users — leaving the admin behind would let it drift into another
-  // file's assertions (Sampark-Backend#3).
-  await prisma.notification.deleteMany({ where: { user: { phone: { in: [PHONE, ADMIN_PHONE, HQ_PHONE] } } } });
-  await prisma.user.deleteMany({ where: { phone: { in: [PHONE, ADMIN_PHONE, HQ_PHONE] } } });
+  // All fixture users — leaving one behind would let it drift into another file's
+  // assertions (Sampark-Backend#3).
+  const phones = [PHONE, ADMIN_PHONE, HQ_PHONE, SDOP_ADMIN_PHONE, SDOP_OFFICER_PHONE];
+  await prisma.notification.deleteMany({ where: { user: { phone: { in: phones } } } });
+  await prisma.user.deleteMany({ where: { phone: { in: phones } } });
   await prisma.$disconnect();
 });
 
@@ -317,6 +375,86 @@ describe('stats', () => {
     expect(s.reportingRecency.current).toBeGreaterThanOrEqual(1);   // OTHER, 2 days ago
     expect(s.reportingRecency.overdue1m).toBeGreaterThanOrEqual(1); // THANA, 40 days ago
     expect(s.reportingRecency.overdue3m).toBeGreaterThanOrEqual(1); // ALERT, never
+    await app.close();
+  });
+
+  // ── /stats/hierarchy (ADR-055) ──────────────────────────────────────────────
+
+  it('GET /stats/hierarchy without a token → 401', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/hierarchy' });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('an officer is refused (403) — same admin+ gate as /stats/dashboard', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/stats/hierarchy', headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('an SDOP gets one row per officer in their own sub-division, with exact numbers', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/stats/hierarchy', headers: auth(sdopAdminToken),
+    });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as HierarchyStats;
+    expect(s.level).toBe('officers');
+
+    const row = s.rows.find((r) => r.name === sdopOfficerName);
+    expect(row).toBeDefined();
+    expect(row!.thana).toBe(SDOP_THANA);
+    expect(row!.subDivision).toBeNull();
+    // Exact: this officer's id is unique to this fixture, so nothing outside this
+    // file's setup contributes to their two assigned cadres.
+    expect(row!.assignedCadres).toBe(2);
+    expect(row!.overdueCadres).toBe(1); // never-reported
+    expect(row!.currentCadres).toBe(1); // reported 2 days ago
+    expect(row!.reportingCompletion).toBe(50);
+
+    // Group rollup is an invariant regardless of what else shares 'गंगालूर' thana.
+    expect(s.totalAssigned).toBe(s.rows.reduce((sum, r) => sum + r.assignedCadres, 0));
+    expect(s.totalCurrent).toBe(s.rows.reduce((sum, r) => sum + r.currentCadres, 0));
+    expect(s.overallCompletion).toBe(
+      s.totalAssigned === 0 ? 0 : Math.round((s.totalCurrent / s.totalAssigned) * 100),
+    );
+    expect(s.unassignedCadres).toBeGreaterThanOrEqual(0);
+    await app.close();
+  });
+
+  it('HQ gets one row per SDOP, summing that SDOP\'s officers — the aggregate ratio, not an average', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/stats/hierarchy', headers: auth(hqToken),
+    });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as HierarchyStats;
+    expect(s.level).toBe('admins');
+
+    const row = s.rows.find((r) => r.name === sdopAdminName);
+    expect(row).toBeDefined();
+    expect(row!.subDivision).toBe(SDOP_SUB_DIVISION);
+    expect(row!.thana).toBeNull();
+    // Lower bounds, not exact: another test file's fixture could also post an
+    // officer to 'गंगालूर' thana, and this row sums EVERY officer there, not just
+    // this file's one. What is exact is that this fixture's contribution is present.
+    expect(row!.assignedCadres).toBeGreaterThanOrEqual(2);
+    expect(row!.overdueCadres).toBeGreaterThanOrEqual(1);
+    expect(row!.currentCadres).toBeGreaterThanOrEqual(1);
+    expect(row!.reportingCompletion).toBe(
+      Math.round((row!.currentCadres / row!.assignedCadres) * 100),
+    );
+
+    // NOT exact equality to the sum of admin rows (ADR-055 Consequences): the
+    // top-level total is computed from ALL officers directly, and this suite's
+    // OTHER fixture officer sits on thana 'स्टैट', which resolves to no sub-division
+    // — so they contribute to the total but appear under no admin row.
+    expect(s.totalAssigned).toBeGreaterThanOrEqual(s.rows.reduce((sum, r) => sum + r.assignedCadres, 0));
+    expect(s.totalCurrent).toBeGreaterThanOrEqual(s.rows.reduce((sum, r) => sum + r.currentCadres, 0));
     await app.close();
   });
 });

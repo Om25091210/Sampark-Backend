@@ -14,6 +14,17 @@ const EXAMPLE_DASHBOARD_STATS = {
   },
 };
 
+const EXAMPLE_HIERARCHY_STATS = {
+  level: 'officers',
+  rows: [
+    { id: 12, name: 'SHOGNGL07', thana: 'गंगालूर', subDivision: null, assignedCadres: 6, overdueCadres: 1, currentCadres: 5, reportingCompletion: 83 },
+  ],
+  totalAssigned: 6,
+  totalCurrent: 5,
+  overallCompletion: 83,
+  unassignedCadres: 2,
+};
+
 const EXAMPLE_OFFICER_STATS = {
   assignedCadres: 4,
   overdueCadres: 1,
@@ -96,5 +107,31 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (request) => service.forOfficer(request.authUser!.sub, request.scope!),
+  );
+
+  // ADR-055. The rolled-up view: an SDOP sees each of their own officers side by
+  // side, HQ sees each SDOP's consolidated number. Same admin+ gate as
+  // /stats/dashboard (ADR-030) — which row shape comes back is derived from the
+  // caller's own resolved scope (ADR-044), not a second role check.
+  app.get(
+    '/stats/hierarchy',
+    {
+      preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
+      schema: {
+        tags: ['Stats'],
+        summary: 'Rolled-up completion by officer (SDOP caller) or by SDOP (HQ caller)',
+        description:
+          'An SDOP (admin) gets one row per officer in their own sub-division. HQ (super_admin) ' +
+          'gets one row per SDOP, each summing that SDOP\'s officer rows. Every row is shaped like ' +
+          '/stats/me (assignedCadres/overdueCadres/currentCadres/reportingCompletion, same flat ' +
+          '30-day overdue rule). The response also carries the group rollup as an aggregate ratio ' +
+          '(SUM currentCadres / SUM assignedCadres — never an average of the rows\' own percentages) ' +
+          'and unassignedCadres, excluded from that ratio because a cadre nobody is assigned to is a ' +
+          'staffing gap, not a specific officer\'s reporting lapse.',
+        security: bearerAuth,
+        response: { 200: jsonResponse('Hierarchy stats', EXAMPLE_HIERARCHY_STATS) },
+      },
+    },
+    async (request) => service.hierarchy(request.scope!),
   );
 }

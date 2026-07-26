@@ -1,9 +1,10 @@
 import type { FastifyBaseLogger } from 'fastify';
-import { cadreScopeWhere, type CadreScope } from '../../lib/scope.js';
+import { cadreScopeWhere, thanasForSubDivision, type CadreScope } from '../../lib/scope.js';
+import { nfc } from '../../lib/text.js';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { REPORTING_CADENCE_DAYS } from '../../lib/serialize.js';
 import { recencyTierWhere } from '../../lib/recency.js';
-import type { DashboardStats, OfficerStats } from './stats.schema.js';
+import type { DashboardStats, HierarchyRow, HierarchyStats, OfficerStats } from './stats.schema.js';
 
 export interface StatsDeps {
   prisma: PrismaClient;
@@ -17,6 +18,8 @@ export interface StatsService {
   dashboard(scope: CadreScope): Promise<DashboardStats>;
   /** ADR-031. The caller's own numbers. Aggregated in SQL, never over one page. */
   forOfficer(officerId: number, scope: CadreScope): Promise<OfficerStats>;
+  /** ADR-055. The rolled-up view: an SDOP's own officers, or HQ's own SDOPs. */
+  hierarchy(scope: CadreScope): Promise<HierarchyStats>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -208,6 +211,113 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         reportsByPlace: { thana: placeThana, village: placeVillage },
         cadresByCategory: { surrendered: catSurrendered, jail: catJail, thana: catThana },
       };
+    },
+
+    async hierarchy(scope) {
+      const monthAgo = new Date(Date.now() - REPORTING_CADENCE_DAYS * DAY_MS);
+
+      // The roster to report on: every officer for HQ, just the SDOP's own for an admin.
+      const officerWhere: Prisma.UserWhereInput = { role: 'officer', deletedAt: null };
+      if (scope.kind !== 'all') officerWhere.thana = { in: [...scope.thanas] };
+      const officers = await prisma.user.findMany({
+        where: officerWhere,
+        select: { id: true, name: true, thana: true },
+        orderBy: { name: 'asc' },
+      });
+
+      // One grouped query over EVERY live assignment — cheaper and simpler than an
+      // `= ANY(...)` array parameter, and the officer list above already bounds which
+      // rows of this get used. Same "no live report in REPORTING_CADENCE_DAYS" rule
+      // `/stats/me`'s `overdueCadres` uses, so a row here and that officer's own
+      // reading of themselves can never disagree.
+      const grouped = await prisma.$queryRaw<{ officerId: number; assigned: bigint; overdue: bigint }[]>`
+        SELECT c.assigned_officer_id AS "officerId",
+               COUNT(*) AS assigned,
+               COUNT(*) FILTER (
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM reports r
+                   WHERE r.cadre_id = c.id AND r.deleted_at IS NULL AND r.reported_at >= ${monthAgo}
+                 )
+               ) AS overdue
+        FROM cadres c
+        WHERE c.deleted_at IS NULL AND c.assigned_officer_id IS NOT NULL
+        GROUP BY c.assigned_officer_id
+      `;
+      const byOfficer = new Map(
+        grouped.map((g) => [g.officerId, { assigned: Number(g.assigned), overdue: Number(g.overdue) }]),
+      );
+
+      const officerRows: HierarchyRow[] = officers.map((o) => {
+        const g = byOfficer.get(o.id) ?? { assigned: 0, overdue: 0 };
+        const current = g.assigned - g.overdue;
+        return {
+          id: o.id,
+          name: o.name,
+          thana: o.thana,
+          subDivision: null,
+          assignedCadres: g.assigned,
+          overdueCadres: g.overdue,
+          currentCadres: current,
+          // 0 when nothing is assigned — same rule ADR-031 gives a single officer,
+          // extended to a row: nothing to report on is not 100% reported.
+          reportingCompletion: g.assigned === 0 ? 0 : Math.round((current / g.assigned) * 100),
+        };
+      });
+
+      const rollup = (rows: HierarchyRow[]) => {
+        const totalAssigned = rows.reduce((s, r) => s + r.assignedCadres, 0);
+        const totalCurrent = rows.reduce((s, r) => s + r.currentCadres, 0);
+        return {
+          totalAssigned,
+          totalCurrent,
+          // The aggregate ratio, not an average of each row's own percentage
+          // (ADR-055 Context §1) — a lightly-loaded row cannot swing this number.
+          overallCompletion: totalAssigned === 0 ? 0 : Math.round((totalCurrent / totalAssigned) * 100),
+        };
+      };
+
+      // Cadres nobody is responsible for — a staffing gap, not a specific officer's
+      // lapse, so excluded from the ratio above and surfaced on its own (ADR-055
+      // Context §2).
+      const unassignedCadres = await prisma.cadre.count({
+        where: { deletedAt: null, assignedOfficerId: null, ...cadreScopeWhere(scope) },
+      });
+
+      if (scope.kind !== 'all') {
+        return { level: 'officers', rows: officerRows, ...rollup(officerRows), unassignedCadres };
+      }
+
+      // HQ view: bucket the same officer rows into their sub-division's admin, via
+      // the fixed 9-entry table `resolveCadreScope` already uses — JS-side grouping
+      // over a handful of pre-aggregated rows, not over cadre/report rows.
+      const admins = await prisma.user.findMany({
+        where: { role: 'admin', deletedAt: null },
+        select: { id: true, name: true, subDivision: true },
+        orderBy: { name: 'asc' },
+      });
+
+      const adminRows: HierarchyRow[] = admins.map((a) => {
+        const thanas = thanasForSubDivision(a.subDivision).map(nfc);
+        const under = officerRows.filter((o) => o.thana !== null && thanas.includes(nfc(o.thana)));
+        const assigned = under.reduce((s, r) => s + r.assignedCadres, 0);
+        const overdue = under.reduce((s, r) => s + r.overdueCadres, 0);
+        const current = under.reduce((s, r) => s + r.currentCadres, 0);
+        return {
+          id: a.id,
+          name: a.name,
+          thana: null,
+          subDivision: a.subDivision,
+          assignedCadres: assigned,
+          overdueCadres: overdue,
+          currentCadres: current,
+          reportingCompletion: assigned === 0 ? 0 : Math.round((current / assigned) * 100),
+        };
+      });
+
+      // Top-level totals come from ALL officer rows directly, not from summing the
+      // admin rows — an officer whose thana matches no sub-division (bad/legacy data)
+      // still counts here even though no admin row claims them (ADR-055 Consequences).
+      return { level: 'admins', rows: adminRows, ...rollup(officerRows), unassignedCadres };
     },
   };
 }

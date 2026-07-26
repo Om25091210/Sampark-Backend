@@ -48,6 +48,14 @@ export const SUB_DIVISION_THANAS: Readonly<Record<string, readonly string[]>> = 
 /** The 22 canonical thanas, flattened. */
 export const CANONICAL_THANAS: readonly string[] = Object.values(SUB_DIVISION_THANAS).flat();
 
+/** The thanas a sub-division owns, or `[]` for `null` or an unrecognised name. Shared by
+ *  `resolveCadreScope` (an SDOP's own scope) and ADR-055's hierarchy rollup (bucketing
+ *  officers to their SDOP) — one definition of "which thanas belong to this sub-division". */
+export function thanasForSubDivision(subDivision: string | null): readonly string[] {
+  if (subDivision === null) return [];
+  return SUB_DIVISION_THANAS[nfc(subDivision)] ?? [];
+}
+
 /**
  * What a principal is allowed to see.
  * `all` = unrestricted (HQ). `thanas` = exactly these; an EMPTY list means "nothing",
@@ -83,13 +91,13 @@ export function resolveCadreScope(
   if (user.role === 'super_admin') return SCOPE_ALL;
 
   if (user.role === 'admin') {
-    if (user.subDivision === null) {
-      onMisscoped?.('admin account has no subDivision - scoped to nothing');
-      return { kind: 'thanas', thanas: [] };
-    }
-    const thanas = SUB_DIVISION_THANAS[nfc(user.subDivision)];
-    if (thanas === undefined) {
-      onMisscoped?.(`admin subDivision "${user.subDivision}" is not one of the 9 - scoped to nothing`);
+    const thanas = thanasForSubDivision(user.subDivision);
+    if (thanas.length === 0) {
+      onMisscoped?.(
+        user.subDivision === null
+          ? 'admin account has no subDivision - scoped to nothing'
+          : `admin subDivision "${user.subDivision}" is not one of the 9 - scoped to nothing`,
+      );
       return { kind: 'thanas', thanas: [] };
     }
     return { kind: 'thanas', thanas };
