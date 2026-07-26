@@ -257,6 +257,14 @@ model Cadre {
   // legacy `avatarUrl` above stays for rows that predate this; the serializer
   // prefers a freshly-signed `avatarKey` and falls back to it.
   avatarKey          String?           @map("avatar_key")
+  // ADR-054. Two more independent photo slots (up to 3 total). Each is its own
+  // nullable S3 key — same pattern as `avatarKey` above, not an array: the
+  // change-request lock/apply engine keys off literal column names, so a real
+  // column per slot gives each photo its own independent approval lock (matching
+  // the four-hardcopy-documents precedent, ADR-029) instead of one lock across all
+  // three, which an `avatarKeys[]` array would have forced.
+  avatarKey2         String?           @map("avatar_key_2")
+  avatarKey3         String?           @map("avatar_key_3")
   assignedOfficerId  Int?              @map("assigned_officer_id")
   // ADR-027. Who last changed this record's contents, and when. Deliberately NOT
   // `updatedAt`: that moves on every write including assignment transfers, so it

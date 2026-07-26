@@ -141,28 +141,35 @@ function awaitingRole(r: CadreChangeRequest): 'admin' | 'super_admin' | undefine
 
 type SignFn = (key: string) => Promise<string>;
 
+// ADR-054. All three independent photo slots get signed previews the same way —
+// still "only a photo needs looking at", just three fields instead of one now.
+const AVATAR_FIELDS = ['avatarKey', 'avatarKey2', 'avatarKey3'] as const;
+
 /**
- * ADR-029. Attaches signed previews to an `avatarKey` entry. Everything else is
- * passed through untouched — only a photo needs looking at.
+ * ADR-029 / ADR-054. Attaches signed previews to whichever avatar-slot entries a
+ * request actually carries. Everything else is passed through untouched.
  */
 async function withPreviews(
   changes: Record<string, WireChangeEntry>,
   sign: SignFn,
 ): Promise<Record<string, WireChangeEntry>> {
-  const entry = changes.avatarKey;
-  if (entry === undefined) return changes;
-
   const signIfKey = async (v: JsonValue): Promise<string | undefined> =>
     typeof v === 'string' && v !== '' ? sign(v) : undefined;
 
-  return {
-    ...changes,
-    avatarKey: {
-      ...entry,
-      oldUrl: await signIfKey(entry.old),
-      newUrl: await signIfKey(entry.new),
-    },
-  };
+  let out = changes;
+  for (const field of AVATAR_FIELDS) {
+    const entry = out[field];
+    if (entry === undefined) continue;
+    out = {
+      ...out,
+      [field]: {
+        ...entry,
+        oldUrl: await signIfKey(entry.old),
+        newUrl: await signIfKey(entry.new),
+      },
+    };
+  }
+  return out;
 }
 
 async function toWire(r: Row, sign: SignFn): Promise<WireChangeRequest> {

@@ -62,6 +62,10 @@ export interface WireCadre {
   filter?: NonNullable<Cadre['filter']>;
   alertLevel: Cadre['alertLevel'];
   avatarUrl?: string;
+  // ADR-054. Two more independent photo slots, each its own signed URL — no legacy
+  // fallback (only `avatarUrl`/`avatarKey` predate this), absent when the slot is empty.
+  avatarUrl2?: string;
+  avatarUrl3?: string;
   alertDate?: string;
   incident?: string;
   verificationOffice?: string;
@@ -182,6 +186,9 @@ export interface CadreEditContext {
    * calls. Absent → falls back to the legacy `avatarUrl` column.
    */
   avatarUrl?: string;
+  /** ADR-054. Same idea, for the two additional independent photo slots. */
+  avatarUrl2?: string;
+  avatarUrl3?: string;
 }
 
 // `lastReportedAt` is the cadre's most recent (non-deleted) report date, or null
@@ -222,6 +229,10 @@ export function toWireCadre(
     // key itself — the client renders a URL, and a stored URL is what ADR-016
     // taught us not to trust.
     avatarUrl: edit?.avatarUrl ?? c.avatarUrl ?? undefined,
+    // ADR-054. No legacy column to fall back to — these two slots did not exist
+    // before this ADR, so the signed URL (or absence) is the whole answer.
+    avatarUrl2: edit?.avatarUrl2,
+    avatarUrl3: edit?.avatarUrl3,
     alertDate: c.alertDate?.toISOString(),
     incident: c.incident ?? undefined,
     verificationOffice: c.verificationOffice ?? undefined,

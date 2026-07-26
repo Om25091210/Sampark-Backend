@@ -219,18 +219,25 @@ export function makeCadresService({
   // transfer()/transferThana()'s transaction commits.
   const dispatchDeps: NotificationDispatchDeps = { prisma, pushProvider, log };
   /**
-   * ADR-029. Signs each row's `avatarKey` into a fresh GET URL. Only rows that
-   * actually carry a key cost an S3 call, so a page of cadres with no photos costs
-   * nothing.
+   * ADR-029 / ADR-054. Signs each row's up-to-three avatar keys into fresh GET
+   * URLs. `presignGet` is a local SigV4 computation, not an S3 round trip (see
+   * ADR-054), so signing all three costs nothing beyond CPU even at full occupancy;
+   * a row with no photos in a given slot still costs nothing for that slot.
    */
   async function avatarUrlsFor(
-    rows: { id: number; avatarKey: string | null }[],
-  ): Promise<Map<number, string>> {
-    const out = new Map<number, string>();
-    const withKey = rows.filter((r) => r.avatarKey !== null);
+    rows: { id: number; avatarKey: string | null; avatarKey2: string | null; avatarKey3: string | null }[],
+  ): Promise<Map<number, { avatarUrl?: string; avatarUrl2?: string; avatarUrl3?: string }>> {
+    const out = new Map<number, { avatarUrl?: string; avatarUrl2?: string; avatarUrl3?: string }>();
     await Promise.all(
-      withKey.map(async (r) => {
-        out.set(r.id, await storage.presignGet(r.avatarKey!, mediaUrlTtlSeconds));
+      rows.map(async (r) => {
+        const [avatarUrl, avatarUrl2, avatarUrl3] = await Promise.all([
+          r.avatarKey !== null ? storage.presignGet(r.avatarKey, mediaUrlTtlSeconds) : undefined,
+          r.avatarKey2 !== null ? storage.presignGet(r.avatarKey2, mediaUrlTtlSeconds) : undefined,
+          r.avatarKey3 !== null ? storage.presignGet(r.avatarKey3, mediaUrlTtlSeconds) : undefined,
+        ]);
+        if (avatarUrl !== undefined || avatarUrl2 !== undefined || avatarUrl3 !== undefined) {
+          out.set(r.id, { avatarUrl, avatarUrl2, avatarUrl3 });
+        }
       }),
     );
     return out;
@@ -346,7 +353,7 @@ export function makeCadresService({
         data: rows.map((r) =>
           toWireCadre(r, r.reports[0]?.reportedAt ?? null, {
             pendingFields: pending.get(r.id) ?? [],
-            avatarUrl: avatars.get(r.id),
+            ...avatars.get(r.id),
           }),
         ),
         total,
@@ -408,7 +415,7 @@ export function makeCadresService({
       ]);
       return toWireCadre(cadre, cadre.reports[0]?.reportedAt ?? null, {
         pendingFields: pending.get(cadre.id) ?? [],
-        avatarUrl: avatars.get(cadre.id),
+        ...avatars.get(cadre.id),
       });
     },
 

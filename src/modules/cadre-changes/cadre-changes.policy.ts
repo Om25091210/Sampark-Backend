@@ -57,7 +57,11 @@ export const APPROVAL_FIELDS = [
   // ADR-029. The cadre's photo, proposed as a durable S3 key (uploaded first, then
   // proposed). Approval-gated for the same reason as the name: it is a claim about
   // who this person IS, and the approver is shown the proposed image to judge it.
+  // ADR-054. Two more independent slots, each its own field — not an array — so
+  // each photo locks independently, same reasoning as the four documents below.
   'avatarKey',
+  'avatarKey2',
+  'avatarKey3',
   // ADR-036. Date of birth and immediate family. Facts of record about a person,
   // signed off like the name — a wrong birth date or parent's name is exactly the
   // kind of identity claim the approval chain exists to catch.

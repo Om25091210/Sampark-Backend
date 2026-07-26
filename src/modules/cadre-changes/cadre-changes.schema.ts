@@ -37,6 +37,9 @@ const fieldValue = {
   // a path the client invents: an unchecked string here would let a caller point a
   // cadre's photo at any object in the bucket.
   avatarKey: z.string().trim().min(1).max(1024).nullable(),
+  // ADR-054. Two more independent photo slots — same validator shape as avatarKey.
+  avatarKey2: z.string().trim().min(1).max(1024).nullable(),
+  avatarKey3: z.string().trim().min(1).max(1024).nullable(),
   // ADR-036. An ISO datetime like surrenderDate; the service coerces it to a Date
   // (DATE_FIELDS) and the column is `@db.Date`, so only the date part is stored.
   // A future birth date is not validated here — it is nonsensical but harmless, and
