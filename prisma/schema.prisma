@@ -112,6 +112,20 @@ enum PriorityCategory {
   death
 }
 
+// This task (item 7). A SEPARATE, permanent classification — deliberately NOT a
+// value added to PriorityCategory or CadreCategory (confirmed with the
+// maintainer): फौत (deceased) here is its own field, distinct from
+// PriorityCategory's existing `death` grade, and the other three (शासकीय नौकरी /
+// GS / अन्य जिले में निवासरत) never were priority grades at all. Any of the four
+// is a PERMANENT mark meaning "no attendance/reporting required going forward" —
+// see recency.ts's exemption and reports.service.ts's ADR-049-style block.
+enum PermanentStatus {
+  deceased
+  government_job
+  gs
+  living_elsewhere
+}
+
 // ─── Users (officers + admins) ─────────────────────────────────────────────────
 
 model User {
@@ -191,6 +205,12 @@ model Cadre {
   thana              String
   currentAddress     String            @map("current_address")
   permanentAddress   String?           @map("permanent_address")
+  // This task, item 5. The name of the village the cadre is CURRENTLY residing in —
+  // distinct from currentAddress (a free-text full address) and from thana/
+  // subDivision/district (jurisdiction, not a village name). Nullable: no existing
+  // data source supplies it yet. Approval-gated like every other fact of record
+  // (cadre-changes.policy.ts).
+  residingVillage    String?           @map("residing_village")
   designation        String
   category           CadreCategory
   // ADR-046. Priority GRADE from the register's कैटेगरी column — separate from
@@ -198,6 +218,9 @@ model Cadre {
   // Nullable because existing rows predate it; the CSV backfill (category-backfill
   // route) and the ADR-038 import supply it — same posture as serialNumber/dateOfBirth.
   priorityCategory   PriorityCategory? @map("priority_category")
+  // This task (item 7). Separate from priorityCategory — see the enum's comment.
+  // Nullable; null = no permanent mark. Approval-gated (cadre-changes.policy.ts).
+  permanentStatus    PermanentStatus?  @map("permanent_status")
   filter             CadreFilter?
   alertLevel         AlertLevel        @map("alert_level")
   avatarUrl          String?           @map("avatar_url")
@@ -300,6 +323,8 @@ model Cadre {
   @@index([assignedOfficerId])
   // ADR-046. The recency queries filter on priorityCategory (per-category cadence).
   @@index([priorityCategory])
+  // This task (item 7). recency.ts filters on permanentStatus the same way.
+  @@index([permanentStatus])
   // The two surrendered dashboard tiles both filter category + origin together.
   @@index([category, surrenderOrigin])
   @@map("cadres")

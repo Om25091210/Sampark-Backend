@@ -197,6 +197,35 @@ describe('cadre change requests (ADR-026)', () => {
     await app.close();
   });
 
+  // This task, item 5: residingVillage — approval-gated like currentAddress.
+  it('residingVillage goes through the same approval chain as any other fact of record', async () => {
+    const app = await makeApp();
+    const req = await submit(app, superToken, { residingVillage: 'नया गाँव' });
+    expect(req.status).toBe('applied');
+    expect(
+      (await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).residingVillage,
+    ).toBe('नया गाँव');
+    await app.close();
+  });
+
+  // This task, item 7: permanentStatus — a SEPARATE field from priorityCategory,
+  // same approval weight (a permanent claim about a person).
+  it('permanentStatus goes through the approval chain, and can be cleared back to null', async () => {
+    const app = await makeApp();
+    const req = await submit(app, superToken, { permanentStatus: 'government_job' });
+    expect(req.status).toBe('applied');
+    expect(
+      (await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).permanentStatus,
+    ).toBe('government_job');
+
+    const clear = await submit(app, superToken, { permanentStatus: null });
+    expect(clear.status).toBe('applied');
+    expect(
+      (await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).permanentStatus,
+    ).toBeNull();
+    await app.close();
+  });
+
   // ── ADR-036: dateOfBirth + relations go through the approval chain ──────────
 
   it('applies dateOfBirth (as a Date) and the three relation names', async () => {

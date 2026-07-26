@@ -58,6 +58,7 @@ interface Stats {
     thana: number;
     jail: number;
   };
+  alertLevelBreakdown: { normal: number; warning: number; critical: number };
 }
 
 beforeAll(async () => {
@@ -194,18 +195,22 @@ describe('stats', () => {
     await app.close();
   });
 
-  // ADR-030. These are org-wide supervisory counts — every cadre, every alert,
-  // everyone's reports. This endpoint previously took `[app.authenticate]` only, so
-  // an officer's own home screen rendered the whole organisation's posture, and any
-  // officer could curl it. Unlike `assignedTo=me` (a filter over rows the caller can
-  // already page through), an aggregate is not something an officer could assemble
-  // for themselves — so it is a real access boundary, not a view concern.
-  it('an officer is refused (403) — the aggregate is not theirs to read', async () => {
+  // ADR-030 revised (this task, item 4). An officer is now ALLOWED — the leak
+  // ADR-030 closed was an UNSCOPED read of the whole force; ADR-044 scoping since
+  // makes this call return only the officer's own thana, no wider than what
+  // `GET /cadres` already hands them. Asserted EXACTLY (not a lower bound): thana
+  // 'स्टैट' is this file's own fixture station, so nothing outside this file's
+  // setup can land in the officer's scoped count.
+  it('an officer is allowed, and the numbers are scoped to their own thana only', async () => {
     const app = await makeApp();
     const res = await app.inject({
       method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(officerToken),
     });
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as Stats;
+    expect(s.totalCadres).toBe(3); // exactly this file's three थाना-'स्टैट' fixtures
+    expect(s.byCategory.surrendered.total).toBe(2);
+    expect(s.byCategory.thana).toBe(1);
     await app.close();
   });
 
@@ -378,6 +383,30 @@ describe('stats', () => {
     await app.close();
   });
 
+  // ── alertLevelBreakdown (this task, item 1) ─────────────────────────────────
+
+  it('alertLevelBreakdown is three integer percentages that sum to exactly 100', async () => {
+    const app = await makeApp();
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(hqToken) })).json() as Stats;
+    const b = s.alertLevelBreakdown;
+    for (const n of [b.normal, b.warning, b.critical]) {
+      expect(Number.isInteger(n)).toBe(true);
+      expect(n).toBeGreaterThanOrEqual(0);
+    }
+    // Exact regardless of other files' rows — every live cadre is in exactly one
+    // AlertLevel, so their percentage shares always sum to the whole (largest-
+    // remainder rounding, never left short or over by a point).
+    expect(b.normal + b.warning + b.critical).toBe(100);
+    await app.close();
+  });
+
+  it('this fixture\'s one critical cadre moves the critical share above zero', async () => {
+    const app = await makeApp();
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(hqToken) })).json() as Stats;
+    expect(s.alertLevelBreakdown.critical).toBeGreaterThanOrEqual(1);
+    await app.close();
+  });
+
   // ── /stats/hierarchy (ADR-055) ──────────────────────────────────────────────
 
   it('GET /stats/hierarchy without a token → 401', async () => {
@@ -402,7 +431,10 @@ describe('stats', () => {
       method: 'GET', url: '/api/v1/stats/hierarchy', headers: auth(sdopAdminToken),
     });
     expect(res.statusCode).toBe(200);
-    const s = res.json() as HierarchyStats;
+    // Narrowed at the type level (not just the runtime `expect` below) — `rows`'
+    // element shape depends on `level`, and only the 'officers'/'admins' variants
+    // carry `name`/`id`.
+    const s = res.json() as Extract<HierarchyStats, { level: 'officers' }>;
     expect(s.level).toBe('officers');
 
     const row = s.rows.find((r) => r.name === sdopOfficerName);
@@ -432,7 +464,7 @@ describe('stats', () => {
       method: 'GET', url: '/api/v1/stats/hierarchy', headers: auth(hqToken),
     });
     expect(res.statusCode).toBe(200);
-    const s = res.json() as HierarchyStats;
+    const s = res.json() as Extract<HierarchyStats, { level: 'admins' }>;
     expect(s.level).toBe('admins');
 
     const row = s.rows.find((r) => r.name === sdopAdminName);
@@ -455,6 +487,69 @@ describe('stats', () => {
     // — so they contribute to the total but appear under no admin row.
     expect(s.totalAssigned).toBeGreaterThanOrEqual(s.rows.reduce((sum, r) => sum + r.assignedCadres, 0));
     expect(s.totalCurrent).toBeGreaterThanOrEqual(s.rows.reduce((sum, r) => sum + r.currentCadres, 0));
+    await app.close();
+  });
+
+  // ── /stats/hierarchy?by=thana (this task, item 1) ───────────────────────────
+
+  it('?by=thana for an SDOP: one row for their own thana, scoped, with exact numbers', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/stats/hierarchy?by=thana', headers: auth(sdopAdminToken),
+    });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as HierarchyStats;
+    expect(s.level).toBe('thanas');
+
+    // गंगालूर is a single-thana sub-division (see scope.ts), so an SDOP scoped to it
+    // gets exactly one row — proving the thana breakdown is jurisdiction-scoped
+    // (ADR-044), not the whole district.
+    expect(s.rows).toHaveLength(1);
+    const row = s.rows[0]!;
+    expect(row.thana).toBe(SDOP_THANA);
+    expect(row.subDivision).toBe(SDOP_SUB_DIVISION);
+    // ALL live cadres at this thana, not just assigned ones — but every cadre this
+    // suite put at गंगालूर IS assigned, so the count is exact regardless of what
+    // other files' fixtures add here.
+    expect(row.assignedCadres).toBeGreaterThanOrEqual(2);
+    expect(row.overdueCadres).toBeGreaterThanOrEqual(1);
+    expect(row.reportingCompletion).toBe(
+      row.assignedCadres === 0 ? 0 : Math.round((row.currentCadres / row.assignedCadres) * 100),
+    );
+    await app.close();
+  });
+
+  it('?by=thana for HQ: every canonical thana appears, including ones with zero cadres', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/stats/hierarchy?by=thana', headers: auth(hqToken),
+    });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as HierarchyStats;
+    expect(s.level).toBe('thanas');
+
+    // All 22 canonical thanas are present — an empty one still gets a 0/0/0% row
+    // rather than being dropped, so the list reads as a data gap, not a false all-clear.
+    expect(s.rows.length).toBe(22);
+    const row = s.rows.find((r) => r.thana === SDOP_THANA);
+    expect(row).toBeDefined();
+    expect(row!.subDivision).toBe(SDOP_SUB_DIVISION);
+    expect(row!.assignedCadres).toBeGreaterThanOrEqual(2);
+
+    const empty = s.rows.find((r) => r.assignedCadres === 0);
+    if (empty !== undefined) {
+      expect(empty.reportingCompletion).toBe(0);
+      expect(empty.currentCadres).toBe(0);
+    }
+    await app.close();
+  });
+
+  it('an officer is refused (403) on the thana breakdown too — same admin+ gate', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/stats/hierarchy?by=thana', headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(403);
     await app.close();
   });
 });

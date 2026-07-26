@@ -37,6 +37,16 @@ export const dashboardStatsResponse = z.object({
     thana: z.number().int(),
     jail: z.number().int(),
   }),
+  // सामान्य/अति-आवश्यक/चेतावनी as PERCENTAGES of every live cadre in scope — guaranteed
+  // to sum to exactly 100 (largest-remainder rounding, see percentagesOf100 in the
+  // service), not raw counts the client would otherwise have to turn into a share
+  // itself. `AlertLevel` is a strict 3-value partition, so these three cover every
+  // live cadre with none left over.
+  alertLevelBreakdown: z.object({
+    normal: z.number().int(),
+    warning: z.number().int(),
+    critical: z.number().int(),
+  }),
 });
 
 export type DashboardStats = z.infer<typeof dashboardStatsResponse>;
@@ -108,11 +118,23 @@ export const hierarchyRow = z.object({
 
 export type HierarchyRow = z.infer<typeof hierarchyRow>;
 
-export const hierarchyStatsResponse = z.object({
-  // 'officers' for an SDOP caller, 'admins' for HQ — tells the client which of a
-  // row's `thana`/`subDivision` fields is the meaningful one.
-  level: z.enum(['officers', 'admins']),
-  rows: z.array(hierarchyRow),
+// A THANA-level row (this task's extension of ADR-055): the dashboard's third card
+// wants a per-thana completion breakdown, not per-officer or per-SDOP. Unlike
+// `hierarchyRow`, "assignedCadres" here means every live cadre AT that thana
+// (Cadre.thana), not just those with an assigned officer — a thana's reporting
+// completion is a fact about the thana, not about staffing.
+export const hierarchyThanaRow = z.object({
+  thana: z.string(),
+  subDivision: z.string().nullable(),
+  assignedCadres: z.number().int(),
+  overdueCadres: z.number().int(),
+  currentCadres: z.number().int(),
+  reportingCompletion: z.number().int(),
+});
+
+export type HierarchyThanaRow = z.infer<typeof hierarchyThanaRow>;
+
+const hierarchyRollupFields = {
   // SUM(currentCadres) / SUM(assignedCadres) across `rows` — the aggregate ratio,
   // never an average of each row's own percentage (ADR-055 Context §1).
   totalAssigned: z.number().int(),
@@ -122,6 +144,22 @@ export const hierarchyStatsResponse = z.object({
   // above — a staffing gap is not a specific officer's reporting lapse (ADR-055
   // Context §2) — and surfaced here instead of averaged away.
   unassignedCadres: z.number().int(),
-});
+};
+
+// `level` tells the client which row shape came back — 'thanas' is requested with
+// `?by=thana`; 'officers'/'admins' is the original ADR-055 behaviour, unchanged.
+export const hierarchyStatsResponse = z.discriminatedUnion('level', [
+  z.object({ level: z.literal('officers'), rows: z.array(hierarchyRow), ...hierarchyRollupFields }),
+  z.object({ level: z.literal('admins'), rows: z.array(hierarchyRow), ...hierarchyRollupFields }),
+  z.object({ level: z.literal('thanas'), rows: z.array(hierarchyThanaRow), ...hierarchyRollupFields }),
+]);
 
 export type HierarchyStats = z.infer<typeof hierarchyStatsResponse>;
+
+// `?by=thana` opts into the thana-level breakdown; omitted keeps the original
+// officer/admin behaviour.
+export const hierarchyQuery = z.object({
+  by: z.enum(['thana']).optional(),
+});
+
+export type HierarchyQuery = z.infer<typeof hierarchyQuery>;

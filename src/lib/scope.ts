@@ -56,6 +56,19 @@ export function thanasForSubDivision(subDivision: string | null): readonly strin
   return SUB_DIVISION_THANAS[nfc(subDivision)] ?? [];
 }
 
+/** Reverse of `thanasForSubDivision`, built once. Every canonical thana maps to
+ *  exactly one sub-division (the table is a partition — see the block comment
+ *  above and `scope.test.ts`), so `null` here only ever means "not one of the 22". */
+const THANA_TO_SUB_DIVISION: ReadonlyMap<string, string> = new Map(
+  Object.entries(SUB_DIVISION_THANAS).flatMap(([sd, thanas]) => thanas.map((t) => [nfc(t), sd] as const)),
+);
+
+/** The sub-division a canonical thana belongs to, for labelling a thana-level row
+ *  with its parent SDOP (ADR-055's hierarchy rollup, thana breakdown). */
+export function subDivisionForThana(thana: string): string | null {
+  return THANA_TO_SUB_DIVISION.get(nfc(thana)) ?? null;
+}
+
 /**
  * What a principal is allowed to see.
  * `all` = unrestricted (HQ). `thanas` = exactly these; an EMPTY list means "nothing",

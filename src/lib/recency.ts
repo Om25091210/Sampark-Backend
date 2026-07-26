@@ -59,11 +59,20 @@ function windowFor(caps: TierCaps, tier: RecencyTier, now: number): Prisma.Cadre
 // The graded/default branches. `null` (ungraded, pre-backfill) uses A's caps — the
 // same 30/60/90 the old REPORTING_CADENCE_DAYS default produced, so ungraded rows
 // don't shift behaviour just because this file changed.
+//
+// This task (item 7). Every branch also requires `permanentStatus: null` — a cadre
+// carrying a permanent status mark (फौत/शासकीय नौकरी/GS/अन्य जिले में निवासरत) must
+// NEVER fall into a per-category window branch regardless of report history,
+// exactly the same structural exclusion jail/death already get for free (their
+// priorityCategory value is neither A/B/C/null, so they never match here either).
+// Without this, a tagged cadre with an old historical report could match BOTH the
+// `current` push below AND an overdue branch, breaking the "exactly one tier"
+// invariant the whole file exists to guarantee.
 const CADENCE_BRANCHES: { match: Prisma.CadreWhereInput; caps: TierCaps }[] = [
-  { match: { priorityCategory: 'A' }, caps: TIER_CAPS.A },
-  { match: { priorityCategory: 'B' }, caps: TIER_CAPS.B },
-  { match: { priorityCategory: 'C' }, caps: TIER_CAPS.C },
-  { match: { priorityCategory: null }, caps: TIER_CAPS.A },
+  { match: { priorityCategory: 'A', permanentStatus: null }, caps: TIER_CAPS.A },
+  { match: { priorityCategory: 'B', permanentStatus: null }, caps: TIER_CAPS.B },
+  { match: { priorityCategory: 'C', permanentStatus: null }, caps: TIER_CAPS.C },
+  { match: { priorityCategory: null, permanentStatus: null }, caps: TIER_CAPS.A },
 ];
 
 export function recencyTierWhere(tier: RecencyTier): Prisma.CadreWhereInput {
@@ -71,10 +80,14 @@ export function recencyTierWhere(tier: RecencyTier): Prisma.CadreWhereInput {
   const branches: Prisma.CadreWhereInput[] = CADENCE_BRANCHES.map((b) => ({
     AND: [b.match, windowFor(b.caps, tier, now)],
   }));
-  // jail/death have no cadence, so they never go overdue — they belong to `current`
-  // only. Adding them here (and nowhere else) keeps the four tiers summing to the total.
   if (tier === 'current') {
+    // jail/death have no cadence, so they never go overdue — they belong to
+    // `current` only. Adding them here (and nowhere else) keeps the four tiers
+    // summing to the total.
     branches.push({ priorityCategory: { in: ['jail', 'death'] } });
+    // This task (item 7). Same treatment for any permanentStatus mark — see the
+    // CADENCE_BRANCHES comment above for why the exclusion there is required too.
+    branches.push({ permanentStatus: { not: null } });
   }
   return { OR: branches };
 }

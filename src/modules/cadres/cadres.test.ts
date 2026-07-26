@@ -1437,6 +1437,31 @@ describe('cadres per-category recency (ADR-046)', () => {
     return c.id;
   };
 
+  // This task, item 7: same "always current" exemption as jail/death, but via
+  // the SEPARATE permanentStatus field, not priorityCategory.
+  const makePermanentStatus = async (
+    suffix: string,
+    status: 'deceased' | 'government_job' | 'gs' | 'living_elsewhere',
+    daysDark: number,
+  ): Promise<number> => {
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${REC_TOKEN} ${suffix}`, phone: '+910000000701', thana: 'बीजापुर',
+        currentAddress: 'Rec fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], permanentStatus: status,
+      },
+    });
+    created.push(c.id);
+    await prisma.report.create({
+      data: {
+        cadreId: c.id, reportedById: officerAId, reportingPlace: 'thana', specificLocation: 'x',
+        personStatus: 'alive', currentPhone: '+910', currentActivity: 'y',
+        reportedAt: new Date(Date.now() - daysDark * 24 * 60 * 60 * 1000),
+      },
+    });
+    return c.id;
+  };
+
   afterAll(async () => {
     await prisma.report.deleteMany({ where: { cadreId: { in: created } } });
     await prisma.cadre.deleteMany({ where: { id: { in: created } } });
@@ -1467,6 +1492,43 @@ describe('cadres per-category recency (ADR-046)', () => {
     const jId = await makeGraded('JAIL', 'jail', 400);
     expect(await inTier(app, jId, 'current')).toBe(true);
     expect(await inTier(app, jId, 'overdue3m')).toBe(false);
+    await app.close();
+  });
+
+  // This task, item 7. Same exemption, but the cadre carries no priorityCategory
+  // at all (null defaults to grade A's cadence) — proving permanentStatus alone,
+  // independent of priorityCategory, keeps it out of every overdue tier.
+  it('a permanentStatus-tagged cadre is always current, however long dark, with no priorityCategory set', async () => {
+    const app = await makeApp();
+    const pId = await makePermanentStatus('PERMSTATUS', 'government_job', 400);
+    expect(await inTier(app, pId, 'current')).toBe(true);
+    expect(await inTier(app, pId, 'overdue1m')).toBe(false);
+    expect(await inTier(app, pId, 'overdue2m')).toBe(false);
+    expect(await inTier(app, pId, 'overdue3m')).toBe(false);
+    await app.close();
+  });
+
+  // A permanentStatus cadre that ALSO has a graded priorityCategory — proves the
+  // exemption wins regardless of which grade it would otherwise fall under.
+  it('a permanentStatus-tagged grade-A cadre is still always current at 400 days dark', async () => {
+    const app = await makeApp();
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${REC_TOKEN} PERMSTATUS-A`, phone: '+910000000701', thana: 'बीजापुर',
+        currentAddress: 'Rec fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], priorityCategory: 'A', permanentStatus: 'living_elsewhere',
+      },
+    });
+    created.push(c.id);
+    await prisma.report.create({
+      data: {
+        cadreId: c.id, reportedById: officerAId, reportingPlace: 'thana', specificLocation: 'x',
+        personStatus: 'alive', currentPhone: '+910', currentActivity: 'y',
+        reportedAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000),
+      },
+    });
+    expect(await inTier(app, c.id, 'current')).toBe(true);
+    expect(await inTier(app, c.id, 'overdue3m')).toBe(false);
     await app.close();
   });
 

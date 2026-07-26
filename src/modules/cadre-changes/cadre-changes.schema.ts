@@ -17,6 +17,7 @@ const fieldValue = {
   thana: z.string().trim().min(1).max(200),
   currentAddress: z.string().trim().min(1).max(500),
   permanentAddress: z.string().trim().max(500).nullable(),
+  residingVillage: z.string().trim().max(200).nullable(),
   designation: z.string().trim().min(1).max(300),
   incident: z.string().trim().max(4000).nullable(),
   verificationOffice: z.string().trim().max(300).nullable(),
@@ -59,6 +60,8 @@ const fieldValue = {
   // letters, lowercase jail/death — do NOT normalise to match the lowercase-enum
   // convention every other enum here follows.
   priorityCategory: z.enum(['A', 'B', 'C', 'jail', 'death']).nullable(),
+  // This task (item 7). Separate from priorityCategory — see the Prisma enum's comment.
+  permanentStatus: z.enum(['deceased', 'government_job', 'gs', 'living_elsewhere']).nullable(),
 } as const satisfies Record<(typeof APPROVAL_FIELDS)[number], z.ZodTypeAny>;
 
 export const changeableFieldsSchema = z.object(fieldValue).partial();

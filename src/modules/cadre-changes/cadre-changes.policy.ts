@@ -35,6 +35,9 @@ export const APPROVAL_FIELDS = [
   'thana',
   'currentAddress',
   'permanentAddress',
+  // This task, item 5. Distinct from currentAddress (full free-text address) —
+  // just the village name, approval-gated like every other fact of record.
+  'residingVillage',
   'designation',
   'incident',
   'verificationOffice',
@@ -80,6 +83,10 @@ export const APPROVAL_FIELDS = [
   // cadence and dashboard tiles, so it gets the same two-person review as any other
   // identity-adjacent fact, not a DIRECT write.
   'priorityCategory',
+  // This task (item 7). A PERMANENT mark about a person (फौत/शासकीय नौकरी/GS/अन्य
+  // जिले में निवासरत) that also exempts the cadre from the reporting cadence
+  // (recency.ts) — same weight as priorityCategory, same reasoning.
+  'permanentStatus',
 ] as const;
 
 export type DirectField = (typeof DIRECT_FIELDS)[number];

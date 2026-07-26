@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { makeStatsService } from './stats.service.js';
-import { bearerAuth, jsonResponse } from '../../lib/openapi.js';
+import { hierarchyQuery } from './stats.schema.js';
+import { bearerAuth, jsonResponse, zodToJson } from '../../lib/openapi.js';
 
 const EXAMPLE_DASHBOARD_STATS = {
   totalCadres: 4868,
@@ -12,6 +13,7 @@ const EXAMPLE_DASHBOARD_STATS = {
     thana: 3000,
     jail: 78,
   },
+  alertLevelBreakdown: { normal: 79, warning: 18, critical: 3 },
 };
 
 const EXAMPLE_HIERARCHY_STATS = {
@@ -61,22 +63,26 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/stats/dashboard',
     {
-      // ADR-030: admin+. These are ORG-WIDE supervisory counts — every cadre, every
-      // alert, everyone's reports. ADR-020 built them for the admin dashboard and
-      // never gated them, so any authenticated user could read the whole
-      // organisation's posture; an officer's own home rendered them.
-      //
-      // Unlike `assignedTo=me` (a filter over data the caller can already page
-      // through), this is a genuine access boundary: an aggregate is not something
-      // an officer could assemble for themselves from what they are allowed to see.
-      preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
+      // ADR-030 (revised this task, item 4). Originally admin+ only: ADR-020 built
+      // these counts unscoped and unbounded, so any authenticated user reading them
+      // got the WHOLE organisation's posture. ADR-044 scoping has since made every
+      // number here pass through `cadreScopeWhere(scope)` — a super_admin gets
+      // everything, an admin gets their sub-division, and (as of this task) an
+      // OFFICER gets exactly their own single thana. That officer scope is no wider
+      // than what `GET /cadres` already hands them (open to any authenticated
+      // user, ADR-044-scoped) — the same "scoping to the caller needs no gate"
+      // reasoning ADR-031 draws for `/stats/me`. What ADR-030 actually guards
+      // against — an officer reading counts OUTSIDE their own scope — is still
+      // fully enforced by `cadreScopeWhere`, not by the role check.
+      preHandler: [app.authenticate, app.requireRole('officer', 'admin', 'super_admin')],
       schema: {
         tags: ['Stats'],
-        summary: 'Dashboard summary counts (admin+)',
+        summary: 'Dashboard summary counts, scoped to the caller (officer+)',
         description:
           'Home-dashboard snapshot: total cadres, active (critical) alerts, reports in the ' +
           'last 7 days, cadres overdue on the 30-day reporting cadence, and per-category counts ' +
-          '(surrendered split by origin per ADR-019). Admin+ only — org-wide supervisory data.',
+          '(surrendered split by origin per ADR-019) — all scoped to the caller (their own thana ' +
+          'for an officer, sub-division for an admin, everything for super_admin).',
         security: bearerAuth,
         response: { 200: jsonResponse('Dashboard stats', EXAMPLE_DASHBOARD_STATS) },
       },
@@ -119,7 +125,8 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
       preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
       schema: {
         tags: ['Stats'],
-        summary: 'Rolled-up completion by officer (SDOP caller) or by SDOP (HQ caller)',
+        summary:
+          'Rolled-up completion by officer (SDOP caller), by SDOP (HQ caller), or by thana (?by=thana)',
         description:
           'An SDOP (admin) gets one row per officer in their own sub-division. HQ (super_admin) ' +
           'gets one row per SDOP, each summing that SDOP\'s officer rows. Every row is shaped like ' +
@@ -127,11 +134,17 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
           '30-day overdue rule). The response also carries the group rollup as an aggregate ratio ' +
           '(SUM currentCadres / SUM assignedCadres — never an average of the rows\' own percentages) ' +
           'and unassignedCadres, excluded from that ratio because a cadre nobody is assigned to is a ' +
-          'staffing gap, not a specific officer\'s reporting lapse.',
+          'staffing gap, not a specific officer\'s reporting lapse. `?by=thana` returns one row per ' +
+          'thana in the caller\'s scope instead (HQ: all 22; admin: their own sub-division\'s), ' +
+          'counting every live cadre at that thana rather than just assigned ones.',
         security: bearerAuth,
+        querystring: zodToJson(hierarchyQuery),
         response: { 200: jsonResponse('Hierarchy stats', EXAMPLE_HIERARCHY_STATS) },
       },
     },
-    async (request) => service.hierarchy(request.scope!),
+    async (request) => {
+      const { by } = hierarchyQuery.parse(request.query);
+      return service.hierarchy(request.scope!, { by });
+    },
   );
 }

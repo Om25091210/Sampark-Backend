@@ -8,16 +8,18 @@ import { signAccessToken } from '../../lib/tokens.js';
 
 const prisma = new PrismaClient();
 const config = testConfig();
-const PHONES = ['+919000000030', '+919000000031', '+919000000032'];
+const PHONES = ['+919000000030', '+919000000031', '+919000000032', '+919000000033'];
 const CADRE_NAME = 'TEST CADRE REPORTS';
 
 let officerId = 0;
 let viewerId = 0;
 let superAdminId = 0;
+let officer2Id = 0;
 let cadreId = 0;
 let officerToken = '';
 let viewerToken = '';
 let superAdminToken = '';
+let officer2Token = '';
 const CADRE_ORIGINAL_PHONE = '+910000000001';
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
@@ -74,9 +76,18 @@ beforeAll(async () => {
     where: { phone: PHONES[2] }, update: { deletedAt: null, role: 'super_admin', name: 'Report SuperAdmin' },
     create: { phone: PHONES[2]!, name: 'Report SuperAdmin', role: 'super_admin' },
   });
+  // This task, item 3. A SECOND officer at the same thana, so "an officer can only
+  // delete their OWN report" is exercised against another real officer's report,
+  // not just a role check.
+  const officer2 = await prisma.user.upsert({
+    where: { phone: PHONES[3] },
+    update: { deletedAt: null, role: 'officer', name: 'Report Officer 2', thana: 'बीजापुर सदर' },
+    create: { phone: PHONES[3]!, name: 'Report Officer 2', role: 'officer', thana: 'बीजापुर सदर' },
+  });
   officerId = officer.id;
   viewerId = viewer.id;
   superAdminId = superAdmin.id;
+  officer2Id = officer2.id;
 
   await prisma.cadre.deleteMany({ where: { name: CADRE_NAME } });
   const cadre = await prisma.cadre.create({
@@ -91,6 +102,7 @@ beforeAll(async () => {
   officerToken = await signAccessToken({ sub: officerId, role: 'officer' }, config.jwtSecret, '15m');
   viewerToken = await signAccessToken({ sub: viewerId, role: 'viewer' }, config.jwtSecret, '15m');
   superAdminToken = await signAccessToken({ sub: superAdminId, role: 'super_admin' }, config.jwtSecret, '15m');
+  officer2Token = await signAccessToken({ sub: officer2Id, role: 'officer' }, config.jwtSecret, '15m');
 });
 
 afterEach(purgeReports);
@@ -493,6 +505,29 @@ describe('reports', () => {
       await prisma.cadre.delete({ where: { id: jailGrade.id } });
       await app.close();
     });
+
+    // This task, item 7: permanentStatus extends the same ADR-049-style block —
+    // "no attendance/reporting required" means filing a NEW report is exactly
+    // the act being exempted.
+    it('create against a permanentStatus-tagged cadre → 400 CADRE_NOT_REPORTABLE', async () => {
+      const marked = await prisma.cadre.create({
+        data: {
+          name: 'TEST CADRE PERMSTATUS', phone: '+910000000005', thana: 'बीजापुर सदर',
+          currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
+          permanentStatus: 'living_elsewhere',
+          alertLevel: 'normal', aliases: [], assignedOfficerId: officerId, avatarUrl: 'https://x/a.jpg',
+        },
+      });
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${marked.id}/reports`,
+        headers: auth(officerToken), payload: { ...validBody(), cadre_id: marked.id },
+      });
+      expect(res.statusCode).toBe(400);
+      expect((res.json() as { error: { code: string } }).error.code).toBe('CADRE_NOT_REPORTABLE');
+      await prisma.cadre.delete({ where: { id: marked.id } });
+      await app.close();
+    });
   });
 
   // ── ADR-052: report-time phone mismatch proposes a change, never writes directly ──
@@ -574,6 +609,127 @@ describe('reports', () => {
       // create a duplicate or clobber the first.
       const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
       expect(pending).toHaveLength(1);
+      await app.close();
+    });
+  });
+
+  // ── DELETE /cadres/:cadreId/reports/:reportId (this task, item 3) ───────────
+
+  describe('DELETE report', () => {
+    async function fileAsOfficer(): Promise<number> {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: validBody(),
+      });
+      const id = (res.json() as WireReportBody).id;
+      await app.close();
+      return id;
+    }
+
+    it('without a token → 401', async () => {
+      const app = await makeApp();
+      const res = await app.inject({ method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/1` });
+      expect(res.statusCode).toBe(401);
+      await app.close();
+    });
+
+    it('a viewer is refused (403) — read-only, same gate as create', async () => {
+      const reportId = await fileAsOfficer();
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`, headers: auth(viewerToken),
+      });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it('an officer deletes their OWN report within the window → 204, soft-deleted, audited', async () => {
+      const reportId = await fileAsOfficer();
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`, headers: auth(officerToken),
+      });
+      expect(res.statusCode).toBe(204);
+
+      const row = await prisma.report.findUnique({ where: { id: reportId } });
+      expect(row?.deletedAt).not.toBeNull(); // soft-deleted, row still exists
+
+      const getRes = await app.inject({
+        method: 'GET', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`, headers: auth(officerToken),
+      });
+      expect(getRes.statusCode).toBe(404); // and no longer reachable through the normal read path
+
+      const audit = await prisma.auditLog.findFirst({
+        where: { entityType: 'report', entityId: String(reportId), action: 'report.delete' },
+      });
+      expect(audit).not.toBeNull();
+      expect(audit?.actorId).toBe(officerId);
+      await app.close();
+    });
+
+    it('an officer CANNOT delete another officer\'s report', async () => {
+      const reportId = await fileAsOfficer(); // filed by `officerToken`
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`, headers: auth(officer2Token),
+      });
+      expect(res.statusCode).toBe(403);
+      const row = await prisma.report.findUnique({ where: { id: reportId } });
+      expect(row?.deletedAt).toBeNull(); // untouched
+      await app.close();
+    });
+
+    it('an officer CANNOT delete their own report past the 24-hour window', async () => {
+      const reportId = await fileAsOfficer();
+      // Backdate createdAt past the window — the only way to exercise this without
+      // actually waiting 24 hours.
+      await prisma.report.update({
+        where: { id: reportId },
+        data: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+      });
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`, headers: auth(officerToken),
+      });
+      expect(res.statusCode).toBe(403);
+      await app.close();
+    });
+
+    it('super_admin can delete any report, with no time window', async () => {
+      const reportId = await fileAsOfficer();
+      await prisma.report.update({
+        where: { id: reportId },
+        data: { createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+      });
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`, headers: auth(superAdminToken),
+      });
+      expect(res.statusCode).toBe(204);
+      await app.close();
+    });
+
+    it('deleting an already-deleted (or nonexistent) report → 404', async () => {
+      const reportId = await fileAsOfficer();
+      const app = await makeApp();
+      const first = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`, headers: auth(superAdminToken),
+      });
+      expect(first.statusCode).toBe(204);
+      const second = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`, headers: auth(superAdminToken),
+      });
+      expect(second.statusCode).toBe(404);
+      await app.close();
+    });
+
+    it('an out-of-scope cadre 404s rather than leaking whether the report exists', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'DELETE', url: '/api/v1/cadres/99999999/reports/1', headers: auth(superAdminToken),
+      });
+      expect(res.statusCode).toBe(404);
       await app.close();
     });
   });

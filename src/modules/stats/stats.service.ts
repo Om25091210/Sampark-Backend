@@ -1,10 +1,22 @@
 import type { FastifyBaseLogger } from 'fastify';
-import { cadreScopeWhere, thanasForSubDivision, type CadreScope } from '../../lib/scope.js';
+import {
+  CANONICAL_THANAS,
+  cadreScopeWhere,
+  subDivisionForThana,
+  thanasForSubDivision,
+  type CadreScope,
+} from '../../lib/scope.js';
 import { nfc } from '../../lib/text.js';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { REPORTING_CADENCE_DAYS } from '../../lib/serialize.js';
 import { recencyTierWhere } from '../../lib/recency.js';
-import type { DashboardStats, HierarchyRow, HierarchyStats, OfficerStats } from './stats.schema.js';
+import type {
+  DashboardStats,
+  HierarchyRow,
+  HierarchyStats,
+  HierarchyThanaRow,
+  OfficerStats,
+} from './stats.schema.js';
 
 export interface StatsDeps {
   prisma: PrismaClient;
@@ -18,12 +30,36 @@ export interface StatsService {
   dashboard(scope: CadreScope): Promise<DashboardStats>;
   /** ADR-031. The caller's own numbers. Aggregated in SQL, never over one page. */
   forOfficer(officerId: number, scope: CadreScope): Promise<OfficerStats>;
-  /** ADR-055. The rolled-up view: an SDOP's own officers, or HQ's own SDOPs. */
-  hierarchy(scope: CadreScope): Promise<HierarchyStats>;
+  /** ADR-055. The rolled-up view: an SDOP's own officers, or HQ's own SDOPs, or
+   *  (this task) every thana in scope when `by: 'thana'` is passed. */
+  hierarchy(scope: CadreScope, opts?: { by?: 'thana' }): Promise<HierarchyStats>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MONTHS_SHOWN = 6;
+
+/** Turns raw counts into integer percentages that sum to EXACTLY 100 (largest-
+ *  remainder method) — independent per-count rounding can drift a point off 100
+ *  (e.g. 33.3/33.3/33.4 all floor to 33 = 99), which fails the "reads as a whole"
+ *  point of a percentage breakdown. All-zero input returns all zeros, not NaN. */
+function percentagesOf100(counts: readonly number[]): number[] {
+  const total = counts.reduce((s, c) => s + c, 0);
+  if (total === 0) return counts.map(() => 0);
+  const raw = counts.map((c) => (c / total) * 100);
+  const floors = raw.map(Math.floor);
+  const remainder = 100 - floors.reduce((s, f) => s + f, 0);
+  // Every index below comes from mapping/sorting the SAME fixed-length `floors`
+  // array, so the `!` assertions are in-range by construction, not a leap of faith.
+  const byFracDesc = raw
+    .map((r, i) => ({ i, frac: r - floors[i]! }))
+    .sort((a, b) => b.frac - a.frac);
+  const result = [...floors];
+  for (let k = 0; k < remainder; k++) {
+    const idx = byFracDesc[k]!.i;
+    result[idx] = result[idx]! + 1;
+  }
+  return result;
+}
 
 // ADR-024/031. Every date the officer thinks about is an IST date. `reported_at` is
 // stored naive-UTC, so bucketing by month without converting would file a report
@@ -70,6 +106,8 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         thana,
         jail,
         activeAlerts,
+        alertWarning,
+        alertNormal,
         reportsThisWeek,
         pendingReporting,
         rcCurrent,
@@ -83,6 +121,8 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         prisma.cadre.count({ where: { ...live, category: 'thana' } }),
         prisma.cadre.count({ where: { ...live, category: 'jail' } }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'critical' } }),
+        prisma.cadre.count({ where: { ...live, alertLevel: 'warning' } }),
+        prisma.cadre.count({ where: { ...live, alertLevel: 'normal' } }),
         prisma.report.count({ where: { ...liveReports, reportedAt: { gte: weekAgo } } }),
         // Cadres with no live report in the last 30 days — the "overdue on the monthly
         // check-in" count. `none` covers never-reported too (an empty relation matches).
@@ -120,6 +160,12 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
           thana,
           jail,
         },
+        // Order matches the schema comment (सामान्य/अति-आवश्यक/चेतावनी): normal,
+        // critical, warning counts turn into percentages that sum to exactly 100.
+        alertLevelBreakdown: (() => {
+          const pct = percentagesOf100([alertNormal, activeAlerts, alertWarning]);
+          return { normal: pct[0]!, critical: pct[1]!, warning: pct[2]! };
+        })(),
       };
     },
 
@@ -213,8 +259,71 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       };
     },
 
-    async hierarchy(scope) {
+    async hierarchy(scope, opts) {
       const monthAgo = new Date(Date.now() - REPORTING_CADENCE_DAYS * DAY_MS);
+
+      // Cadres nobody is responsible for — a staffing gap, not a specific officer's
+      // lapse (ADR-055 Context §2). Shared by every branch below, so computed once.
+      const unassignedCadres = await prisma.cadre.count({
+        where: { deletedAt: null, assignedOfficerId: null, ...cadreScopeWhere(scope) },
+      });
+
+      const rollup = (rows: ReadonlyArray<{ assignedCadres: number; currentCadres: number }>) => {
+        const totalAssigned = rows.reduce((s, r) => s + r.assignedCadres, 0);
+        const totalCurrent = rows.reduce((s, r) => s + r.currentCadres, 0);
+        return {
+          totalAssigned,
+          totalCurrent,
+          // The aggregate ratio, not an average of each row's own percentage
+          // (ADR-055 Context §1) — a lightly-loaded row cannot swing this number.
+          overallCompletion: totalAssigned === 0 ? 0 : Math.round((totalCurrent / totalAssigned) * 100),
+        };
+      };
+
+      // This task's extension: one row per THANA in scope, counting every live
+      // cadre AT that thana (not just those with an assigned officer) — a thana's
+      // reporting completion is a fact about the thana, not about staffing. HQ gets
+      // all 22 canonical thanas; an admin gets only their own sub-division's, via
+      // the same `cadreScopeWhere` every other scoped query uses (ADR-044).
+      if (opts?.by === 'thana') {
+        const scopedThanas = scope.kind === 'all' ? CANONICAL_THANAS : scope.thanas;
+
+        const grouped = await prisma.$queryRaw<{ thana: string; assigned: bigint; overdue: bigint }[]>`
+          SELECT c.thana AS thana,
+                 COUNT(*) AS assigned,
+                 COUNT(*) FILTER (
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM reports r
+                     WHERE r.cadre_id = c.id AND r.deleted_at IS NULL AND r.reported_at >= ${monthAgo}
+                   )
+                 ) AS overdue
+          FROM cadres c
+          WHERE c.deleted_at IS NULL
+            ${scope.kind === 'all' ? Prisma.empty : Prisma.sql`AND c.thana IN (${Prisma.join(scope.thanas)})`}
+          GROUP BY c.thana
+        `;
+        const byThana = new Map(
+          grouped.map((g) => [nfc(g.thana), { assigned: Number(g.assigned), overdue: Number(g.overdue) }]),
+        );
+
+        // Every scoped thana gets a row, even one with zero cadres (0/0/0%) — a
+        // completion list that silently drops empty thanas hides a data gap as an
+        // absence rather than showing it.
+        const thanaRows: HierarchyThanaRow[] = scopedThanas.map((t) => {
+          const g = byThana.get(nfc(t)) ?? { assigned: 0, overdue: 0 };
+          const current = g.assigned - g.overdue;
+          return {
+            thana: t,
+            subDivision: subDivisionForThana(t),
+            assignedCadres: g.assigned,
+            overdueCadres: g.overdue,
+            currentCadres: current,
+            reportingCompletion: g.assigned === 0 ? 0 : Math.round((current / g.assigned) * 100),
+          };
+        });
+
+        return { level: 'thanas', rows: thanaRows, ...rollup(thanaRows), unassignedCadres };
+      }
 
       // The roster to report on: every officer for HQ, just the SDOP's own for an admin.
       const officerWhere: Prisma.UserWhereInput = { role: 'officer', deletedAt: null };
@@ -262,25 +371,6 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
           // extended to a row: nothing to report on is not 100% reported.
           reportingCompletion: g.assigned === 0 ? 0 : Math.round((current / g.assigned) * 100),
         };
-      });
-
-      const rollup = (rows: HierarchyRow[]) => {
-        const totalAssigned = rows.reduce((s, r) => s + r.assignedCadres, 0);
-        const totalCurrent = rows.reduce((s, r) => s + r.currentCadres, 0);
-        return {
-          totalAssigned,
-          totalCurrent,
-          // The aggregate ratio, not an average of each row's own percentage
-          // (ADR-055 Context §1) — a lightly-loaded row cannot swing this number.
-          overallCompletion: totalAssigned === 0 ? 0 : Math.round((totalCurrent / totalAssigned) * 100),
-        };
-      };
-
-      // Cadres nobody is responsible for — a staffing gap, not a specific officer's
-      // lapse, so excluded from the ratio above and surfaced on its own (ADR-055
-      // Context §2).
-      const unassignedCadres = await prisma.cadre.count({
-        where: { deletedAt: null, assignedOfficerId: null, ...cadreScopeWhere(scope) },
       });
 
       if (scope.kind !== 'all') {

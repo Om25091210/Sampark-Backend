@@ -54,11 +54,17 @@ export interface WireCadre {
   thana: string;
   currentAddress: string;
   permanentAddress?: string;
+  // This task, item 5. The village the cadre is CURRENTLY residing in — distinct
+  // from currentAddress (full free-text address). Absent when null.
+  residingVillage?: string;
   designation: string;
   category: Cadre['category'];
   // ADR-046. The register's priority GRADE (A/B/C/jail/death), distinct from
   // `category`. Drives the per-category reporting cadence. Absent when null.
   priorityCategory?: NonNullable<Cadre['priorityCategory']>;
+  // This task (item 7). Separate permanent mark — see the Prisma enum's comment.
+  // Absent when null (no mark).
+  permanentStatus?: NonNullable<Cadre['permanentStatus']>;
   filter?: NonNullable<Cadre['filter']>;
   alertLevel: Cadre['alertLevel'];
   avatarUrl?: string;
@@ -219,9 +225,11 @@ export function toWireCadre(
     thana: c.thana,
     currentAddress: c.currentAddress,
     permanentAddress: c.permanentAddress ?? undefined,
+    residingVillage: c.residingVillage ?? undefined,
     designation: c.designation,
     category: c.category,
     priorityCategory: c.priorityCategory ?? undefined,
+    permanentStatus: c.permanentStatus ?? undefined,
     filter: c.filter ?? undefined,
     alertLevel: c.alertLevel,
     // ADR-029. Prefer a freshly-signed URL from the durable `avatarKey`; fall back

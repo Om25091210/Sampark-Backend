@@ -12,6 +12,7 @@ import {
 } from './reports.schema.js';
 import {
   bearerAuth,
+  emptyResponse,
   examplePage,
   jsonResponse,
   zodToJson,
@@ -149,6 +150,35 @@ export async function reportsRoutes(app: FastifyInstance): Promise<void> {
       );
       // 201 for a fresh create; 200 for an idempotent replay (ADR-013).
       return reply.code(created ? 201 : 200).send(report);
+    },
+  );
+
+  // This task, item 3. Soft-delete (ADR-006). Route-gated to officer+ (viewers are
+  // read-only, same as create); the FINER access rule — an officer may delete only
+  // their own report, and only within 24h — is enforced in the service, because it
+  // depends on the report's own reportedById/createdAt, not just the caller's role.
+  app.delete(
+    '/cadres/:cadreId/reports/:reportId',
+    {
+      preHandler: [app.authenticate, app.requireRole('officer', 'admin', 'super_admin')],
+      schema: {
+        tags: ['Reports'],
+        summary: 'Delete a report (soft-delete; officer+, own-report/24h or admin+)',
+        description:
+          'Admin/super_admin may delete any report in their scope. An officer may delete only a ' +
+          'report they filed themselves, and only within 24 hours of filing it. Soft-delete only ' +
+          '(deletedAt) — never a hard DELETE — and recorded in the hash-chained audit log (ADR-008).',
+        security: bearerAuth,
+        params: zodToJson(reportDetailParams),
+        response: { 204: emptyResponse('Deleted') },
+      },
+    },
+    async (request, reply) => {
+      const { cadreId, reportId } = reportDetailParams.parse(request.params);
+      const role = request.authUser!.role;
+      if (!ROLES.includes(role)) throw forbidden('Unrecognised role on token');
+      await service.remove(cadreId, reportId, request.authUser!.sub, role as Role, request.scope!);
+      return reply.code(204).send();
     },
   );
 }

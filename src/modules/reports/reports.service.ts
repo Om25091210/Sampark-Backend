@@ -4,7 +4,7 @@ import { Prisma, type PrismaClient, type Role } from '@prisma/client';
 import { toWireReport, type WireReport } from '../../lib/serialize.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
-import { badRequest, notFound } from '../../lib/errors.js';
+import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import type { StorageProvider } from '../../lib/storage.js';
 // ADR-052. Report-time phone sync reuses the SAME approval-ladder write path the
 // manual cadre-edit form calls — phone stays an APPROVAL field (ADR-026); this is
@@ -55,7 +55,20 @@ export interface ReportsService {
     scope: CadreScope,
     reporterRole: Role,
   ): Promise<CreateReportResult>;
+  // This task, item 3. Soft-delete (ADR-006 — deletedAt, never a hard DELETE): who
+  // may call this is enforced here, not just by the route's role gate — see the
+  // access-control note above `remove`'s implementation.
+  remove(cadreId: number, reportId: number, actorId: number, actorRole: Role, scope: CadreScope): Promise<void>;
 }
+
+// This task, item 3. An officer may delete only their OWN report, and only within
+// this self-correction window — long enough to fix a same-shift mistake, short
+// enough that it cannot become a way to quietly erase a stale or inconvenient
+// filing. Admin/super_admin have no window: they are the people this system's
+// approval ladder already treats as authorised to make permanent decisions about
+// a record (ADR-026), and a deletion is a smaller act than the field edits they
+// can already apply directly.
+const OFFICER_DELETE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // Load the report together with its cadre so the wire entity can carry the
 // nested `cadre` Pick the client renders.
@@ -112,10 +125,16 @@ export function makeReportsService({
   async function assertCadre(
     cadreId: number,
     scope: CadreScope,
-  ): Promise<{ category: string; priorityCategory: string | null; phone: string }> {
+  ): Promise<{
+    category: string;
+    priorityCategory: string | null;
+    // This task (item 7).
+    permanentStatus: string | null;
+    phone: string;
+  }> {
     const cadre = await prisma.cadre.findFirst({
       where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(scope) },
-      select: { category: true, priorityCategory: true, phone: true },
+      select: { category: true, priorityCategory: true, permanentStatus: true, phone: true },
     });
     if (cadre === null) throw notFound('Cadre not found');
     return cadre;
@@ -225,13 +244,19 @@ export function makeReportsService({
       // the register (Cadre.priorityCategory) cannot be field-reported — there is
       // no reporting due for either (see ADR-046 §3). Checked here, not just in
       // the mobile UI, per the project's API-enforced-authorization rule.
+      //
+      // This task (item 7). Same rule extended to any permanentStatus mark
+      // (फौत/शासकीय नौकरी/GS/अन्य जिले में निवासरत): "no attendance/reporting
+      // required going forward" means filing a NEW report is exactly the act
+      // being exempted, not just the overdue count.
       if (
         cadre.category === 'jail' ||
         cadre.priorityCategory === 'jail' ||
-        cadre.priorityCategory === 'death'
+        cadre.priorityCategory === 'death' ||
+        cadre.permanentStatus !== null
       ) {
         throw badRequest(
-          'Reports cannot be filed for a jail-custody or deceased cadre',
+          'Reports cannot be filed for a jail-custody, deceased, or permanently-marked cadre',
           'CADRE_NOT_REPORTABLE',
         );
       }
@@ -317,6 +342,48 @@ export function makeReportsService({
         }
         throw err;
       }
+    },
+
+    async remove(cadreId, reportId, actorId, actorRole, scope) {
+      await assertCadre(cadreId, scope);
+      const report = await prisma.report.findFirst({
+        where: { id: reportId, cadreId, deletedAt: null },
+      });
+      if (report === null) throw notFound('Report not found');
+
+      // Access control (this task, item 3): admin+ may delete any report in their
+      // scope (already enforced by assertCadre above); an officer may delete only
+      // their OWN report, and only within OFFICER_DELETE_WINDOW_MS of filing it —
+      // see the constant's comment for why. Viewers never reach here (route-gated).
+      if (actorRole === 'officer') {
+        if (report.reportedById !== actorId) {
+          throw forbidden('You can only delete a report you filed yourself');
+        }
+        if (Date.now() - report.createdAt.getTime() > OFFICER_DELETE_WINDOW_MS) {
+          throw forbidden('This report can no longer be deleted (past the 24-hour window)');
+        }
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.report.update({ where: { id: reportId }, data: { deletedAt: new Date() } });
+        // Hash-chained audit trail (ADR-008) is how "who deleted what and when" is
+        // recorded — this codebase's soft-delete columns are deletedAt-only, with
+        // actor attribution living in the audit log rather than a deletedBy column
+        // on every table (see e.g. Cadre, which has the same shape).
+        await writeAuditLog(tx, {
+          actorId,
+          action: 'report.delete',
+          entityType: 'report',
+          entityId: String(reportId),
+          before: { cadreId, reportedById: report.reportedById },
+        });
+        await writeOutboxEvent(tx, {
+          aggregateType: 'report',
+          aggregateId: String(reportId),
+          eventType: 'report.deleted',
+          payload: { reportId, cadreId },
+        });
+      });
     },
   };
 }
