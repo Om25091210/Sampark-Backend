@@ -145,12 +145,17 @@ jobs:
       # Assert readiness before calling the deploy a success. `-f` fails on any non-2xx
       # (the 503 that STABLE hid), and the body check catches a 200 that regressed into
       # reporting not_ready.
+      #
+      # Hits the api.bsmart.net.in domain, not the raw ALB DNS: the ALB's :80 listener
+      # now only 301-redirects to :443 (infra/alb.tf), so a plain `curl -fsS` against
+      # the ALB DNS over http fails on the redirect. The domain resolves straight to
+      # the ALB over https with the real cert -- no redirect-follow needed.
       - name: Assert /readyz after deploy
         env:
-          ALB_DNS: sampark-staging-alb-2106262233.ap-south-1.elb.amazonaws.com
+          API_DOMAIN: api.bsmart.net.in
         run: |
           for i in 1 2 3 4 5; do
-            if body=$(curl -fsS "http://${ALB_DNS}/readyz"); then
+            if body=$(curl -fsS "https://${API_DOMAIN}/readyz"); then
               echo "readyz: ${body}"
               case "${body}" in
                 *'"status":"ready"'*) echo "readiness confirmed"; exit 0 ;;
