@@ -21,6 +21,23 @@ export function cadreChangeRejectedCopy(
   };
 }
 
+export function cadreCreateApprovedCopy(cadreName: string): { title: string; body: string } {
+  return {
+    title: 'नया कैडर स्वीकृत',
+    body: `${cadreName} की प्रोफ़ाइल बनाने का आपका अनुरोध स्वीकृत हो गया है।`,
+  };
+}
+
+export function cadreCreateRejectedCopy(
+  cadreName: string,
+  reason: string,
+): { title: string; body: string } {
+  return {
+    title: 'नया कैडर अस्वीकृत',
+    body: `${cadreName} की प्रोफ़ाइल बनाने का आपका अनुरोध अस्वीकृत हुआ। कारण: ${reason}`,
+  };
+}
+
 export function officerReassignCopy(cadreName: string): { title: string; body: string } {
   return {
     title: 'कैडर सौंपा गया',

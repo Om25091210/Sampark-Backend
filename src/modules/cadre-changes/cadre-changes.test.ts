@@ -11,7 +11,7 @@ const config = testConfig();
 // Fixture phones must not collide with ANY other test file's — suites share one
 // database and run in parallel, so a duplicate phone upserts another file's user
 // out from under it mid-run. This block (80-83) was free at the time of writing;
-// the blocks already taken were 01 / 10-12 / 30-31 / 40-42 / 50-53 / 60 / 70-71.
+// the blocks already taken were 01 / 10-12 / 20-23 / 30-31 / 40-42 / 50-53 / 60 / 70-71.
 //
 // This is exactly the fragility tracked in Sampark-Backend#3, and it is not
 // theoretical: this file was first written on 50-53, which silently belongs to

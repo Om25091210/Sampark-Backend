@@ -9,6 +9,7 @@ export interface NotificationEntry {
   body: string;
   cadreId?: number;
   cadreChangeId?: number;
+  cadreCreateRequestId?: number;
   data?: Prisma.InputJsonValue;
 }
 
@@ -26,6 +27,7 @@ export async function writeNotification(tx: Tx, entry: NotificationEntry): Promi
       body: entry.body,
       cadreId: entry.cadreId,
       cadreChangeId: entry.cadreChangeId,
+      cadreCreateRequestId: entry.cadreCreateRequestId,
       data: entry.data,
     },
   });

@@ -35,6 +35,7 @@ export interface WireNotification {
   body: string;
   cadreId?: number;
   cadreChangeId?: number;
+  cadreCreateRequestId?: number;
   data?: Record<string, unknown>;
   readAt?: string;
   createdAt: string;
@@ -48,6 +49,7 @@ function toWire(n: Notification): WireNotification {
     body: n.body,
     cadreId: n.cadreId ?? undefined,
     cadreChangeId: n.cadreChangeId ?? undefined,
+    cadreCreateRequestId: n.cadreCreateRequestId ?? undefined,
     data: (n.data as Record<string, unknown> | null) ?? undefined,
     readAt: n.readAt?.toISOString(),
     createdAt: n.createdAt.toISOString(),

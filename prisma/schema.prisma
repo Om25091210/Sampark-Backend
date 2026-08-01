@@ -63,6 +63,18 @@ enum ChangeRequestStatus {
   stale // the underlying value moved after submission; never applied
 }
 
+// Cadre creation ladder. Deliberately NOT ChangeRequestStatus: `stale` means "the old
+// value drifted since submission", and a create request has no old value to drift
+// from — nothing exists yet to compare against. A near-duplicate of an existing
+// cadre is surfaced to the approver as a non-blocking WARNING (computed live, never
+// persisted), not a rejection state, so there is no status for it either.
+enum CreateRequestStatus {
+  pending
+  applied
+  rejected
+  cancelled
+}
+
 enum ReportingPlace {
   thana
   village
@@ -90,6 +102,7 @@ enum Gender {
 enum NotificationType {
   report_overdue
   cadre_change_outcome
+  cadre_create_outcome
   thana_transfer
   broadcast
 }
@@ -184,6 +197,12 @@ model User {
   adminApprovedChanges CadreChangeRequest[] @relation("ChangeAdminApprover")
   superApprovedChanges CadreChangeRequest[] @relation("ChangeSuperAdminApprover")
   decidedChanges       CadreChangeRequest[] @relation("ChangeDecider")
+
+  // Cadre creation ladder (mirrors the change-request relations above).
+  submittedCreateRequests     CadreCreateRequest[] @relation("CreateReqSubmitter")
+  adminApprovedCreateRequests CadreCreateRequest[] @relation("CreateReqAdminApprover")
+  superApprovedCreateRequests CadreCreateRequest[] @relation("CreateReqSuperAdminApprover")
+  decidedCreateRequests       CadreCreateRequest[] @relation("CreateReqDecider")
 
   @@map("users")
 }
@@ -317,6 +336,8 @@ model Cadre {
   reports         Report[]
   changeRequests  CadreChangeRequest[] // ADR-026
   notifications   Notification[]
+  // The create request this cadre was born from — absent for seeded/imported rows.
+  createRequest   CadreCreateRequest?  @relation("CadreFromCreateRequest")
 
   @@index([category])
   @@index([alertLevel])
@@ -444,6 +465,63 @@ model CadreChangeRequest {
   @@map("cadre_change_requests")
 }
 
+// Cadre CREATION under the same two-level approval ladder as CadreChangeRequest
+// (ADR-026/027/028), for a record that does not exist yet. Two structural
+// differences from CadreChangeRequest, both because there is no existing cadre:
+//   - `draft` (the whole proposed record) replaces `changes` (an {old,new} diff) —
+//     there is no "old" value for a row that doesn't exist.
+//   - `thana` is denormalised straight from `draft.thana`, since there is no `cadre`
+//     relation yet to read it from; it exists purely so the approver queue and the
+//     submit-time jurisdiction check can scope on it the way cadreScopeWhere does
+//     for CadreChangeRequest via its cadre relation.
+model CadreCreateRequest {
+  id Int @id @default(autoincrement())
+
+  // The full proposed new-cadre record, camelCase keys matching Cadre columns (see
+  // cadre-create-requests.schema.ts's createCadreDraftSchema for the validated shape) —
+  // same keying convention as CadreChangeRequest.changes' per-field entries.
+  draft Json
+
+  thana String
+
+  submittedById Int      @map("submitted_by_id")
+  submittedAt   DateTime @default(now()) @map("submitted_at")
+  note          String?
+
+  status CreateRequestStatus @default(pending)
+
+  needsAdmin      Boolean @default(true) @map("needs_admin")
+  needsSuperAdmin Boolean @default(true) @map("needs_super_admin")
+
+  adminApprovedById      Int?      @map("admin_approved_by_id")
+  adminApprovedAt        DateTime? @map("admin_approved_at")
+  superAdminApprovedById Int?      @map("super_admin_approved_by_id")
+  superAdminApprovedAt   DateTime? @map("super_admin_approved_at")
+
+  decidedAt     DateTime? @map("decided_at")
+  decidedById   Int?      @map("decided_by_id")
+  decidedReason String?   @map("decided_reason")
+
+  // Populated ONLY on apply — the real Cadre row this request produced. @unique: one
+  // create request can never produce two cadres.
+  cadreId Int? @unique @map("cadre_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  cadre                Cadre?         @relation("CadreFromCreateRequest", fields: [cadreId], references: [id])
+  submittedBy          User           @relation("CreateReqSubmitter", fields: [submittedById], references: [id])
+  adminApprovedBy      User?          @relation("CreateReqAdminApprover", fields: [adminApprovedById], references: [id])
+  superAdminApprovedBy User?          @relation("CreateReqSuperAdminApprover", fields: [superAdminApprovedById], references: [id])
+  decidedBy            User?          @relation("CreateReqDecider", fields: [decidedById], references: [id])
+  notifications        Notification[]
+
+  @@index([status, submittedAt])
+  @@index([submittedById])
+  @@index([thana])
+  @@map("cadre_create_requests")
+}
+
 // ─── Auth support ──────────────────────────────────────────────────────────────
 
 // ADR-042. `OtpChallenge` is GONE. SMS-OTP was the officer login track (ADR-012); it
@@ -525,8 +603,9 @@ model Notification {
   // creation — never re-derived client-side.
   title         String
   body          String
-  cadreId       Int?             @map("cadre_id")
-  cadreChangeId Int?             @map("cadre_change_id")
+  cadreId              Int?             @map("cadre_id")
+  cadreChangeId        Int?             @map("cadre_change_id")
+  cadreCreateRequestId Int?             @map("cadre_create_request_id")
   // Extra render-time facts that aren't relations (tier label, thana names, reject
   // reason) — also what rides along in the SNS/FCM push payload's `data` field.
   data          Json?
@@ -534,9 +613,10 @@ model Notification {
   deletedAt     DateTime?        @map("deleted_at")
   createdAt     DateTime         @default(now()) @map("created_at")
 
-  user        User                @relation(fields: [userId], references: [id])
-  cadre       Cadre?              @relation(fields: [cadreId], references: [id])
-  cadreChange CadreChangeRequest? @relation(fields: [cadreChangeId], references: [id])
+  user              User                @relation(fields: [userId], references: [id])
+  cadre             Cadre?              @relation(fields: [cadreId], references: [id])
+  cadreChange       CadreChangeRequest? @relation(fields: [cadreChangeId], references: [id])
+  cadreCreateRequest CadreCreateRequest? @relation(fields: [cadreCreateRequestId], references: [id])
 
   // The unread-count/list query: WHERE userId = ? AND readAt IS NULL ORDER BY createdAt DESC.
   @@index([userId, readAt, createdAt])

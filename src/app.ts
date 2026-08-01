@@ -16,6 +16,7 @@ import { healthRoutes } from './modules/health/health.routes.js';
 import { authRoutes } from './modules/auth/auth.routes.js';
 import { cadresRoutes } from './modules/cadres/cadres.routes.js';
 import { cadreChangesRoutes } from './modules/cadre-changes/cadre-changes.routes.js';
+import { cadreCreateRequestsRoutes } from './modules/cadre-create-requests/cadre-create-requests.routes.js';
 import { officersRoutes } from './modules/officers/officers.routes.js';
 import { reportsRoutes } from './modules/reports/reports.routes.js';
 import { reportsMediaRoutes } from './modules/reports-media/reports-media.routes.js';
@@ -93,6 +94,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           { name: 'Health', description: 'Liveness / readiness probes (public)' },
           { name: 'Auth', description: 'Officer SMS-OTP authentication' },
           { name: 'Cadres', description: 'Cadre records' },
+          { name: 'Cadre changes', description: 'Two-level approval ladder for editing a cadre (ADR-026)' },
+          { name: 'Cadre create requests', description: 'Two-level approval ladder for creating a new cadre' },
           { name: 'Reports', description: 'Field reports filed against a cadre' },
           { name: 'Reports Media', description: 'Report photo upload + PDF export' },
           { name: 'Stats', description: 'Dashboard summary counts' },
@@ -119,6 +122,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       await api.register(authRoutes);
       await api.register(cadresRoutes);
       await api.register(cadreChangesRoutes); // ADR-026
+      await api.register(cadreCreateRequestsRoutes); // Cadre creation ladder
       await api.register(officersRoutes);
       await api.register(reportsRoutes);
       await api.register(reportsMediaRoutes);
