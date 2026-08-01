@@ -39,6 +39,25 @@ variable "owner" {
 }
 
 # ---------------------------------------------------------------------------
+# DNS / TLS. Consumed by dns.tf and alb.tf. Domain is registered at GoDaddy;
+# the Route 53 zone created from route53_zone_name must be delegated there
+# (nameservers pasted into GoDaddy's DNS settings) before ACM validation or
+# the api_domain_name record can resolve publicly.
+# ---------------------------------------------------------------------------
+
+variable "route53_zone_name" {
+  description = "Registrable domain (GoDaddy-registered) delegated to a new Route 53 hosted zone."
+  type        = string
+  default     = "bsmart.net.in"
+}
+
+variable "api_domain_name" {
+  description = "Hostname the ALB serves over HTTPS. ACM cert and the Route 53 alias record both use this."
+  type        = string
+  default     = "api.bsmart.net.in"
+}
+
+# ---------------------------------------------------------------------------
 # Network. Consumed by network.tf (written in step 4).
 # ---------------------------------------------------------------------------
 

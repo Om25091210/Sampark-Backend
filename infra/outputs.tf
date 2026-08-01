@@ -14,8 +14,18 @@ output "private_subnet_ids" {
 }
 
 output "alb_dns_name" {
-  description = "Mobile API base URL for integration testing: http://<this>/api/v1 (set EXPO_PUBLIC_API_URL)."
+  description = "Raw ALB DNS name. http:// on this now just redirects to api_base_url -- use api_base_url for EXPO_PUBLIC_API_URL instead."
   value       = aws_lb.main.dns_name
+}
+
+output "route53_nameservers" {
+  description = "Paste these 4 values into GoDaddy's nameserver settings for the domain to delegate DNS to this Route 53 zone. Required before ACM validation or api_base_url resolve."
+  value       = aws_route53_zone.main.name_servers
+}
+
+output "api_base_url" {
+  description = "Mobile API base URL for integration testing: <this>/api/v1 (set EXPO_PUBLIC_API_URL)."
+  value       = "https://${var.api_domain_name}/api/v1"
 }
 
 output "alb_target_group_arn" {

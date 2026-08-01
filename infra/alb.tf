@@ -66,21 +66,42 @@ resource "aws_lb_target_group" "backend" {
   tags = { Name = "${local.name_prefix}-tg" }
 }
 
-# HTTP only. TLS is a Phase 2 upgrade and needs a Route 53 hosted zone plus an ACM
-# certificate for api.bitcrackers.in before a :443 listener can exist.
-#
-# Until then, officer JWTs and SMS OTPs cross public mobile networks in cleartext.
-# That is acceptable for an integration environment holding seeded data, and is the
-# reason this environment is tagged Environment=staging rather than production.
+# TLS now live (dns.tf): the ACM cert for api_domain_name, validated via the Route 53
+# zone created there. :80 only exists to redirect -- it never forwards to the target
+# group -- so anything still pointed at the plain ALB DNS name over http:// gets
+# bounced to https://api.bsmart.net.in instead of reaching the app in cleartext.
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
+    type = "redirect"
+
+    redirect {
+      protocol    = "HTTPS"
+      port        = "443"
+      status_code = "HTTP_301"
+    }
+  }
+
+  tags = { Name = "${local.name_prefix}-listener-http" }
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = 443
+  protocol          = "HTTPS"
+
+  # TLS 1.3 per root CLAUDE.md's scale/security targets, with TLS 1.2 fallback for
+  # older mobile OS TLS stacks.
+  ssl_policy      = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn = aws_acm_certificate_validation.api.certificate_arn
+
+  default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.backend.arn
   }
 
-  tags = { Name = "${local.name_prefix}-listener-http" }
+  tags = { Name = "${local.name_prefix}-listener-https" }
 }

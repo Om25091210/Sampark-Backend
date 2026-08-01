@@ -116,7 +116,7 @@ example; use the **Authorize** button to paste a token and hit protected routes.
 
 | # | Prereq | Detail |
 |---|---|---|
-| ⚠️ 1 | **`EXPO_PUBLIC_API_URL`** | Set `EXPO_PUBLIC_API_URL=http://192.168.29.225:3000/api/v1` in the mobile `.env`. `api.ts` otherwise falls back to `https://api.sampark.bitcrackers.in/api/v1` (not deployed). Use the **LAN IP**, not `localhost` — a device/emulator can't reach the host's localhost. Backend binds `0.0.0.0`. |
+| ⚠️ 1 | **`EXPO_PUBLIC_API_URL`** | Set `EXPO_PUBLIC_API_URL=http://192.168.29.225:3000/api/v1` in the mobile `.env` for local dev. `api.ts`'s hardcoded fallback (`https://api.sampark.bitcrackers.in/api/v1`) is a stale placeholder domain that was never registered — the real staging URL is `https://api.bsmart.net.in/api/v1` (see *Mobile Integration* below); updating the mobile fallback is a mobile-repo change, tracked separately. Use the **LAN IP**, not `localhost` — a device/emulator can't reach the host's localhost. Backend binds `0.0.0.0`. |
 | ⚠️ 2 | **Android cleartext HTTP** | `http://` (non-TLS) works in Expo Go/dev; a release build needs `usesCleartextTraffic`. Fine for dev integration. |
 | ℹ️ 3 | **Dev login** | `SMS_PROVIDER=mock` prints the OTP in the **backend terminal** (dev only). Log in with a **seeded** officer phone (e.g. `+919770000001`); an unprovisioned phone → `403 PHONE_NOT_REGISTERED`. |
 
@@ -161,10 +161,14 @@ parallel set of resources rather than mutating staging in place.
 
 - [ ] **Upgrade the AWS account off the Free Plan.** `backup_retention_period = 7` is rejected with
       `FreeTierRestrictionError` on the free plan — this blocked the first staging apply.
-- [ ] **Delegate `api.bitcrackers.in` DNS to Route 53** — create the hosted zone (~₹43/mo) and point
-      the registrar's nameservers at it.
-- [ ] **Issue an ACM public certificate** for `api.bitcrackers.in` **in `ap-south-1`** (free), and
-      validate it via DNS. Region matters: an ALB can only use a certificate from its own region.
+- [x] **Delegate `api.bsmart.net.in` DNS to Route 53** — hosted zone created in `infra/dns.tf`
+      (~₹43/mo); nameservers delegated at GoDaddy (the domain's registrar). *(Done ahead of the
+      full production flip — see note under `alb.tf` below. Original placeholder domain
+      `api.bitcrackers.in` was never registered; `bsmart.net.in` is the real, GoDaddy-registered
+      domain used instead.)*
+- [x] **Issue an ACM public certificate** for `api.bsmart.net.in` **in `ap-south-1`** (free),
+      validated via DNS (`infra/dns.tf`). Region matters: an ALB can only use a certificate from
+      its own region.
 - [ ] **Implement the MSG91 provider** (or the chosen India-resident gateway) behind the existing
       `SmsProvider` interface in `src/lib/sms.ts`. Must cover `send` plus delivery-status webhook
       handling, with tests. Today only `mock` exists.
@@ -176,8 +180,11 @@ parallel set of resources rather than mutating staging in place.
 ### 2. Infrastructure changes, by file
 
 **`alb.tf`**
-- [ ] Add a `:443` HTTPS listener with the ACM certificate; redirect `:80` → `:443`.
-- [ ] Route 53 alias record `api.bitcrackers.in` → ALB.
+- [x] Add a `:443` HTTPS listener with the ACM certificate; redirect `:80` → `:443`. *(Done —
+      pulled forward onto **staging** ahead of the rest of this checklist, since the domain
+      (`bsmart.net.in`) was registered early. Everything else in this Phase 2 list is still
+      pending the actual production flip.)*
+- [x] Route 53 alias record `api.bsmart.net.in` → ALB.
 - [ ] Delta cost is < ₹150/mo: the cert is free and ALB bills per LB-hour regardless of listener count.
 - [ ] **Enable access logs** to a dedicated S3 bucket. Needs a bucket policy granting the regional
       ELB service principal `s3:PutObject` — log delivery silently no-ops without it.
@@ -257,17 +264,20 @@ parallel set of resources rather than mutating staging in place.
 
 | | |
 |---|---|
-| **Base URL** | `http://sampark-staging-alb-2106262233.ap-south-1.elb.amazonaws.com` |
+| **Base URL** | `https://api.bsmart.net.in` |
 | **API prefix** | `/api/v1` on all business routes |
 | **Health** | `/healthz`, `/readyz` — **unversioned**. `/api/v1/healthz` correctly returns `404` |
 | **Environment** | `Environment=staging` (AWS tag) / `NODE_ENV=production` (Node runtime) |
 | **Region** | ap-south-1, AWS account `231378335677`, CLI profile `sampark-admin` |
 | **Logs** | CloudWatch group `/ecs/sampark-backend`, 30-day retention |
 
-`EXPO_PUBLIC_API_URL=http://sampark-staging-alb-2106262233.ap-south-1.elb.amazonaws.com/api/v1`
+`EXPO_PUBLIC_API_URL=https://api.bsmart.net.in/api/v1`
 
-Note `http://`, not `https://`. TLS is a Phase 2 item (needs Route 53 + an ACM cert in ap-south-1). An
-Android **release** build will need `usesCleartextTraffic`; Expo Go / dev builds work as-is.
+TLS is live (`infra/dns.tf` + `infra/alb.tf`): the raw ALB DNS name
+(`sampark-staging-alb-2106262233.ap-south-1.elb.amazonaws.com`) now only serves a `:80` → `:443`
+redirect, it no longer forwards to the app directly, so `EXPO_PUBLIC_API_URL` and the `api.ts`
+fallback must point at `https://api.bsmart.net.in/api/v1` (mobile-side change, tracked separately —
+see root `CLAUDE.md`: frontends are canonical and are not edited from a backend task).
 
 Backend surface is unchanged from the Phase-1 build: **13 endpoints, 49 tests green**, mixed wire casing
 (snake_case request bodies + auth responses, camelCase entity responses) exactly as the clients expect.

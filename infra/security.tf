@@ -19,6 +19,10 @@
 # create_before_destroy is required because an SG attached to a live ALB or ECS
 # service cannot be deleted; the replacement must exist before the original goes.
 
+# description is left as the original HTTP-only text below (and on alb_http_in) even
+# though a :443 rule now exists too -- description is an immutable field on both the SG
+# and its ingress rules, so editing the text forces a create_before_destroy replacement
+# of the SG and every rule that references it by ID. Not worth the churn for a comment.
 resource "aws_security_group" "alb" {
   name_prefix = "${local.name_prefix}-alb-sg-"
   description = "SAMPARK ALB: HTTP 80 from the internet, forwards to Fargate tasks"
@@ -71,6 +75,18 @@ resource "aws_vpc_security_group_ingress_rule" "alb_http_in" {
   to_port     = 80
 
   tags = { Name = "${local.name_prefix}-alb-http-in" }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "alb_https_in" {
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTPS from the internet"
+
+  cidr_ipv4   = "0.0.0.0/0"
+  ip_protocol = "tcp"
+  from_port   = 443
+  to_port     = 443
+
+  tags = { Name = "${local.name_prefix}-alb-https-in" }
 }
 
 resource "aws_vpc_security_group_egress_rule" "alb_to_fargate" {
