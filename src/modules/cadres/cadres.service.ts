@@ -114,7 +114,9 @@ export interface CadresService {
   // scope somebody forgets to pass, and the failure mode of forgetting is a silent,
   // total loss of access control. TypeScript refuses the call instead.
   list(query: ResolvedListCadresQuery, scope: CadreScope): Promise<Paginated<WireCadre>>;
-  facets(scope: CadreScope): Promise<CadreFacets>;
+  // `category` scopes the distinct values to one dashboard tile's rows (undefined/'all'
+  // = every category the caller can already see) — see the note on facetsQuery.
+  facets(scope: CadreScope, category?: 'surrendered' | 'jail' | 'thana' | 'all'): Promise<CadreFacets>;
   getById(id: number, scope: CadreScope): Promise<WireCadre>;
   transfer(cadreId: number, toOfficerId: number, actorId: number, scope: CadreScope): Promise<void>;
   // ADR-046. Move a cadre to another station. `scope` enforces ADR-044 on BOTH ends —
@@ -373,11 +375,13 @@ export function makeCadresService({
      * the sheet cannot offer an option that finds nobody, and Design-Docs#7's ~1,790
      * imported cadres populate it without a code change.
      */
-    async facets(scope) {
+    async facets(scope, category) {
       // Scoped too. An unscoped facet list would leak the shape of the wider register —
       // a thana officer could read off every station and designation in the district from
       // a filter dropdown they cannot actually filter into.
-      const visible = { deletedAt: null, ...cadreScopeWhere(scope) };
+      const visible: Prisma.CadreWhereInput = { deletedAt: null, ...cadreScopeWhere(scope) };
+      // Same `all`-sentinel handling as list(): narrows only when a real category is given.
+      if (category !== undefined && category !== 'all') visible.category = category;
       const [thanas, designations] = await prisma.$transaction([
         prisma.cadre.findMany({
           where: visible,

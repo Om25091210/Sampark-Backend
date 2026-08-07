@@ -52,6 +52,19 @@ export const listCadresQuery = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(15),
 });
 
+// The filter sheet is opened from a category-scoped dashboard tile (e.g. the
+// "थाना कैडर" card) as well as the unscoped "सभी कैडर" tile, so facets must be
+// narrowable the same way `category` narrows `GET /cadres` — a thana-imported
+// designation (e.g. "आरक्षक") should not appear as an option while browsing the
+// surrendered register, and vice versa. Single-valued (unlike list's `category`):
+// the sheet is opened from exactly one route at a time. `all`/absent both mean
+// unscoped, matching the list endpoint's sentinel.
+export const facetsQuery = z.object({
+  category: z.enum(['surrendered', 'jail', 'thana', 'all']).optional(),
+});
+
+export type FacetsQuery = z.infer<typeof facetsQuery>;
+
 // ─── Bulk historical import (ADR-038) ──────────────────────────────────────────
 //
 // One-time backfill of the ~1,478-row paper surrender register, pushed from an

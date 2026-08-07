@@ -131,13 +131,16 @@ beforeAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: FACET_TOKEN } } });
   await prisma.cadre.createMany({
     data: [
-      { n: 1, thana: `${FACET_TOKEN} बीजापुर / गंगालूर`, designation: `${FACET_TOKEN} दस्ते का सदस्य` },
-      { n: 2, thana: `${FACET_TOKEN} दंतेवाड़ा`, designation: `${FACET_TOKEN} सीनियर कैडर` },
-      { n: 3, thana: `${FACET_TOKEN} बीजापुर / गंगालूर`, designation: `${FACET_TOKEN} सीनियर कैडर` },
+      { n: 1, thana: `${FACET_TOKEN} बीजापुर / गंगालूर`, designation: `${FACET_TOKEN} दस्ते का सदस्य`, category: 'surrendered' as const },
+      { n: 2, thana: `${FACET_TOKEN} दंतेवाड़ा`, designation: `${FACET_TOKEN} सीनियर कैडर`, category: 'surrendered' as const },
+      { n: 3, thana: `${FACET_TOKEN} बीजापुर / गंगालूर`, designation: `${FACET_TOKEN} सीनियर कैडर`, category: 'surrendered' as const },
+      // category-scoped facets fixture: a थाना-category row with a designation the
+      // surrendered rows above never use, so scoping is actually observable.
+      { n: 4, thana: `${FACET_TOKEN} नारायणपुर`, designation: `${FACET_TOKEN} आरक्षक`, category: 'thana' as const },
     ].map((c) => ({
       name: `${FACET_TOKEN}-${c.n}`, phone: `+91000000030${c.n}`,
       thana: c.thana, designation: c.designation,
-      currentAddress: 'Facet fixture', category: 'surrendered' as const,
+      currentAddress: 'Facet fixture', category: c.category,
       alertLevel: 'normal' as const, aliases: [],
     })),
   });
@@ -448,10 +451,54 @@ describe('cadres', () => {
 
     // Distinct: two cadres share this thana, it must appear once.
     const mine = body.thanas.filter((t) => t.startsWith(FACET_TOKEN));
-    expect(mine).toEqual([`${FACET_TOKEN} दंतेवाड़ा`, `${FACET_TOKEN} बीजापुर / गंगालूर`]);
+    expect(mine.sort()).toEqual([`${FACET_TOKEN} दंतेवाड़ा`, `${FACET_TOKEN} नारायणपुर`, `${FACET_TOKEN} बीजापुर / गंगालूर`].sort());
 
     const desigs = body.designations.filter((d) => d.startsWith(FACET_TOKEN));
-    expect(desigs.sort()).toEqual([`${FACET_TOKEN} दस्ते का सदस्य`, `${FACET_TOKEN} सीनियर कैडर`]);
+    expect(desigs.sort()).toEqual(
+      [`${FACET_TOKEN} आरक्षक`, `${FACET_TOKEN} दस्ते का सदस्य`, `${FACET_TOKEN} सीनियर कैडर`].sort(),
+    );
+    await app.close();
+  });
+
+  it('GET /cadres/facets?category= scopes designations/thanas to that category', async () => {
+    const app = await makeApp();
+
+    const thanaRes = await app.inject({
+      method: 'GET', url: '/api/v1/cadres/facets?category=thana', headers: auth(superAdminToken),
+    });
+    expect(thanaRes.statusCode).toBe(200);
+    const thanaBody = thanaRes.json() as { thanas: string[]; designations: string[] };
+    // Only the थाना-category fixture row's designation/thana — the surrendered
+    // rows' designations must not leak into a category-scoped filter sheet.
+    expect(thanaBody.designations.filter((d) => d.startsWith(FACET_TOKEN))).toEqual([`${FACET_TOKEN} आरक्षक`]);
+    expect(thanaBody.thanas.filter((t) => t.startsWith(FACET_TOKEN))).toEqual([`${FACET_TOKEN} नारायणपुर`]);
+
+    const surrenderedRes = await app.inject({
+      method: 'GET', url: '/api/v1/cadres/facets?category=surrendered', headers: auth(superAdminToken),
+    });
+    const surrenderedBody = surrenderedRes.json() as { thanas: string[]; designations: string[] };
+    const surrenderedDesigs = surrenderedBody.designations.filter((d) => d.startsWith(FACET_TOKEN));
+    expect(surrenderedDesigs.sort()).toEqual([`${FACET_TOKEN} दस्ते का सदस्य`, `${FACET_TOKEN} सीनियर कैडर`].sort());
+    expect(surrenderedDesigs).not.toContain(`${FACET_TOKEN} आरक्षक`);
+
+    // `category=all` behaves the same as omitting it entirely.
+    const allRes = await app.inject({
+      method: 'GET', url: '/api/v1/cadres/facets?category=all', headers: auth(superAdminToken),
+    });
+    const allBody = allRes.json() as { designations: string[] };
+    expect(allBody.designations.filter((d) => d.startsWith(FACET_TOKEN)).sort()).toEqual(
+      [`${FACET_TOKEN} आरक्षक`, `${FACET_TOKEN} दस्ते का सदस्य`, `${FACET_TOKEN} सीनियर कैडर`].sort(),
+    );
+
+    await app.close();
+  });
+
+  it('rejects an unknown facets category with 400', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/cadres/facets?category=bogus', headers: auth(superAdminToken),
+    });
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 

@@ -5,6 +5,7 @@ import {
   avatarBackfillBody,
   cadreIdParam,
   categoryBackfillBody,
+  facetsQuery,
   importCadresBody,
   listCadresQuery,
   thanaTransferBody,
@@ -216,8 +217,11 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
         summary: 'Distinct thana / designation values for the filter sheet',
         description:
           'ADR-033. The options the master filter sheet offers, taken from the rows that exist. ' +
-          'The sheet previously hardcoded them, and offered ranks that matched no cadre at all.',
+          'The sheet previously hardcoded them, and offered ranks that matched no cadre at all. ' +
+          '`category` scopes the values to one dashboard tile\'s rows (e.g. थाना कैडर designations ' +
+          'only) — omitted or `all` returns every category\'s distinct values, same as before.',
         security: bearerAuth,
+        querystring: zodToJson(facetsQuery),
         response: {
           200: jsonResponse('Filter facets', {
             thanas: ['बीजापुर / गंगालूर', 'दंतेवाड़ा'],
@@ -226,7 +230,10 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
         },
       },
     },
-    async (request) => service.facets(request.scope!),
+    async (request) => {
+      const { category } = facetsQuery.parse(request.query);
+      return service.facets(request.scope!, category);
+    },
   );
 
   app.get(
