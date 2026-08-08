@@ -3,6 +3,13 @@ import { PrismaClient } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
 import { publishOutboxBatch } from './outbox.worker.js';
 import { MockPushProvider, PushEndpointDisabledError, type PushMessage, type PushProvider } from '../lib/push.js';
+import {
+  MockSheetsSyncProvider,
+  SheetsSyncNotConfiguredError,
+  type SheetsSyncAction,
+  type SheetsSyncProvider,
+  type SheetsSyncResult,
+} from '../lib/sheets-sync.js';
 
 const prisma = new PrismaClient();
 const AGG = 'test-outbox-drain';
@@ -10,6 +17,7 @@ const AGG = 'test-outbox-drain';
 // Silent logger stub — publishOutboxBatch only calls `.info`/`.warn`.
 const log = { info: () => undefined, warn: () => undefined } as unknown as FastifyBaseLogger;
 const pushProvider = new MockPushProvider();
+const sheetsSync = new MockSheetsSyncProvider();
 
 async function seedEvent(): Promise<number> {
   const e = await prisma.outboxEvent.create({
@@ -34,7 +42,7 @@ describe('outbox publisher', () => {
     const id1 = await seedEvent();
     const id2 = await seedEvent();
 
-    const published = await publishOutboxBatch({ prisma, pushProvider, log });
+    const published = await publishOutboxBatch({ prisma, pushProvider, sheetsSync, log });
     expect(published).toBeGreaterThanOrEqual(2);
 
     const rows = await prisma.outboxEvent.findMany({ where: { id: { in: [id1, id2] } } });
@@ -43,13 +51,13 @@ describe('outbox publisher', () => {
 
   it('does not re-publish an already-published event (publishedAt stays fixed)', async () => {
     const id = await seedEvent();
-    await publishOutboxBatch({ prisma, pushProvider, log }); // drains it
+    await publishOutboxBatch({ prisma, pushProvider, sheetsSync, log }); // drains it
     const first = await prisma.outboxEvent.findUniqueOrThrow({ where: { id } });
     expect(first.publishedAt).not.toBeNull();
 
     // A second drain must not touch an already-published event. (Global count isn't
     // asserted — other suites run in parallel against the same DB.)
-    await publishOutboxBatch({ prisma, pushProvider, log });
+    await publishOutboxBatch({ prisma, pushProvider, sheetsSync, log });
     const second = await prisma.outboxEvent.findUniqueOrThrow({ where: { id } });
     expect(second.publishedAt?.getTime()).toBe(first.publishedAt?.getTime());
   });
@@ -120,7 +128,7 @@ describe('notification.created dispatch (ADR-048)', () => {
   it('a notification.created event with no registered device is published immediately (nothing to deliver)', async () => {
     const { outboxEventId } = await seedNotificationEvent();
     const provider = new ControllablePushProvider();
-    await publishOutboxBatch({ prisma, pushProvider: provider, log });
+    await publishOutboxBatch({ prisma, pushProvider: provider, sheetsSync, log });
 
     const event = await prisma.outboxEvent.findUniqueOrThrow({ where: { id: outboxEventId } });
     expect(event.publishedAt).not.toBeNull();
@@ -137,7 +145,7 @@ describe('notification.created dispatch (ADR-048)', () => {
       if (endpointArn === arn) calls.push(endpointArn);
     };
 
-    await publishOutboxBatch({ prisma, pushProvider: provider, log });
+    await publishOutboxBatch({ prisma, pushProvider: provider, sheetsSync, log });
     expect(calls).toEqual([arn]);
 
     const event = await prisma.outboxEvent.findUniqueOrThrow({ where: { id: outboxEventId } });
@@ -154,7 +162,7 @@ describe('notification.created dispatch (ADR-048)', () => {
       if (endpointArn === arn) throw new PushEndpointDisabledError(endpointArn);
     };
 
-    await publishOutboxBatch({ prisma, pushProvider: provider, log });
+    await publishOutboxBatch({ prisma, pushProvider: provider, sheetsSync, log });
 
     const event = await prisma.outboxEvent.findUniqueOrThrow({ where: { id: outboxEventId } });
     expect(event.publishedAt).not.toBeNull(); // a dead device is not a reason to retry the event
@@ -171,13 +179,92 @@ describe('notification.created dispatch (ADR-048)', () => {
     failing.publishImpl = async (endpointArn) => {
       if (endpointArn === arn) throw new Error('transient SNS error');
     };
-    await publishOutboxBatch({ prisma, pushProvider: failing, log });
+    await publishOutboxBatch({ prisma, pushProvider: failing, sheetsSync, log });
     const stillUnpublished = await prisma.outboxEvent.findUniqueOrThrow({ where: { id: outboxEventId } });
     expect(stillUnpublished.publishedAt).toBeNull();
 
     const succeeding = new ControllablePushProvider();
-    await publishOutboxBatch({ prisma, pushProvider: succeeding, log });
+    await publishOutboxBatch({ prisma, pushProvider: succeeding, sheetsSync, log });
     const nowPublished = await prisma.outboxEvent.findUniqueOrThrow({ where: { id: outboxEventId } });
+    expect(nowPublished.publishedAt).not.toBeNull();
+  });
+});
+
+// A sheets-sync provider whose call() behavior is controlled per-test — same shape
+// as ControllablePushProvider above, same reason: MockSheetsSyncProvider never fails.
+class ControllableSheetsSyncProvider implements SheetsSyncProvider {
+  readonly name = 'controllable';
+  callImpl: (action: SheetsSyncAction, payload: unknown) => Promise<SheetsSyncResult> = async () => ({ ok: true });
+  async call(action: SheetsSyncAction, payload: unknown): Promise<SheetsSyncResult> {
+    return this.callImpl(action, payload);
+  }
+}
+
+describe('user.* sheet sync dispatch (ADR-057)', () => {
+  async function seedUserSyncEvent(eventType: string, name: string): Promise<number> {
+    const event = await prisma.outboxEvent.create({
+      data: {
+        aggregateType: 'user',
+        aggregateId: '999999',
+        eventType,
+        payload: {
+          id: 999999,
+          name,
+          email: `${name.toLowerCase()}@sampark.internal`,
+          role: 'officer',
+          thana: 'बीजापुर',
+          subDivision: null,
+          designation: null,
+          status: 'active',
+          timestamp: new Date().toISOString(),
+        },
+      },
+    });
+    return event.id;
+  }
+
+  afterEach(async () => {
+    await prisma.outboxEvent.deleteMany({ where: { aggregateType: 'user', aggregateId: '999999' } });
+    await prisma.syncLog.deleteMany({ where: { targetKey: { startsWith: 'OUTBOXTEST_' } } });
+  });
+
+  it('a successful sync marks the event published and logs a SyncLog success row', async () => {
+    const id = await seedUserSyncEvent('user.created', 'OUTBOXTEST_OK');
+    const provider = new ControllableSheetsSyncProvider();
+    await publishOutboxBatch({ prisma, pushProvider, sheetsSync: provider, log });
+
+    const event = await prisma.outboxEvent.findUniqueOrThrow({ where: { id } });
+    expect(event.publishedAt).not.toBeNull();
+    const logRow = await prisma.syncLog.findFirst({ where: { targetKey: 'OUTBOXTEST_OK' } });
+    expect(logRow?.status).toBe('success');
+  });
+
+  it('a body-level rejection (ok: false) leaves the event unpublished and logs an error row', async () => {
+    const id = await seedUserSyncEvent('user.updated', 'OUTBOXTEST_REJECT');
+    const provider = new ControllableSheetsSyncProvider();
+    provider.callImpl = async () => ({ ok: false, error: 'unauthorized' });
+    await publishOutboxBatch({ prisma, pushProvider, sheetsSync: provider, log });
+
+    const event = await prisma.outboxEvent.findUniqueOrThrow({ where: { id } });
+    expect(event.publishedAt).toBeNull();
+    const logRow = await prisma.syncLog.findFirst({ where: { targetKey: 'OUTBOXTEST_REJECT' } });
+    expect(logRow?.status).toBe('error');
+    expect(logRow?.error).toBe('unauthorized');
+  });
+
+  it('a thrown error (e.g. sync not configured) leaves the event unpublished, and a later successful drain retries it', async () => {
+    const id = await seedUserSyncEvent('user.deactivated', 'OUTBOXTEST_RETRY');
+    const failing = new ControllableSheetsSyncProvider();
+    failing.callImpl = async () => {
+      throw new SheetsSyncNotConfiguredError();
+    };
+    await publishOutboxBatch({ prisma, pushProvider, sheetsSync: failing, log });
+    const stillUnpublished = await prisma.outboxEvent.findUniqueOrThrow({ where: { id } });
+    expect(stillUnpublished.publishedAt).toBeNull();
+
+    const succeeding = new ControllableSheetsSyncProvider();
+    await publishOutboxBatch({ prisma, pushProvider, sheetsSync: succeeding, log });
+    const nowPublished = await prisma.outboxEvent.findUniqueOrThrow({ where: { id } });
     expect(nowPublished.publishedAt).not.toBeNull();
   });
 });

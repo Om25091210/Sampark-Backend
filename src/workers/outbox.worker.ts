@@ -2,19 +2,29 @@ import type PgBoss from 'pg-boss';
 import type { FastifyBaseLogger } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
 import { dispatchNotificationEvent, type NotificationDispatchPayload } from '../lib/notification-dispatch.js';
+import { dispatchUserSyncEvent, type UserSyncPayload, type UserSyncEventType } from '../lib/user-sync-dispatch.js';
 import type { PushProvider } from '../lib/push.js';
+import type { SheetsSyncProvider } from '../lib/sheets-sync.js';
 
 // Transactional-outbox publisher. Domain writes commit their events to
 // `outbox_events` inside the same transaction as the state change (see lib/outbox.ts);
 // this worker drains the unpublished events, marks them shipped, and emits the event
-// trail. ADR-048: `notification.created` events are the one real downstream consumer
-// this file's own comment used to say would "plug in later" — every other event type
-// keeps the original log-then-publish behavior unchanged.
+// trail. ADR-048: `notification.created` events are a real downstream consumer this
+// file's own comment used to say would "plug in later"; ADR-057 adds `user.created` /
+// `user.updated` / `user.deactivated` as a second one. Every other event type keeps
+// the original log-then-publish behavior unchanged.
 export const OUTBOX_QUEUE = 'outbox-drain';
+
+const USER_SYNC_EVENT_TYPES: readonly UserSyncEventType[] = [
+  'user.created',
+  'user.updated',
+  'user.deactivated',
+];
 
 export interface OutboxDrainDeps {
   prisma: PrismaClient;
   pushProvider: PushProvider;
+  sheetsSync: SheetsSyncProvider;
   log: FastifyBaseLogger;
   batchSize?: number;
 }
@@ -26,7 +36,7 @@ export interface OutboxDrainDeps {
 // transaction commits (see lib/notification-dispatch.ts's fireImmediateDispatch);
 // this drain only re-attempts what that missed (a process restart, a transient error).
 export async function publishOutboxBatch(deps: OutboxDrainDeps): Promise<number> {
-  const { prisma, pushProvider, log, batchSize = 100 } = deps;
+  const { prisma, pushProvider, sheetsSync, log, batchSize = 100 } = deps;
 
   const events = await prisma.outboxEvent.findMany({
     where: { publishedAt: null },
@@ -45,6 +55,21 @@ export async function publishOutboxBatch(deps: OutboxDrainDeps): Promise<number>
         idsToMarkPublished.push(event.id);
       } else {
         log.warn({ outboxId: event.id }, 'notification dispatch not fully handled, retrying next drain');
+      }
+      continue;
+    }
+
+    if (USER_SYNC_EVENT_TYPES.includes(event.eventType as UserSyncEventType)) {
+      const payload = event.payload as unknown as UserSyncPayload;
+      const handled = await dispatchUserSyncEvent(
+        { prisma, sheetsSync, log },
+        event.eventType as UserSyncEventType,
+        payload,
+      );
+      if (handled) {
+        idsToMarkPublished.push(event.id);
+      } else {
+        log.warn({ outboxId: event.id }, 'user sheet sync not handled, retrying next drain');
       }
       continue;
     }
@@ -74,6 +99,7 @@ export async function publishOutboxBatch(deps: OutboxDrainDeps): Promise<number>
 export interface OutboxWorkerDeps {
   prisma: PrismaClient;
   pushProvider: PushProvider;
+  sheetsSync: SheetsSyncProvider;
   boss: PgBoss;
   log: FastifyBaseLogger;
   /** Cron for the recurring drain; defaults to every minute. */
@@ -83,11 +109,11 @@ export interface OutboxWorkerDeps {
 // Registers the pg-boss queue + recurring drain schedule (Postgres-backed cron, so a
 // single run fires per interval even across restarts). Call once from the composition root.
 export async function startOutboxWorker(deps: OutboxWorkerDeps): Promise<void> {
-  const { prisma, pushProvider, boss, log, cron = '* * * * *' } = deps;
+  const { prisma, pushProvider, sheetsSync, boss, log, cron = '* * * * *' } = deps;
 
   await boss.createQueue(OUTBOX_QUEUE);
   await boss.work(OUTBOX_QUEUE, async () => {
-    const published = await publishOutboxBatch({ prisma, pushProvider, log });
+    const published = await publishOutboxBatch({ prisma, pushProvider, sheetsSync, log });
     if (published > 0) log.info({ published }, 'outbox drain complete');
   });
   await boss.schedule(OUTBOX_QUEUE, cron);

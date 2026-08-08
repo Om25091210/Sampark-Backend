@@ -14,10 +14,11 @@ async function main(): Promise<void> {
     logger: loggerOptions(env.NODE_ENV),
   });
 
-  // ADR-048. buildApp already decorated app.pushProvider (its own default,
-  // config-driven). Reuse that SAME instance for the background workers below,
-  // rather than constructing a second, independent one.
+  // ADR-048/057. buildApp already decorated app.pushProvider / app.sheetsSync (their
+  // own defaults, config-driven). Reuse those SAME instances for the background
+  // workers below, rather than constructing second, independent ones.
   const pushProvider = app.pushProvider;
+  const sheetsSync = app.sheetsSync;
 
   // Background job runner (pg-boss). Started alongside the API on the single server;
   // failure to start a worker degrades to no async processing for that worker but
@@ -27,7 +28,7 @@ async function main(): Promise<void> {
   boss.on('error', (err) => app.log.error({ err }, 'pg-boss error'));
   try {
     await boss.start();
-    await startOutboxWorker({ prisma: app.prisma, pushProvider, boss, log: app.log });
+    await startOutboxWorker({ prisma: app.prisma, pushProvider, sheetsSync, boss, log: app.log });
     await startNotificationEscalationWorker({ prisma: app.prisma, pushProvider, boss, log: app.log });
   } catch (err) {
     app.log.error({ err }, 'failed to start background workers (API continues)');
