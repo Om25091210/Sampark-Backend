@@ -1,14 +1,48 @@
 import type { FastifyBaseLogger } from 'fastify';
-import { Prisma } from '@prisma/client';
+import { Prisma, type User } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
 import { writeAuditLog } from '../../lib/audit.js';
-import { badRequest, notFound } from '../../lib/errors.js';
+import { writeOutboxEvent } from '../../lib/outbox.js';
+import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { hashPassword } from '../../lib/password.js';
-import { importUserRow, type ImportUserRow } from './users.schema.js';
+import { toWireUser, type WireUser } from '../../lib/serialize.js';
+import {
+  importUserRow,
+  scopeInvariantErrors,
+  type ImportUserRow,
+  type CreateUserBody,
+  type UpdateUserBody,
+  type ListUsersQuery,
+} from './users.schema.js';
 
 export interface UsersDeps {
   prisma: PrismaClient;
   log: FastifyBaseLogger;
+}
+
+export interface Paginated<T> {
+  data: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
+// ADR-057. Everything Phase 3's Sheet-sync consumer will need from a `user.*` outbox
+// event — id, name, email, role, thana, subDivision, designation, status, timestamp.
+// One builder so create/update/deactivate can never emit three different shapes.
+function userSyncPayload(u: User): Prisma.InputJsonValue {
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    role: u.role,
+    thana: u.thana,
+    subDivision: u.subDivision,
+    designation: u.designation,
+    status: u.deletedAt === null ? 'active' : 'deactivated',
+    timestamp: u.updatedAt.toISOString(),
+  };
 }
 
 /** Per-row outcome, keyed by the institutional ID so the sheet can write it straight back. */
@@ -27,6 +61,11 @@ export interface UsersService {
   importUsers(rows: unknown[], actorId: number): Promise<ImportUsersResult>;
   setPassword(userId: number, password: string, actorId: number): Promise<void>;
   deactivate(userId: number, actorId: number): Promise<void>;
+  // Phase 2 (web User Management).
+  list(query: ListUsersQuery): Promise<Paginated<WireUser>>;
+  getById(userId: number): Promise<WireUser>;
+  create(row: CreateUserBody, actorId: number): Promise<WireUser>;
+  update(userId: number, body: UpdateUserBody, actorId: number): Promise<WireUser>;
 }
 
 /** Echo whatever `name` a raw (possibly invalid) row carried, so the sheet can still key on it. */
@@ -188,7 +227,7 @@ export function makeUsersService({ prisma, log }: UsersDeps): UsersService {
       if (user === null) throw notFound('User not found');
 
       await prisma.$transaction(async (tx) => {
-        await tx.user.update({ where: { id: userId }, data: { deletedAt: new Date() } });
+        const u = await tx.user.update({ where: { id: userId }, data: { deletedAt: new Date() } });
         // A deactivated account must not keep a live session — otherwise "removed" means
         // "removed in 15 minutes, or 30 days if they hold a refresh token".
         await tx.refreshToken.updateMany({
@@ -201,9 +240,163 @@ export function makeUsersService({ prisma, log }: UsersDeps): UsersService {
           entityType: 'user',
           entityId: String(userId),
           before: { name: user.name, role: user.role, deletedAt: null },
-          after: { name: user.name, deletedAt: new Date().toISOString(), sessionsRevoked: true },
+          after: { name: user.name, deletedAt: u.deletedAt!.toISOString(), sessionsRevoked: true },
+        });
+        // ADR-057. What Phase 3's Sheet-sync consumer will drain on the next cycle.
+        await writeOutboxEvent(tx, {
+          aggregateType: 'user',
+          aggregateId: String(userId),
+          eventType: 'user.deactivated',
+          payload: userSyncPayload(u),
         });
       });
+    },
+
+    // Phase 2 (web User Management).
+
+    async list(query) {
+      const where: Prisma.UserWhereInput = {};
+      if (query.status === 'active') where.deletedAt = null;
+      else if (query.status === 'deactivated') where.deletedAt = { not: null };
+      // 'all' → no deletedAt filter.
+      if (query.role !== undefined) where.role = query.role;
+      if (query.thana !== undefined) where.thana = query.thana;
+      if (query.subDivision !== undefined) where.subDivision = query.subDivision;
+      if (query.search !== undefined && query.search !== '') {
+        where.name = { contains: query.search, mode: 'insensitive' };
+      }
+
+      const [total, rows] = await prisma.$transaction([
+        prisma.user.count({ where }),
+        prisma.user.findMany({
+          where,
+          orderBy: { name: 'asc' },
+          skip: (query.page - 1) * query.pageSize,
+          take: query.pageSize,
+        }),
+      ]);
+
+      return {
+        data: rows.map(toWireUser),
+        total,
+        page: query.page,
+        pageSize: query.pageSize,
+        hasMore: query.page * query.pageSize < total,
+      };
+    },
+
+    // Deliberately not scoped to deletedAt: null — a management UI needs to be able to
+    // open a deactivated account's detail (its `status` field tells the caller which).
+    async getById(userId) {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (user === null) throw notFound('User not found');
+      return toWireUser(user);
+    },
+
+    // A single-row create, reusing importUserRow's exact validation. Unlike
+    // /users/import, a duplicate `name` here is a 409 — this route is never a bulk
+    // re-run, so there is no "skip, don't clobber a changed password" case to protect.
+    async create(row, actorId) {
+      const existing = await prisma.user.findUnique({ where: { name: row.name }, select: { id: true } });
+      if (existing !== null) throw conflict(`name "${row.name}" already exists`, 'DUPLICATE_NAME');
+
+      const passwordHash = row.password !== undefined ? await hashPassword(row.password) : null;
+      try {
+        const created = await prisma.$transaction(async (tx) => {
+          const u = await tx.user.create({
+            data: {
+              name: row.name,
+              email: row.email,
+              role: row.role,
+              passwordHash,
+              thana: row.thana ?? null,
+              subDivision: row.subDivision ?? null,
+              designation: row.designation ?? null,
+            },
+          });
+          await writeAuditLog(tx, {
+            actorId,
+            action: 'user.created',
+            entityType: 'user',
+            entityId: String(u.id),
+            after: {
+              name: u.name,
+              email: u.email,
+              role: u.role,
+              thana: u.thana,
+              subDivision: u.subDivision,
+              designation: u.designation,
+              passwordSet: passwordHash !== null,
+            },
+          });
+          await writeOutboxEvent(tx, {
+            aggregateType: 'user',
+            aggregateId: String(u.id),
+            eventType: 'user.created',
+            payload: userSyncPayload(u),
+          });
+          return u;
+        });
+        return toWireUser(created);
+      } catch (err) {
+        // A race against a concurrent create/import lost between the pre-check above
+        // and the insert — same collision handling as importUsers.
+        const target = uniqueTarget(err);
+        if (target !== null) {
+          if (target.includes('name')) throw conflict(`name "${row.name}" already exists`, 'DUPLICATE_NAME');
+          throw conflict(`email already belongs to another account (unique: ${target})`, 'DUPLICATE_EMAIL');
+        }
+        log.error({ err, name: row.name }, 'user create failed');
+        throw err;
+      }
+    },
+
+    // role/thana/subDivision/designation only. Validates the MERGED post-edit state
+    // (existing values + this patch), not just the submitted fields — a role change
+    // alone can violate scopeInvariantErrors unless the caller also clears the
+    // now-wrong scope field in the same request (e.g. officer -> admin must clear
+    // thana AND set subDivision together).
+    async update(userId, body, actorId) {
+      const existing = await prisma.user.findFirst({ where: { id: userId, deletedAt: null } });
+      if (existing === null) throw notFound('User not found');
+
+      const effectiveRole = body.role ?? existing.role;
+      const effectiveThana = 'thana' in body ? body.thana : existing.thana;
+      const effectiveSubDivision = 'subDivision' in body ? body.subDivision : existing.subDivision;
+
+      const scopeErrors = scopeInvariantErrors(effectiveRole, effectiveThana, effectiveSubDivision);
+      if (scopeErrors.length > 0) throw badRequest(scopeErrors.join('; '), 'INVALID_SCOPE');
+
+      const data: Prisma.UserUpdateInput = {};
+      if (body.role !== undefined) data.role = body.role;
+      if ('thana' in body) data.thana = body.thana;
+      if ('subDivision' in body) data.subDivision = body.subDivision;
+      if ('designation' in body) data.designation = body.designation;
+
+      const updated = await prisma.$transaction(async (tx) => {
+        const u = await tx.user.update({ where: { id: userId }, data });
+        await writeAuditLog(tx, {
+          actorId,
+          action: 'user.updated',
+          entityType: 'user',
+          entityId: String(userId),
+          before: {
+            role: existing.role,
+            thana: existing.thana,
+            subDivision: existing.subDivision,
+            designation: existing.designation,
+          },
+          after: { role: u.role, thana: u.thana, subDivision: u.subDivision, designation: u.designation },
+        });
+        await writeOutboxEvent(tx, {
+          aggregateType: 'user',
+          aggregateId: String(userId),
+          eventType: 'user.updated',
+          payload: userSyncPayload(u),
+        });
+        return u;
+      });
+      return toWireUser(updated);
     },
   };
 }
