@@ -36,6 +36,8 @@ interface ImportRes {
 const importedNames = [
   'USRIMP_SHO01', 'USRIMP_SHO02', 'USRIMP_SDOP01', 'USRIMP_HQ01',
   'USRIMP_BADSCOPE', 'USRIMP_DUP', 'USRIMP_NOPASS', 'USRIMP_EMAILDUP',
+  // Phase 2 — web User Management CRUD.
+  'USRCRUD_NEW1', 'USRCRUD_DUP', 'USRCRUD_SCOPEBAD', 'USRCRUD_PATCH1', 'USRCRUD_PATCH2',
 ];
 
 // Users acquire refresh tokens (tests log in) and audit rows (import/reset), both of which
@@ -49,6 +51,9 @@ async function purgeUsers(names: string[]): Promise<void> {
   const emails = users.map((u) => u.email).filter((e): e is string => e !== null);
   await prisma.refreshToken.deleteMany({ where: { userId: { in: ids } } });
   await prisma.auditLog.deleteMany({ where: { entityType: 'user', entityId: { in: ids.map(String) } } });
+  // ADR-057 outbox rows (user.created/updated/deactivated) — no FK, but keep the
+  // table tidy the same way the audit log is cleaned up above.
+  await prisma.outboxEvent.deleteMany({ where: { aggregateType: 'user', aggregateId: { in: ids.map(String) } } });
   if (emails.length > 0) await prisma.loginAttempt.deleteMany({ where: { email: { in: emails } } });
   // ADR-048: a parallel suite's trigger (transfer/broadcast/escalation) can write a
   // Notification referencing one of these fixture users before this file tears them down.
@@ -373,6 +378,237 @@ describe('DELETE /users/:userId — soft deactivate (Phase B)', () => {
   it('404 for unknown or already-deactivated', async () => {
     const app = await makeApp();
     expect((await app.inject({ method: 'DELETE', url: '/api/v1/users/99999999', headers: auth(saToken) })).statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('emits a user.deactivated outbox event carrying what Phase 3 sync will need (ADR-057)', async () => {
+    const app = await makeApp();
+    const del = await app.inject({ method: 'DELETE', url: `/api/v1/users/${offId}`, headers: auth(saToken) });
+    expect(del.statusCode).toBe(204);
+    const event = await prisma.outboxEvent.findFirst({
+      where: { aggregateType: 'user', aggregateId: String(offId), eventType: 'user.deactivated' },
+      orderBy: { id: 'desc' },
+    });
+    expect(event).not.toBeNull();
+    expect(event!.payload).toMatchObject({ id: offId, name: OFF_ID, status: 'deactivated' });
+
+    // Restore the fixture for later tests/files.
+    await prisma.user.update({ where: { id: offId }, data: { deletedAt: null } });
+    await app.close();
+  });
+});
+
+describe('GET /users (Phase 2 — web User Management)', () => {
+  it('is super_admin only', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/users' })).statusCode).toBe(401);
+    for (const t of [officerToken, adminToken]) {
+      expect((await app.inject({ method: 'GET', url: '/api/v1/users', headers: auth(t) })).statusCode).toBe(403);
+    }
+    await app.close();
+  });
+
+  it('lists accounts, defaults to active-only, and filters by role/status/search', async () => {
+    const app = await makeApp();
+    const all = await app.inject({ method: 'GET', url: '/api/v1/users?search=USRFIXTURE&pageSize=50', headers: auth(saToken) });
+    expect(all.statusCode).toBe(200);
+    const body = all.json() as { data: { id: number; name: string; status: string }[]; total: number; page: number; pageSize: number; hasMore: boolean };
+    expect(body.data.map((u) => u.name).sort()).toEqual([ADMIN_ID, OFF_ID, SA_ID].sort());
+    expect(body.data.every((u) => u.status === 'active')).toBe(true);
+
+    const officersOnly = await app.inject({
+      method: 'GET', url: '/api/v1/users?search=USRFIXTURE&role=officer', headers: auth(saToken),
+    });
+    const officersBody = officersOnly.json() as { data: { name: string }[] };
+    expect(officersBody.data.map((u) => u.name)).toEqual([OFF_ID]);
+    await app.close();
+  });
+
+  it('a deactivated account is excluded from the default (active) view but included under status=all', async () => {
+    const app = await makeApp();
+    await prisma.user.update({ where: { id: offId }, data: { deletedAt: new Date() } });
+
+    const active = await app.inject({ method: 'GET', url: `/api/v1/users?search=${OFF_ID}`, headers: auth(saToken) });
+    expect((active.json() as { data: unknown[] }).data).toHaveLength(0);
+
+    const everyone = await app.inject({ method: 'GET', url: `/api/v1/users?search=${OFF_ID}&status=all`, headers: auth(saToken) });
+    const everyoneBody = everyone.json() as { data: { status: string }[] };
+    expect(everyoneBody.data).toHaveLength(1);
+    expect(everyoneBody.data[0]!.status).toBe('deactivated');
+
+    await prisma.user.update({ where: { id: offId }, data: { deletedAt: null } });
+    await app.close();
+  });
+});
+
+describe('GET /users/:userId (Phase 2)', () => {
+  it('is super_admin only', async () => {
+    const app = await makeApp();
+    for (const t of [officerToken, adminToken]) {
+      expect((await app.inject({ method: 'GET', url: `/api/v1/users/${saId}`, headers: auth(t) })).statusCode).toBe(403);
+    }
+    await app.close();
+  });
+
+  it('404 for unknown', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/users/99999999', headers: auth(saToken) })).statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('returns the account, including a deactivated one (status says which)', async () => {
+    const app = await makeApp();
+    const live = await app.inject({ method: 'GET', url: `/api/v1/users/${offId}`, headers: auth(saToken) });
+    expect(live.statusCode).toBe(200);
+    expect((live.json() as { status: string }).status).toBe('active');
+
+    await prisma.user.update({ where: { id: offId }, data: { deletedAt: new Date() } });
+    const dead = await app.inject({ method: 'GET', url: `/api/v1/users/${offId}`, headers: auth(saToken) });
+    expect(dead.statusCode).toBe(200);
+    expect((dead.json() as { status: string }).status).toBe('deactivated');
+
+    await prisma.user.update({ where: { id: offId }, data: { deletedAt: null } });
+    await app.close();
+  });
+});
+
+describe('POST /users (Phase 2 — single-account create)', () => {
+  it('is super_admin only', async () => {
+    const app = await makeApp();
+    const payload = row({ name: 'USRCRUD_NEW1', email: 'usrcrud_new1@sampark.internal' });
+    for (const t of [officerToken, adminToken]) {
+      expect((await app.inject({ method: 'POST', url: '/api/v1/users', headers: auth(t), payload })).statusCode).toBe(403);
+    }
+    await app.close();
+  });
+
+  it('creates one account (not the batch envelope) and emits user.created', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/users', headers: auth(saToken),
+      payload: row({ name: 'USRCRUD_NEW1', email: 'usrcrud_new1@sampark.internal', password: 'Sampark@CRUD1' }),
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { id: number; name: string; status: string };
+    expect(body.name).toBe('USRCRUD_NEW1');
+    expect(body.status).toBe('active');
+
+    const event = await prisma.outboxEvent.findFirst({
+      where: { aggregateType: 'user', aggregateId: String(body.id), eventType: 'user.created' },
+    });
+    expect(event).not.toBeNull();
+    expect(event!.payload).toMatchObject({ id: body.id, name: 'USRCRUD_NEW1', role: 'officer', status: 'active' });
+    await app.close();
+  });
+
+  it('a duplicate name is 409, never a silent skip (unlike /users/import)', async () => {
+    const app = await makeApp();
+    const payload = row({ name: 'USRCRUD_DUP', email: 'usrcrud_dup@sampark.internal' });
+    const first = await app.inject({ method: 'POST', url: '/api/v1/users', headers: auth(saToken), payload });
+    expect(first.statusCode).toBe(201);
+
+    const second = await app.inject({
+      method: 'POST', url: '/api/v1/users', headers: auth(saToken),
+      payload: row({ name: 'USRCRUD_DUP', email: 'someone-else@sampark.internal' }),
+    });
+    expect(second.statusCode).toBe(409);
+    expect((second.json() as { error: { code: string } }).error.code).toBe('DUPLICATE_NAME');
+    await app.close();
+  });
+
+  it('enforces the org-scope invariant (400)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/users', headers: auth(saToken),
+      payload: { name: 'USRCRUD_SCOPEBAD', email: 'usrcrud_scopebad@sampark.internal', role: 'officer' }, // no thana
+    });
+    expect(res.statusCode).toBe(400);
+    expect(await prisma.user.count({ where: { name: 'USRCRUD_SCOPEBAD' } })).toBe(0);
+    await app.close();
+  });
+});
+
+describe('PATCH /users/:userId (Phase 2 — edit role/thana/subDivision/designation)', () => {
+  it('is super_admin only', async () => {
+    const app = await makeApp();
+    for (const t of [officerToken, adminToken]) {
+      const res = await app.inject({
+        method: 'PATCH', url: `/api/v1/users/${offId}`, headers: auth(t), payload: { designation: 'X' },
+      });
+      expect(res.statusCode).toBe(403);
+    }
+    await app.close();
+  });
+
+  it('404 for unknown', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'PATCH', url: '/api/v1/users/99999999', headers: auth(saToken), payload: { designation: 'X' },
+    });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('edits designation alone, leaving role/thana untouched, and emits user.updated', async () => {
+    const app = await makeApp();
+    await app.inject({
+      method: 'POST', url: '/api/v1/users', headers: auth(saToken),
+      payload: row({ name: 'USRCRUD_PATCH1', email: 'usrcrud_patch1@sampark.internal' }),
+    });
+    const target = await prisma.user.findUniqueOrThrow({ where: { name: 'USRCRUD_PATCH1' } });
+
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/v1/users/${target.id}`, headers: auth(saToken),
+      payload: { designation: 'नया पद' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { role: string; thana?: string; designation: string };
+    expect(body.designation).toBe('नया पद');
+    expect(body.role).toBe('officer');
+    expect(body.thana).toBe('गंगालूर');
+
+    const event = await prisma.outboxEvent.findFirst({
+      where: { aggregateType: 'user', aggregateId: String(target.id), eventType: 'user.updated' },
+    });
+    expect(event).not.toBeNull();
+    await app.close();
+  });
+
+  it('rejects a role change that would violate the scope invariant if the old scope field is left in place', async () => {
+    const app = await makeApp();
+    await app.inject({
+      method: 'POST', url: '/api/v1/users', headers: auth(saToken),
+      payload: row({ name: 'USRCRUD_PATCH2', email: 'usrcrud_patch2@sampark.internal' }),
+    });
+    const target = await prisma.user.findUniqueOrThrow({ where: { name: 'USRCRUD_PATCH2' } });
+
+    // officer -> admin, but thana is still set and subDivision was never provided.
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/v1/users/${target.id}`, headers: auth(saToken), payload: { role: 'admin' },
+    });
+    expect(res.statusCode).toBe(400);
+    const still = await prisma.user.findUniqueOrThrow({ where: { id: target.id } });
+    expect(still.role).toBe('officer'); // unchanged — the rejected write never applied
+    await app.close();
+  });
+
+  it('accepts a role change that clears the old scope field and sets the new one together', async () => {
+    const app = await makeApp();
+    await app.inject({
+      method: 'POST', url: '/api/v1/users', headers: auth(saToken),
+      payload: row({ name: 'USRCRUD_PATCH2', email: 'usrcrud_patch2@sampark.internal' }),
+    });
+    const target = await prisma.user.findUniqueOrThrow({ where: { name: 'USRCRUD_PATCH2' } });
+
+    const res = await app.inject({
+      method: 'PATCH', url: `/api/v1/users/${target.id}`, headers: auth(saToken),
+      payload: { role: 'admin', thana: null, subDivision: 'फरसेगढ़' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { role: string; thana?: string; subDivision?: string };
+    expect(body.role).toBe('admin');
+    expect(body.thana).toBeUndefined();
+    expect(body.subDivision).toBe('फरसेगढ़');
     await app.close();
   });
 });
