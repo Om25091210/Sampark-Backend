@@ -24,6 +24,33 @@ const optText = z
   .nullish()
   .transform((v) => (v === null || v === undefined || v === '' ? undefined : nfc(v)));
 
+export type UserRole = 'super_admin' | 'admin' | 'officer' | 'viewer';
+
+// The org-scope invariant (ADR-042), extracted so both `importUserRow`'s row validation
+// AND Phase 2's PATCH /users/:id (which validates the MERGED post-edit state, not just
+// the submitted fields) share one definition. `viewer` is deliberately unconstrained,
+// matching the original rule — there was never a clause for it.
+export function scopeInvariantErrors(
+  role: UserRole,
+  thana: string | null | undefined,
+  subDivision: string | null | undefined,
+): string[] {
+  const errors: string[] = [];
+  const has = (v: string | null | undefined) => v !== undefined && v !== null;
+  if (role === 'admin') {
+    if (!has(subDivision)) errors.push('role=admin requires subDivision (its SDOP scope)');
+    if (has(thana)) errors.push('role=admin must not set thana — its scope is the sub-division');
+  }
+  if (role === 'officer') {
+    if (!has(thana)) errors.push('role=officer requires thana (its station scope)');
+    if (has(subDivision)) errors.push('role=officer must not set subDivision — its scope is the thana');
+  }
+  if (role === 'super_admin' && (has(thana) || has(subDivision))) {
+    errors.push('role=super_admin is unrestricted — leave thana and subDivision empty');
+  }
+  return errors;
+}
+
 export const importUserRow = z
   .object({
     // The institutional ID. Upsert key — an existing name is SKIPPED, never overwritten,
@@ -39,25 +66,60 @@ export const importUserRow = z
     subDivision: optText,
     designation: optText,
   })
-  // The org-scope invariant (ADR-042), enforced per row rather than trusted. A
-  // mis-scoped account is not a cosmetic error: in Phase C the scope columns ARE the
-  // row-level authorization boundary, so an officer with no thana would see nothing and
-  // an admin with no sub-division would supervise nothing — and both would look like
-  // application bugs long after the sheet that caused them was forgotten.
+  // Enforced per row rather than trusted. A mis-scoped account is not a cosmetic error:
+  // in Phase C the scope columns ARE the row-level authorization boundary, so an officer
+  // with no thana would see nothing and an admin with no sub-division would supervise
+  // nothing — and both would look like application bugs long after the sheet that caused
+  // them was forgotten.
   .superRefine((row, ctx) => {
-    const fail = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
-    if (row.role === 'admin') {
-      if (row.subDivision === undefined) fail('role=admin requires subDivision (its SDOP scope)');
-      if (row.thana !== undefined) fail('role=admin must not set thana — its scope is the sub-division');
-    }
-    if (row.role === 'officer') {
-      if (row.thana === undefined) fail('role=officer requires thana (its station scope)');
-      if (row.subDivision !== undefined) fail('role=officer must not set subDivision — its scope is the thana');
-    }
-    if (row.role === 'super_admin' && (row.thana !== undefined || row.subDivision !== undefined)) {
-      fail('role=super_admin is unrestricted — leave thana and subDivision empty');
+    for (const message of scopeInvariantErrors(row.role, row.thana, row.subDivision)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
     }
   });
+
+// ─── Single-account CRUD (Phase 2 — web User Management) ─────────────────────
+//
+// POST /users reuses importUserRow's row shape verbatim — same fields, same
+// validation, same org-scope invariant. It is NOT the batch envelope; the body IS
+// one row. Unlike /users/import, a duplicate `name` here is a 409, not a silent skip.
+export const createUserBody = importUserRow;
+
+// PATCH edits role/thana/subDivision/designation only — never name (the immutable
+// institutional ID / upsert key) or email (derived from name, ADR-042 §5) or password
+// (its own explicit POST /users/:id/password endpoint, never bundled into a generic PATCH).
+//
+// thana/subDivision are three-way per field: OMITTED = leave untouched, `null` =
+// explicitly clear (needed when a role change requires swapping which scope field is
+// set), a string = set it. The service validates the MERGED (existing + patch) state
+// against scopeInvariantErrors, since a role change alone can violate the invariant
+// unless the caller also clears the now-wrong scope field in the same request.
+const nullableText = z
+  .string()
+  .trim()
+  .min(1)
+  .transform(nfc)
+  .nullable();
+
+export const updateUserBody = z
+  .object({
+    role: z.enum(['super_admin', 'admin', 'officer', 'viewer']).optional(),
+    thana: nullableText.optional(),
+    subDivision: nullableText.optional(),
+    designation: nullableText.optional(),
+  })
+  .refine((body) => Object.keys(body).length > 0, 'at least one field is required');
+
+export const listUsersQuery = z.object({
+  role: z.enum(['super_admin', 'admin', 'officer', 'viewer']).optional(),
+  thana: z.string().trim().max(100).optional(),
+  subDivision: z.string().trim().max(100).optional(),
+  // Defaults to active-only, matching every other roster view (e.g. GET /officers) —
+  // 'all'/'deactivated' are an explicit opt-in for the management UI's own filter.
+  status: z.enum(['active', 'deactivated', 'all']).default('active'),
+  search: z.string().trim().max(100).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(15),
+});
 
 // Wrapper object, matching {"cadres":[...]}. Rows arrive as unknowns so ONE malformed row
 // cannot fail the whole parse — the service validates each with importUserRow and reports
@@ -80,3 +142,6 @@ export const userIdParam = z.object({ userId: z.coerce.number().int().positive()
 export type ImportUserRow = z.infer<typeof importUserRow>;
 export type ImportUsersBody = z.infer<typeof importUsersBody>;
 export type SetPasswordBody = z.infer<typeof setPasswordBody>;
+export type CreateUserBody = z.infer<typeof createUserBody>;
+export type UpdateUserBody = z.infer<typeof updateUserBody>;
+export type ListUsersQuery = z.infer<typeof listUsersQuery>;
