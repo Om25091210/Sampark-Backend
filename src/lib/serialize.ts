@@ -19,6 +19,12 @@ export interface WireUser {
   subDivision?: string;
   avatarUrl?: string;
   badgeImageUrl?: string;
+  /** Phase 2 (User Management). Derived from `deletedAt`, never a stored column. */
+  status: 'active' | 'deactivated';
+  /** Phase 2. Absent on rows created before this field was returned (none today —
+   *  every user has always had a createdAt — kept optional only for symmetry with
+   *  the rest of this interface's convention). */
+  email?: string;
 }
 
 export function toWireUser(user: User): WireUser {
@@ -34,6 +40,8 @@ export function toWireUser(user: User): WireUser {
     subDivision: user.subDivision ?? undefined,
     avatarUrl: user.avatarUrl ?? undefined,
     badgeImageUrl: user.badgeImageUrl ?? undefined,
+    status: user.deletedAt === null ? 'active' : 'deactivated',
+    email: user.email ?? undefined,
   };
 }
 

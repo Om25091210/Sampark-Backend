@@ -92,6 +92,15 @@ export function examplePage(item: unknown): Record<string, unknown> {
   return { data: [item], total: 42, page: 1, pageSize: 15, hasMore: true };
 }
 
+// Phase 2 (web User Management). The account entity as the management CRUD sees it —
+// EXAMPLE_AUTH_USER plus `status` (derived from deletedAt) and `email` (the login
+// credential), both real WireUser fields not needed by the narrower auth response.
+export const EXAMPLE_USER = {
+  ...EXAMPLE_AUTH_USER,
+  email: 'shobijapursadar@sampark.internal',
+  status: 'active',
+};
+
 // Phase B. Per-row outcome of the bulk ACCOUNT import — same shape as the cadre one,
 // keyed by `name` (the institutional ID) instead of `serialNumber`.
 export const EXAMPLE_USER_IMPORT_RESULT = {
