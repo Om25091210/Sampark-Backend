@@ -1,20 +1,124 @@
 import type { FastifyInstance } from 'fastify';
 import { makeUsersService } from './users.service.js';
-import { importUsersBody, setPasswordBody, userIdParam } from './users.schema.js';
+import {
+  importUsersBody,
+  setPasswordBody,
+  userIdParam,
+  listUsersQuery,
+  createUserBody,
+  updateUserBody,
+} from './users.schema.js';
 import {
   bearerAuth,
   emptyResponse,
+  examplePage,
   jsonResponse,
   zodToJson,
+  EXAMPLE_USER,
   EXAMPLE_USER_IMPORT_RESULT,
 } from '../../lib/openapi.js';
 
-// Phase B. Account provisioning. BOTH routes are super_admin JWT only — deliberately not
-// the SDR-007 machine key that the cadre import uses: minting accounts and resetting
-// credentials are individually accountable acts, and with real names gone (ADR-042) the
-// acting super_admin's ID is the only granularity the audit trail has left.
+// Phase B (import/password/deactivate) + Phase 2 (web User Management CRUD). Every
+// route here is super_admin JWT only — deliberately not the SDR-007 machine key the
+// cadre import uses: minting/editing/deactivating accounts are individually
+// accountable acts, and with real names gone (ADR-042) the acting super_admin's ID is
+// the only granularity the audit trail has left.
 export async function usersRoutes(app: FastifyInstance): Promise<void> {
   const service = makeUsersService({ prisma: app.prisma, log: app.log });
+
+  app.get(
+    '/users',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Users'],
+        summary: 'List accounts, paginated + filterable (super_admin, ADR-056)',
+        description:
+          'Filters: role, thana, subDivision, status (active | deactivated | all — ' +
+          'defaults to active), search (matches the institutional-ID `name`).',
+        security: bearerAuth,
+        querystring: zodToJson(listUsersQuery),
+        response: { 200: jsonResponse('Paginated accounts', examplePage(EXAMPLE_USER)) },
+      },
+    },
+    async (request) => {
+      const query = listUsersQuery.parse(request.query);
+      return service.list(query);
+    },
+  );
+
+  app.get(
+    '/users/:userId',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Users'],
+        summary: 'Get one account (super_admin)',
+        description:
+          'Not scoped to active accounts — a deactivated account can still be opened; ' +
+          '`status` on the response says which.',
+        security: bearerAuth,
+        params: zodToJson(userIdParam),
+        response: { 200: jsonResponse('The account', EXAMPLE_USER) },
+      },
+    },
+    async (request) => {
+      const { userId } = userIdParam.parse(request.params);
+      return service.getById(userId);
+    },
+  );
+
+  app.post(
+    '/users',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Users'],
+        summary: 'Create one account (super_admin)',
+        description:
+          'Same row shape and validation as POST /users/import (name/email/role/password/' +
+          'thana/subDivision/designation) — the body IS one row, not the {users:[...]} ' +
+          'envelope. Unlike /users/import, a duplicate `name` is a 409, never a silent ' +
+          'skip: this route is for provisioning one account deliberately, not re-running ' +
+          'a sheet. Emits a `user.created` outbox event (ADR-057) for Phase 3\'s Sheet sync.',
+        security: bearerAuth,
+        body: zodToJson(createUserBody),
+        response: { 201: jsonResponse('Created account', EXAMPLE_USER) },
+      },
+    },
+    async (request, reply) => {
+      const row = createUserBody.parse(request.body);
+      const user = await service.create(row, request.authUser!.sub);
+      return reply.code(201).send(user);
+    },
+  );
+
+  app.patch(
+    '/users/:userId',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Users'],
+        summary: 'Edit role/thana/subDivision/designation (super_admin)',
+        description:
+          'Never name, email, or password — password reset is the separate, explicit ' +
+          'POST /users/:userId/password. thana/subDivision are three-way per field: ' +
+          'omit to leave untouched, send `null` to clear (needed when a role change ' +
+          'requires swapping which scope field is set), or send a string to set it. ' +
+          'Validates the MERGED post-edit state against the ADR-042 org-scope invariant, ' +
+          'not just the submitted fields. Emits a `user.updated` outbox event (ADR-057).',
+        security: bearerAuth,
+        params: zodToJson(userIdParam),
+        body: zodToJson(updateUserBody),
+        response: { 200: jsonResponse('Updated account', EXAMPLE_USER) },
+      },
+    },
+    async (request) => {
+      const { userId } = userIdParam.parse(request.params);
+      const body = updateUserBody.parse(request.body);
+      return service.update(userId, body, request.authUser!.sub);
+    },
+  );
 
   app.post(
     '/users/import',
