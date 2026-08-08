@@ -58,6 +58,18 @@ const EnvSchema = z.object({
   // account/region (ap-south-1), no reason to duplicate the config surface.
   PUSH_PROVIDER: z.enum(['mock', 'sns']).default('mock'),
   SNS_PLATFORM_APPLICATION_ARN: z.string().min(1).optional(),
+
+  // ADR-057/058. Sheet sync transport: a POST to a single Apps Script Web App
+  // deployment (see B-Smart.gs's doPost), never the Sheets API — no GCP project, no
+  // service account, no `googleapis` dependency (Om corrected the original design).
+  // `mock` never makes a network call (dev/test); `http` requires SYNC_API_KEY. The
+  // deployment URL itself is NOT here — it lives in Postgres (ConfigEntry, ADR-059
+  // §1), settable at runtime via PATCH /config without a redeploy.
+  SHEETS_SYNC_PROVIDER: z.enum(['mock', 'http']).default('mock'),
+  // Shared-secret bearer token B-Smart.gs's doPost checks with a constant-time
+  // compare — the SAME value hand-provisioned there via "Set Sync API Key". OPTIONAL
+  // like IMPORT_API_KEY: unset simply means the http provider can't be selected.
+  SYNC_API_KEY: z.string().min(32, 'SYNC_API_KEY must be at least 32 characters').optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -92,6 +104,8 @@ export interface AppConfig {
   uploadMaxBytes: number;
   pushProvider: Env['PUSH_PROVIDER'];
   snsPlatformApplicationArn?: string;
+  sheetsSyncProvider: Env['SHEETS_SYNC_PROVIDER'];
+  syncApiKey?: string;
 }
 
 export function toAppConfig(env: Env): AppConfig {
@@ -109,5 +123,7 @@ export function toAppConfig(env: Env): AppConfig {
     uploadMaxBytes: env.UPLOAD_MAX_BYTES,
     pushProvider: env.PUSH_PROVIDER,
     snsPlatformApplicationArn: env.SNS_PLATFORM_APPLICATION_ARN,
+    sheetsSyncProvider: env.SHEETS_SYNC_PROVIDER,
+    syncApiKey: env.SYNC_API_KEY,
   };
 }

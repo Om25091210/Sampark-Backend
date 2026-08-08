@@ -8,6 +8,8 @@ import type { StorageProvider } from './lib/storage.js';
 import { createStorageProvider } from './lib/storage.js';
 import type { PushProvider } from './lib/push.js';
 import { createPushProvider } from './lib/push.js';
+import type { SheetsSyncProvider } from './lib/sheets-sync.js';
+import { createSheetsSyncProvider } from './lib/sheets-sync.js';
 import { loggerOptions } from './plugins/logging.js';
 import errorHandlerPlugin from './plugins/error-handler.js';
 import prismaPlugin from './plugins/prisma.js';
@@ -24,6 +26,7 @@ import { statsRoutes } from './modules/stats/stats.routes.js';
 import { usersRoutes } from './modules/users/users.routes.js';
 import { notificationsRoutes } from './modules/notifications/notifications.routes.js';
 import { devicesRoutes } from './modules/devices/devices.routes.js';
+import { configRoutes } from './modules/config/config.routes.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -31,6 +34,8 @@ declare module 'fastify' {
     storage: StorageProvider;
     // ADR-048. Real push delivery via AWS SNS + FCM V1 (mock in dev/test).
     pushProvider: PushProvider;
+    // ADR-057/058. Sheet sync via the Apps Script Web App deployment (mock in dev/test).
+    sheetsSync: SheetsSyncProvider;
   }
 }
 
@@ -43,6 +48,8 @@ export interface BuildAppOptions {
   storage?: StorageProvider;
   /** Injected push provider (tests use/inspect the mock); defaults from config. */
   pushProvider?: PushProvider;
+  /** Injected sheets-sync provider (tests use/inspect the mock); defaults from config. */
+  sheetsSync?: SheetsSyncProvider;
   /** Logger config; tests pass `false` to silence output. */
   logger?: FastifyServerOptions['logger'];
 }
@@ -68,6 +75,9 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
 
   await app.register(errorHandlerPlugin);
   await app.register(prismaPlugin, { client: opts.prisma });
+  // Needs app.prisma (reads the deployment URL fresh from ConfigEntry on every
+  // call, ADR-059 §1) -- decorated after prismaPlugin, unlike storage/pushProvider.
+  app.decorate('sheetsSync', opts.sheetsSync ?? createSheetsSyncProvider(opts.config, app.prisma, app.log));
   await app.register(authPlugin);
 
   // Multipart (report photo upload). One file per request, capped at UPLOAD_MAX_BYTES.
@@ -101,6 +111,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           { name: 'Stats', description: 'Dashboard summary counts' },
           { name: 'Notifications', description: 'In-app inbox + real push (ADR-048)' },
           { name: 'Devices', description: 'FCM device token registration (ADR-048)' },
+          { name: 'Config', description: 'Sheets-sync connection setting (ADR-059)' },
         ],
         components: {
           securitySchemes: {
@@ -130,6 +141,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       await api.register(usersRoutes); // Phase B: account provisioning (super_admin)
       await api.register(notificationsRoutes); // ADR-048: in-app inbox + push
       await api.register(devicesRoutes); // ADR-048: FCM device token registration
+      await api.register(configRoutes); // ADR-059: sheets-sync deployment URL
     },
     { prefix: '/api/v1' },
   );

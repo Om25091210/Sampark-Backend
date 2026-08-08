@@ -204,6 +204,8 @@ model User {
   superApprovedCreateRequests CadreCreateRequest[] @relation("CreateReqSuperAdminApprover")
   decidedCreateRequests       CadreCreateRequest[] @relation("CreateReqDecider")
 
+  configUpdates ConfigEntry[] @relation("ConfigUpdatedBy") // ADR-059
+
   @@map("users")
 }
 
@@ -591,6 +593,45 @@ model OutboxEvent {
 
   @@index([publishedAt])
   @@map("outbox_events")
+}
+
+// ─── Sheet sync (ADR-057/058/059) ──────────────────────────────────────────────
+
+// Singleton row (the service always targets id 1) holding the ONE non-secret
+// connection setting the Configuration page manages: the Apps Script Web App
+// deployment URL the sheets-sync HTTP client calls. The shared-secret bearer
+// token that authenticates those calls is NOT here — it is hand-provisioned
+// into Secrets Manager (SYNC_API_KEY env var), never web-managed (ADR-059).
+model ConfigEntry {
+  id            Int      @id @default(autoincrement())
+  sheetsSyncUrl String?  @map("sheets_sync_url")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  updatedById   Int?     @map("updated_by_id")
+
+  updatedBy User? @relation("ConfigUpdatedBy", fields: [updatedById], references: [id])
+
+  @@map("config")
+}
+
+// Per-attempt sync-result logging (ADR-057 §5 / ADR-058 §6) — HQ needs to see
+// what synced when and what failed, the same per-row-result discipline the
+// register imports (ADR-038/045) already established. One row per attempt: an
+// outbox-driven user.* push logs one row per event; a cadre.export batch logs
+// one row for the whole run, with per-row detail in `detail`.
+model SyncLog {
+  id        Int      @id @default(autoincrement())
+  eventType String   @map("event_type") // 'user.created' | 'user.updated' | 'user.deactivated' | 'cadre.export' | 'cadre.preview'
+  // The User.name for a user.* row, or a batch label for cadre.export — deliberately
+  // NOT a foreign key: the target may be deleted or the export spans many cadres, and
+  // this log must stay readable even after the row it describes is gone.
+  targetKey String?  @map("target_key")
+  status    String // 'success' | 'error'
+  error     String?
+  detail    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("sync_log")
 }
 
 // ─── Notifications (in-app inbox + real push via ADR-048) ─────────────────────

@@ -21,6 +21,9 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     // ADR-048. Tests default to the mock push provider — no AWS credentials/network.
     pushProvider: 'mock',
     snsPlatformApplicationArn: undefined,
+    // ADR-057/058. Tests default to the mock sheets-sync provider — no network call.
+    sheetsSyncProvider: 'mock',
+    syncApiKey: undefined,
     ...overrides,
   };
 }
