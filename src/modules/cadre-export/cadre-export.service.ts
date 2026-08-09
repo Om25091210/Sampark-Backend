@@ -4,7 +4,13 @@ import { writeAuditLog } from '../../lib/audit.js';
 import type { StorageProvider } from '../../lib/storage.js';
 import type { SheetsSyncProvider, SheetsSyncResult } from '../../lib/sheets-sync.js';
 
-const DEFAULT_CHUNK_SIZE = 25;
+// 25 meant ~294 HTTP round trips for a 7,349-row roster, each triggering a full
+// existing-serials rescan on the Apps Script side (B-Smart.gs's handleCadreExport_) --
+// the combination timed out 44 of those calls on the first full run. 200 cuts that
+// to ~37 calls; combined with that function's now-batched bulk-append write, each
+// call comfortably finishes well inside Apps Script's 6-minute execution cap even
+// when every row in the chunk carries a photo.
+const DEFAULT_CHUNK_SIZE = 200;
 
 export interface CadreExportDeps {
   prisma: PrismaClient;
