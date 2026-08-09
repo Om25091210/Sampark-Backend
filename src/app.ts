@@ -27,6 +27,7 @@ import { usersRoutes } from './modules/users/users.routes.js';
 import { notificationsRoutes } from './modules/notifications/notifications.routes.js';
 import { devicesRoutes } from './modules/devices/devices.routes.js';
 import { configRoutes } from './modules/config/config.routes.js';
+import { cadreExportRoutes } from './modules/cadre-export/cadre-export.routes.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -112,6 +113,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           { name: 'Notifications', description: 'In-app inbox + real push (ADR-048)' },
           { name: 'Devices', description: 'FCM device token registration (ADR-048)' },
           { name: 'Config', description: 'Sheets-sync connection setting (ADR-059)' },
+          { name: 'Cadre Export', description: 'One-way Postgres -> mirror-sheet export + preview (ADR-058)' },
         ],
         components: {
           securitySchemes: {
@@ -142,6 +144,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       await api.register(notificationsRoutes); // ADR-048: in-app inbox + push
       await api.register(devicesRoutes); // ADR-048: FCM device token registration
       await api.register(configRoutes); // ADR-059: sheets-sync deployment URL
+      await api.register(cadreExportRoutes); // ADR-058: cadre sheet export + preview
     },
     { prefix: '/api/v1' },
   );
