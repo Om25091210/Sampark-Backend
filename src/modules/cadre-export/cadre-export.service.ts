@@ -60,11 +60,13 @@ interface ExportableCadre {
 
 // ADR-058 §5. Text fields follow the Cadre wire entity's field names. Images travel
 // as base64 bytes downloaded server-side (never a presigned URL, which would rot
-// past the mirror's browse window) -- Apps Script decodes and embeds them with
-// SpreadsheetApp.newCellImage(), an IN-CELL image that a repeat sync can cleanly
-// overwrite (unlike Sheet.insertImage()'s floating OverGridImage, which this file's
-// own photo-backfill code already found has no supported way to be replaced/read
-// back once inserted -- newCellImage() sidesteps that problem entirely).
+// past the mirror's browse window) -- Apps Script decodes them with Utilities.newBlob()
+// and embeds via Sheet.insertImage(), removing any image already anchored at that
+// cell first so a repeat sync replaces the photo instead of stacking a second one
+// on top (B-Smart.gs's handleCadreExport_). This only ever needs to REMOVE + RE-INSERT
+// a floating image, never read one's bytes back out -- the operation this file's own
+// photo-backfill code found unsupported is extracting bytes FROM an existing image,
+// a different problem this export never runs into (it always has fresh bytes from S3).
 async function buildRowPayload(
   cadre: ExportableCadre,
   storage: StorageProvider,
