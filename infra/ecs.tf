@@ -91,6 +91,11 @@ resource "aws_ecs_task_definition" "backend" {
         # MockSheetsSyncProvider -- the deployment URL in the `config` table would be
         # set and readable, but no HTTP call would ever actually leave the process.
         { name = "SHEETS_SYNC_PROVIDER", value = "http" },
+
+        # CORS allowlist -- see web_allowed_origins' own description. env.ts already
+        # defaults to the same value, so this entry exists for Terraform-visible
+        # explicitness/override, not because the app would otherwise fail to start.
+        { name = "ALLOWED_ORIGINS", value = join(",", var.web_allowed_origins) },
       ]
 
       # Resolved by the EXECUTION role at container start and injected as ordinary

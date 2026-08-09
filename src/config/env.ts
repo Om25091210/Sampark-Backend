@@ -70,6 +70,15 @@ const EnvSchema = z.object({
   // compare — the SAME value hand-provisioned there via "Set Sync API Key". OPTIONAL
   // like IMPORT_API_KEY: unset simply means the http provider can't be selected.
   SYNC_API_KEY: z.string().min(32, 'SYNC_API_KEY must be at least 32 characters').optional(),
+
+  // The web app is a separate browser origin from the API (Vercel-hosted, not
+  // same-origin), so every login/fetch from it is a CORS request. Comma-separated
+  // exact-match allowlist -- defaulted rather than required, so a plain redeploy
+  // (no Terraform apply) fixes a missing/changed origin; infra/ecs.tf can still
+  // override it for production via var.web_allowed_origins.
+  ALLOWED_ORIGINS: z
+    .string()
+    .default('https://sampark-web-pied.vercel.app,http://localhost:3000,http://localhost:3001,http://localhost:3002'),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -106,6 +115,7 @@ export interface AppConfig {
   snsPlatformApplicationArn?: string;
   sheetsSyncProvider: Env['SHEETS_SYNC_PROVIDER'];
   syncApiKey?: string;
+  allowedOrigins: string[];
 }
 
 export function toAppConfig(env: Env): AppConfig {
@@ -125,5 +135,8 @@ export function toAppConfig(env: Env): AppConfig {
     snsPlatformApplicationArn: env.SNS_PLATFORM_APPLICATION_ARN,
     sheetsSyncProvider: env.SHEETS_SYNC_PROVIDER,
     syncApiKey: env.SYNC_API_KEY,
+    allowedOrigins: env.ALLOWED_ORIGINS.split(',')
+      .map((o) => o.trim())
+      .filter((o) => o !== ''),
   };
 }

@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
+import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
@@ -75,6 +76,17 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   app.setValidatorCompiler(() => () => true);
 
   await app.register(errorHandlerPlugin);
+
+  // The web app is a separate browser origin (Vercel-hosted) from this API, so every
+  // login/fetch it makes is a CORS request -- without this, the browser blocks the
+  // response before the client's own error handling ever sees it (a curl/server-side
+  // request never triggers this, which is how this went unnoticed until now). Exact-
+  // match allowlist from config, not a wildcard -- credentials are a Bearer header,
+  // not a cookie sent to this origin, so `credentials: true` is not needed here.
+  await app.register(cors, {
+    origin: opts.config.allowedOrigins,
+  });
+
   await app.register(prismaPlugin, { client: opts.prisma });
   // Needs app.prisma (reads the deployment URL fresh from ConfigEntry on every
   // call, ADR-059 §1) -- decorated after prismaPlugin, unlike storage/pushProvider.

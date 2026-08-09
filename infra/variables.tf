@@ -108,6 +108,12 @@ variable "health_check_path" {
   default     = "/healthz"
 }
 
+variable "web_allowed_origins" {
+  description = "Exact-match browser origins allowed to call this API cross-origin (CORS). The web app is Vercel-hosted, a different origin from api.bsmart.net.in, so its production URL must be listed here or every browser-based login/fetch is silently blocked (a curl/server-side request never triggers CORS, so this can go unnoticed until someone tries the real UI)."
+  type        = list(string)
+  default     = ["https://sampark-web-pied.vercel.app"]
+}
+
 # ---------------------------------------------------------------------------
 # GitHub OIDC. Consumed by github_oidc.tf (written in step 4).
 # ---------------------------------------------------------------------------

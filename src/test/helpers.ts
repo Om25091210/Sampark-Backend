@@ -24,6 +24,8 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     // ADR-057/058. Tests default to the mock sheets-sync provider — no network call.
     sheetsSyncProvider: 'mock',
     syncApiKey: undefined,
+    // A fixed test-only allowlist -- CORS tests override via testConfig({ allowedOrigins }).
+    allowedOrigins: ['http://localhost:3000'],
     ...overrides,
   };
 }
