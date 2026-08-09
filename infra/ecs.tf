@@ -86,6 +86,11 @@ resource "aws_ecs_task_definition" "backend" {
         # in the frozen secret blob.
         { name = "PUSH_PROVIDER", value = "sns" },
         { name = "SNS_PLATFORM_APPLICATION_ARN", value = aws_sns_platform_application.fcm.arn },
+
+        # ADR-057/058/059. Without this, createSheetsSyncProvider() falls through to
+        # MockSheetsSyncProvider -- the deployment URL in the `config` table would be
+        # set and readable, but no HTTP call would ever actually leave the process.
+        { name = "SHEETS_SYNC_PROVIDER", value = "http" },
       ]
 
       # Resolved by the EXECUTION role at container start and injected as ordinary
@@ -146,6 +151,16 @@ resource "aws_ecs_task_definition" "backend" {
         {
           name      = "BOOTSTRAP_ADMIN_PASSWORD"
           valueFrom = "${aws_secretsmanager_secret.app.arn}:BOOTSTRAP_ADMIN_PASSWORD::"
+        },
+        # ADR-057 §6. Shared secret the backend sends on every sheets-sync call; the
+        # VALUE is hand-provisioned into the sampark/<env> JSON exactly like
+        # IMPORT_API_KEY (see that entry's runbook above -- same wiring/deploy
+        # ordering applies here). Optional in env.ts: until this key exists in the
+        # secret, a task referencing it simply fails to start, same failure mode as
+        # IMPORT_API_KEY would have before it was added.
+        {
+          name      = "SYNC_API_KEY"
+          valueFrom = "${aws_secretsmanager_secret.app.arn}:SYNC_API_KEY::"
         },
       ]
 
