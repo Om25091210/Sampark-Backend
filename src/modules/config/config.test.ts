@@ -33,6 +33,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await prisma.auditLog.deleteMany({ where: { entityType: 'config' } });
   await prisma.configEntry.deleteMany({ where: { id: 1 } });
+  await prisma.syncLog.deleteMany({ where: { targetKey: TOKEN } });
   await prisma.user.deleteMany({ where: { id: { in: [saId, offId] } } });
   await prisma.$disconnect();
 });
@@ -112,6 +113,47 @@ describe('GET/PATCH /config (ADR-059)', () => {
     });
     expect(res.statusCode).toBe(200);
     expect((res.json() as { sheetsSyncUrl: string | null }).sheetsSyncUrl).toBeNull();
+    await app.close();
+  });
+});
+
+describe('GET /config/sync-log (ADR-059 §4)', () => {
+  it('401s unauthenticated, 403s a non-super_admin', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/config/sync-log' })).statusCode).toBe(401);
+    expect(
+      (await app.inject({ method: 'GET', url: '/api/v1/config/sync-log', headers: auth(officerToken) }))
+        .statusCode,
+    ).toBe(403);
+    await app.close();
+  });
+
+  it('returns recent entries newest-first', async () => {
+    // sync_log is shared across the whole suite (cadre-export/user-sync tests write
+    // to it too), so this can't assume its 3 rows land in the top N overall -- a
+    // generous limit + filtering down to this fixture's own targetKey is what makes
+    // the ordering assertion below safe from cross-file interleaving.
+    await prisma.syncLog.createMany({
+      data: [
+        { eventType: 'cadre.export', targetKey: TOKEN, status: 'success' },
+        { eventType: 'user.created', targetKey: TOKEN, status: 'error', error: 'boom' },
+        { eventType: 'user.updated', targetKey: TOKEN, status: 'success' },
+      ],
+    });
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/config/sync-log?limit=100',
+      headers: auth(saToken),
+    });
+    expect(res.statusCode).toBe(200);
+    const all = res.json() as Array<{ eventType: string; targetKey: string | null; status: string; error: string | null }>;
+    const body = all.filter((e) => e.targetKey === TOKEN);
+    expect(body).toHaveLength(3);
+    expect(body[0]!.eventType).toBe('user.updated');
+    expect(body[1]!.eventType).toBe('user.created');
+    expect(body[1]!.error).toBe('boom');
+    expect(body[2]!.eventType).toBe('cadre.export');
     await app.close();
   });
 });

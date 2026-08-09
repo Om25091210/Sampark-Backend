@@ -27,9 +27,19 @@ function toWireConfig(row: ConfigRow | null): WireConfig {
   return { sheetsSyncUrl: row.sheetsSyncUrl, updatedAt: row.updatedAt.toISOString(), updatedById: row.updatedById };
 }
 
+export interface WireSyncLogEntry {
+  id: number;
+  eventType: string;
+  targetKey: string | null;
+  status: string;
+  error: string | null;
+  createdAt: string;
+}
+
 export interface ConfigService {
   get(): Promise<WireConfig>;
   update(body: UpdateConfigBody, actorId: number): Promise<WireConfig>;
+  listSyncLog(limit: number): Promise<WireSyncLogEntry[]>;
 }
 
 // Singleton row at id=1 -- see ConfigEntry's schema comment. Every read/write
@@ -60,6 +70,17 @@ export function makeConfigService({ prisma }: ConfigDeps): ConfigService {
         return updated;
       });
       return toWireConfig(row);
+    },
+
+    async listSyncLog(limit) {
+      const rows = await prisma.syncLog.findMany({
+        // Rows from the same batch write (e.g. createMany) can share a millisecond
+        // timestamp -- id desc breaks the tie deterministically, newest-inserted first.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit,
+        select: { id: true, eventType: true, targetKey: true, status: true, error: true, createdAt: true },
+      });
+      return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
     },
   };
 }

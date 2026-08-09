@@ -24,6 +24,14 @@ export function jsonResponse(description: string, example: unknown): Record<stri
   return { description, type: 'object', additionalProperties: true, example };
 }
 
+// For routes whose body is a top-level JSON array -- jsonResponse's `type: 'object'`
+// makes fast-json-stringify serialize an array's own keys as object properties
+// (`{"0": ..., "1": ...}`) instead of a real array, so array-returning routes need
+// this instead.
+export function jsonArrayResponse(description: string, example: unknown): Record<string, unknown> {
+  return { description, type: 'array', items: { type: 'object', additionalProperties: true }, example };
+}
+
 // An empty (no-body) response, e.g. 204.
 export function emptyResponse(description: string): Record<string, unknown> {
   return { description, type: 'null' };

@@ -1,13 +1,24 @@
 import type { FastifyInstance } from 'fastify';
 import { makeConfigService } from './config.service.js';
-import { updateConfigBody } from './config.schema.js';
-import { bearerAuth, jsonResponse, zodToJson } from '../../lib/openapi.js';
+import { updateConfigBody, listSyncLogQuery } from './config.schema.js';
+import { bearerAuth, jsonResponse, jsonArrayResponse, zodToJson } from '../../lib/openapi.js';
 
 const EXAMPLE_CONFIG = {
   sheetsSyncUrl: 'https://script.google.com/macros/s/AKfycbxExampleDeploymentId/exec',
   updatedAt: '2026-08-09T10:00:00.000Z',
   updatedById: 1,
 };
+
+const EXAMPLE_SYNC_LOG = [
+  {
+    id: 1,
+    eventType: 'cadre.export',
+    targetKey: 'run-2026-08-09T22:36:05.000Z',
+    status: 'success',
+    error: null,
+    createdAt: '2026-08-09T22:41:12.000Z',
+  },
+];
 
 // ADR-059. Configuration page backend: manages exactly ONE non-secret value, the
 // Apps Script Web App deployment URL the sheets-sync client calls. The shared-
@@ -50,6 +61,27 @@ export async function configRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const body = updateConfigBody.parse(request.body);
       return service.update(body, request.authUser!.sub);
+    },
+  );
+
+  app.get(
+    '/config/sync-log',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Config'],
+        summary: 'Recent sync_log entries for the Configuration status panel (super_admin, ADR-059 §4)',
+        description:
+          'Newest first, capped at `limit`. Covers both cadre.export runs and outbound user.* ' +
+          'sync events -- the only two producers of sync_log rows.',
+        security: bearerAuth,
+        querystring: zodToJson(listSyncLogQuery),
+        response: { 200: jsonArrayResponse('Recent sync log entries', EXAMPLE_SYNC_LOG) },
+      },
+    },
+    async (request) => {
+      const query = listSyncLogQuery.parse(request.query);
+      return service.listSyncLog(query.limit);
     },
   );
 }
