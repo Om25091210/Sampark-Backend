@@ -83,8 +83,15 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   // request never triggers this, which is how this went unnoticed until now). Exact-
   // match allowlist from config, not a wildcard -- credentials are a Bearer header,
   // not a cookie sent to this origin, so `credentials: true` is not needed here.
+  //
+  // `methods` must be explicit: @fastify/cors defaults to 'GET,HEAD,POST' when this
+  // is omitted, which silently preflight-blocks every PATCH/PUT/DELETE the web app
+  // makes (direct cadre edits, report deletion, ...) -- exactly the kind of gap the
+  // comment above already warned a curl-only check would never catch. The full set
+  // this API actually exposes across its routes.
   await app.register(cors, {
     origin: opts.config.allowedOrigins,
+    methods: ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'],
   });
 
   await app.register(prismaPlugin, { client: opts.prisma });

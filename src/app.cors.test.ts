@@ -47,4 +47,26 @@ describe('CORS (web app is a separate browser origin from this API)', () => {
     expect(res.headers['access-control-allow-origin']).toBe('https://sampark-web-pied.vercel.app');
     await app.close();
   });
+
+  // Regression: @fastify/cors defaults `methods` to 'GET,HEAD,POST' when not set
+  // explicitly, so a PATCH preflight (e.g. the web app's direct alias write,
+  // PATCH /cadres/:id) 200'd here but silently omitted PATCH from
+  // Access-Control-Allow-Methods -- a browser blocks the real request on that,
+  // even though this same inject() call reports success either way.
+  it('lists PATCH (and PUT/DELETE) in Access-Control-Allow-Methods on preflight', async () => {
+    const app = await buildApp({ config, prisma: dbUp(), logger: false });
+    const res = await app.inject({
+      method: 'OPTIONS',
+      url: '/api/v1/cadres/1',
+      headers: {
+        origin: 'https://sampark-web-pied.vercel.app',
+        'access-control-request-method': 'PATCH',
+        'access-control-request-headers': 'content-type,authorization',
+      },
+    });
+    expect(res.statusCode).toBe(204);
+    const allowed = (res.headers['access-control-allow-methods'] as string).split(',').map((m) => m.trim());
+    expect(allowed).toEqual(expect.arrayContaining(['PATCH', 'PUT', 'DELETE']));
+    await app.close();
+  });
 });
