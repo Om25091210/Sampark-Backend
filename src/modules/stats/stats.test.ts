@@ -29,6 +29,17 @@ const SDOP_OFFICER_PHONE = '+919000000064';
 const SDOP_SUB_DIVISION = 'गंगालूर';
 const SDOP_THANA = 'गंगालूर';
 
+// ADR-060. Fake, file-unique thana names (never a real canonical one, so scope
+// resolution/sub-division bucketing never touches them) so "is this the sole
+// officer at this thana" is deterministic under Vitest's parallel test files —
+// a real thana like 'गंगालूर' can pick up an officer fixture from ANOTHER file
+// (users.test.ts does exactly that) and make a sole-officer assertion flaky.
+const SOLE_THANA = 'स्टैट-एकल';
+const SOLE_OFFICER_PHONE = '+919000000065';
+const MULTI_THANA = 'स्टैट-बहु';
+const MULTI_OFFICER_A_PHONE = '+919000000066';
+const MULTI_OFFICER_B_PHONE = '+919000000067';
+
 let officerId = 0;
 let officerToken = '';
 let adminId = 0;
@@ -39,8 +50,14 @@ let sdopAdminName = '';
 let sdopAdminToken = '';
 let sdopOfficerId = 0;
 let sdopOfficerName = '';
+let soleOfficerId = 0;
+let soleOfficerToken = '';
+let multiOfficerAId = 0;
+let multiOfficerAToken = '';
+let multiOfficerBToken = '';
 const cadreIds: number[] = [];
 const sdopCadreIds: number[] = [];
+const attributionCadreIds: number[] = [];
 
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 const makeApp = (): Promise<FastifyInstance> => buildApp({ config, prisma, logger: false });
@@ -174,6 +191,53 @@ beforeAll(async () => {
     },
   });
   // sOverdue gets no report at all -> never-reported, counts as overdue.
+
+  // ADR-060 fixtures — thana jurisdiction and explicit assignment working
+  // together, not either/or.
+  const soleOfficer = await prisma.user.upsert({
+    where: { phone: SOLE_OFFICER_PHONE },
+    update: { deletedAt: null, role: 'officer', name: 'Sole Officer', thana: SOLE_THANA },
+    create: { phone: SOLE_OFFICER_PHONE, name: 'Sole Officer', role: 'officer', thana: SOLE_THANA },
+  });
+  soleOfficerId = soleOfficer.id;
+  soleOfficerToken = await signAccessToken({ sub: soleOfficerId, role: 'officer' }, config.jwtSecret, '15m');
+
+  const multiOfficerA = await prisma.user.upsert({
+    where: { phone: MULTI_OFFICER_A_PHONE },
+    update: { deletedAt: null, role: 'officer', name: 'Multi Officer A', thana: MULTI_THANA },
+    create: { phone: MULTI_OFFICER_A_PHONE, name: 'Multi Officer A', role: 'officer', thana: MULTI_THANA },
+  });
+  multiOfficerAId = multiOfficerA.id;
+  multiOfficerAToken = await signAccessToken({ sub: multiOfficerAId, role: 'officer' }, config.jwtSecret, '15m');
+
+  const multiOfficerB = await prisma.user.upsert({
+    where: { phone: MULTI_OFFICER_B_PHONE },
+    update: { deletedAt: null, role: 'officer', name: 'Multi Officer B', thana: MULTI_THANA },
+    create: { phone: MULTI_OFFICER_B_PHONE, name: 'Multi Officer B', role: 'officer', thana: MULTI_THANA },
+  });
+  multiOfficerBToken = await signAccessToken({ sub: multiOfficerB.id, role: 'officer' }, config.jwtSecret, '15m');
+
+  await prisma.cadre.deleteMany({ where: { name: { startsWith: `${TOKEN}-ATTR` } } });
+
+  const attrBase = { phone: '+910000000302', currentAddress: 'Attribution fixture', designation: 'Fixture', aliases: [] as string[] };
+
+  // No explicit assignment, but Sole Officer is the ONLY officer at SOLE_THANA
+  // -> must fall to them by thana jurisdiction.
+  const soleUnassigned = await prisma.cadre.create({
+    data: { ...attrBase, name: `${TOKEN}-ATTR-SOLE-UNASSIGNED`, thana: SOLE_THANA, category: 'thana', alertLevel: 'normal' },
+  });
+  // No explicit assignment, and MULTI_THANA has TWO officers -> ambiguous,
+  // must NOT be credited to either one.
+  const multiUnassigned = await prisma.cadre.create({
+    data: { ...attrBase, name: `${TOKEN}-ATTR-MULTI-UNASSIGNED`, thana: MULTI_THANA, category: 'thana', alertLevel: 'normal' },
+  });
+  // Explicitly assigned to Multi Officer A -- proves explicit assignment is
+  // still respected per-officer even when they share a thana with another
+  // officer (who must NOT also see it, whether via explicit match or fallback).
+  const multiAssignedToA = await prisma.cadre.create({
+    data: { ...attrBase, name: `${TOKEN}-ATTR-MULTI-ASSIGNED-A`, thana: MULTI_THANA, category: 'thana', alertLevel: 'normal', assignedOfficerId: multiOfficerAId },
+  });
+  attributionCadreIds.push(soleUnassigned.id, multiUnassigned.id, multiAssignedToA.id);
 });
 
 afterAll(async () => {
@@ -181,7 +245,10 @@ afterAll(async () => {
   await prisma.cadre.deleteMany({ where: { name: { startsWith: TOKEN } } });
   // All fixture users — leaving one behind would let it drift into another file's
   // assertions (Sampark-Backend#3).
-  const phones = [PHONE, ADMIN_PHONE, HQ_PHONE, SDOP_ADMIN_PHONE, SDOP_OFFICER_PHONE];
+  const phones = [
+    PHONE, ADMIN_PHONE, HQ_PHONE, SDOP_ADMIN_PHONE, SDOP_OFFICER_PHONE,
+    SOLE_OFFICER_PHONE, MULTI_OFFICER_A_PHONE, MULTI_OFFICER_B_PHONE,
+  ];
   await prisma.notification.deleteMany({ where: { user: { phone: { in: phones } } } });
   await prisma.user.deleteMany({ where: { phone: { in: phones } } });
   await prisma.$disconnect();
@@ -258,6 +325,39 @@ describe('stats', () => {
     // response: deriving the expectation from the same numbers under test would pass
     // even if the endpoint returned nonsense consistently.
     expect(s.reportingCompletion).toBe(33);
+    await app.close();
+  });
+
+  // ── ADR-060: thana jurisdiction + explicit assignment work together ────────
+
+  it('a cadre with no explicit assignment falls to the sole officer at its thana', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(soleOfficerToken) });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as OfficerStats;
+    // Sole Officer is the ONLY officer at SOLE_THANA (file-unique, so nothing
+    // outside this file's setup can share it) and has exactly one unassigned
+    // cadre there -- exact.
+    expect(s.assignedCadres).toBe(1);
+    await app.close();
+  });
+
+  it('a thana with more than one officer does not fall back to either of them, but explicit assignment still works there', async () => {
+    const app = await makeApp();
+    const [resA, resB] = await Promise.all([
+      app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(multiOfficerAToken) }),
+      app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(multiOfficerBToken) }),
+    ]);
+    const sA = resA.json() as OfficerStats;
+    const sB = resB.json() as OfficerStats;
+    // MULTI_THANA (file-unique) has two officers and two cadres: one explicitly
+    // assigned to A, one assigned to neither. A gets exactly the one that is
+    // actually theirs (explicit assignment is unaffected by ADR-060) -- NOT
+    // both, since thana-match alone cannot resolve the second one for a shared
+    // station. B, with no explicit assignment at all, gets neither: thana-match
+    // is ambiguous here (two officers), so it never falls back for B either.
+    expect(sA.assignedCadres).toBe(1);
+    expect(sB.assignedCadres).toBe(0);
     await app.close();
   });
 
@@ -487,6 +587,12 @@ describe('stats', () => {
     // — so they contribute to the total but appear under no admin row.
     expect(s.totalAssigned).toBeGreaterThanOrEqual(s.rows.reduce((sum, r) => sum + r.assignedCadres, 0));
     expect(s.totalCurrent).toBeGreaterThanOrEqual(s.rows.reduce((sum, r) => sum + r.currentCadres, 0));
+
+    // ADR-060. HQ's scope is unrestricted, so this file's genuinely-ambiguous
+    // MULTI_THANA cadre (two officers, no explicit assignment, thana-match
+    // cannot pick one) is always in view here -- a real lower bound, not the
+    // vacuous >=0 this assertion used to be.
+    expect(s.unassignedCadres).toBeGreaterThanOrEqual(1);
     await app.close();
   });
 

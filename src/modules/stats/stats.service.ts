@@ -76,6 +76,25 @@ function istMonthKey(d: Date, monthsAgo: number): string {
   return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+// ADR-060. Explicit assignment (Cadre.assignedOfficerId) and thana jurisdiction
+// work TOGETHER, not either/or: a cadre with no explicit assignment still falls
+// to an officer by default when their thana has exactly one officer posted to
+// it. When a thana has zero or several officers, thana-match alone cannot pick
+// ONE of them without guessing, so the cadre stays unattributed at the officer
+// level (it still counts fine at the thana/SDOP level, which never depended on
+// assignedOfficerId to begin with). Shared by forOfficer() (a single caller) and
+// hierarchy()'s officer grouping + unassignedCadres (every officer at once), so
+// the two can never resolve "who does this cadre belong to" differently.
+const SOLE_OFFICER_BY_THANA_CTE = Prisma.sql`
+  sole_officer_by_thana AS (
+    SELECT thana, MIN(id) AS officer_id
+    FROM users
+    WHERE role = 'officer' AND deleted_at IS NULL AND thana IS NOT NULL
+    GROUP BY thana
+    HAVING COUNT(*) = 1
+  )
+`;
+
 export function makeStatsService({ prisma }: StatsDeps): StatsService {
   return {
     async dashboard(scope) {
@@ -176,7 +195,26 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       // CLAUDE.md is explicit that it is a filter), and a cadre could remain assigned to an
       // officer after being moved to another station.
       const live = { deletedAt: null, ...cadreScopeWhere(scope) };
-      const mine = { ...live, assignedOfficerId: officerId };
+
+      // ADR-060. Explicit assignment (assignedOfficerId) and thana jurisdiction are
+      // not either/or -- a cadre with no explicit assignment still falls to this
+      // officer by default IF they are the only officer posted to their own thana
+      // (the common case, and the one Om described: "cadres fall under officers
+      // based on thana as well as when assigned"). When a thana has more than one
+      // officer, an unassigned cadre there cannot be credited to just one of them
+      // without guessing, so it stays out of `mine` until someone explicitly
+      // assigns it (same gap /stats/hierarchy's unassignedCadres now surfaces).
+      const me = await prisma.user.findUnique({
+        where: { id: officerId },
+        select: { thana: true, role: true },
+      });
+      const soleOfficerAtMyThana =
+        me?.role === 'officer' && me.thana !== null
+          ? (await prisma.user.count({ where: { role: 'officer', deletedAt: null, thana: me.thana } })) === 1
+          : false;
+      const mine: Prisma.CadreWhereInput = soleOfficerAtMyThana
+        ? { ...live, OR: [{ assignedOfficerId: officerId }, { assignedOfficerId: null }] }
+        : { ...live, assignedOfficerId: officerId };
 
       // The window start: the first day of the IST month `MONTHS_SHOWN - 1` back.
       // Converted to the UTC instant that IST midnight corresponds to, so the SQL
@@ -264,9 +302,22 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
 
       // Cadres nobody is responsible for — a staffing gap, not a specific officer's
       // lapse (ADR-055 Context §2). Shared by every branch below, so computed once.
-      const unassignedCadres = await prisma.cadre.count({
-        where: { deletedAt: null, assignedOfficerId: null, ...cadreScopeWhere(scope) },
-      });
+      // ADR-060. NOT simply "assignedOfficerId IS NULL" anymore -- a cadre with no
+      // explicit assignment is still someone's by thana jurisdiction when their
+      // thana has exactly one officer (see SOLE_OFFICER_BY_THANA_CTE below and
+      // forOfficer's matching logic above). Only a cadre neither explicitly
+      // assigned NOR resolvable that way is a genuine staffing gap.
+      const unassignedRows = await prisma.$queryRaw<{ count: bigint }[]>`
+        WITH ${SOLE_OFFICER_BY_THANA_CTE}
+        SELECT COUNT(*) AS count
+        FROM cadres c
+        LEFT JOIN sole_officer_by_thana so ON so.thana = c.thana
+        WHERE c.deleted_at IS NULL
+          AND c.assigned_officer_id IS NULL
+          AND so.officer_id IS NULL
+          ${scope.kind === 'all' ? Prisma.empty : Prisma.sql`AND c.thana IN (${Prisma.join(scope.thanas)})`}
+      `;
+      const unassignedCadres = Number(unassignedRows[0]?.count ?? 0);
 
       const rollup = (rows: ReadonlyArray<{ assignedCadres: number; currentCadres: number }>) => {
         const totalAssigned = rows.reduce((s, r) => s + r.assignedCadres, 0);
@@ -339,8 +390,12 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       // rows of this get used. Same "no live report in REPORTING_CADENCE_DAYS" rule
       // `/stats/me`'s `overdueCadres` uses, so a row here and that officer's own
       // reading of themselves can never disagree.
+      // ADR-060. COALESCE onto the sole officer at a cadre's thana when there is no
+      // explicit assignment -- same fallback forOfficer() applies for a single
+      // caller, extended here to every officer at once via the CTE below.
       const grouped = await prisma.$queryRaw<{ officerId: number; assigned: bigint; overdue: bigint }[]>`
-        SELECT c.assigned_officer_id AS "officerId",
+        WITH ${SOLE_OFFICER_BY_THANA_CTE}
+        SELECT COALESCE(c.assigned_officer_id, so.officer_id) AS "officerId",
                COUNT(*) AS assigned,
                COUNT(*) FILTER (
                  WHERE NOT EXISTS (
@@ -349,8 +404,9 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
                  )
                ) AS overdue
         FROM cadres c
-        WHERE c.deleted_at IS NULL AND c.assigned_officer_id IS NOT NULL
-        GROUP BY c.assigned_officer_id
+        LEFT JOIN sole_officer_by_thana so ON so.thana = c.thana AND c.assigned_officer_id IS NULL
+        WHERE c.deleted_at IS NULL AND COALESCE(c.assigned_officer_id, so.officer_id) IS NOT NULL
+        GROUP BY COALESCE(c.assigned_officer_id, so.officer_id)
       `;
       const byOfficer = new Map(
         grouped.map((g) => [g.officerId, { assigned: Number(g.assigned), overdue: Number(g.overdue) }]),
