@@ -42,6 +42,12 @@ export const listCadresQuery = z.object({
   // in here. Same 30/60/90-day windows as /stats/dashboard's reportingRecency counts,
   // so a tile's count equals the length of the list it opens.
   recency: z.enum(['current', 'overdue1m', 'overdue2m', 'overdue3m']).optional(),
+  // Drill-down for the dashboard's "लंबित रिपोर्टिंग" tile — the same flat 30-day
+  // rule as /stats/dashboard's pendingReporting count (see pendingReportingWhere),
+  // deliberately distinct from the per-category `recency` tiers above.
+  // z.coerce.boolean() would read "false" as truthy (any non-empty string), so
+  // this checks the literal instead of coercing.
+  pendingReporting: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
   // ADR-018. Scopes the list to one officer's assigned cadres.
   //   assignedTo=me  -> the calling user (the officer's "मेरे कैडर" tile)
   //   assignedTo=<id> -> that officer (the admin roster view)

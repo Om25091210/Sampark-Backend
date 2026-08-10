@@ -145,6 +145,20 @@ describe('reports aggregate (ADR-021)', () => {
     await app.close();
   });
 
+  it('reportedAfter filters to reports on/after the cutoff (इस सप्ताह रिपोर्ट tile drill-down)', async () => {
+    const app = await makeApp();
+    // Cutoff at 3 days ago: keeps the 1d (A) and 2d (B) reports, excludes 5d and 10d (A).
+    const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const body = (await app.inject({
+      method: 'GET',
+      url: `/api/v1/reports?reportedAfter=${encodeURIComponent(cutoff)}&pageSize=50`,
+      headers: auth(tokenA),
+    })).json() as ListBody;
+    expect(body.total).toBe(2);
+    expect(new Set(body.data.map((r) => r.reportedBy))).toEqual(new Set([officerAId, officerBId]));
+    await app.close();
+  });
+
   it('rejects a bad reportedBy with 400', async () => {
     const app = await makeApp();
     const res = await app.inject({

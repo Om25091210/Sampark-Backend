@@ -35,6 +35,10 @@ export const listReportsQuery = z.object({
 export const listAllReportsQuery = z.object({
   reportedBy: z.union([z.literal('me'), z.coerce.number().int().positive()]).optional(),
   search: z.string().trim().max(100).optional(),
+  // Drill-down for the dashboard's "इस सप्ताह रिपोर्ट" tile — same `reportedAt >=`
+  // cutoff /stats/dashboard's reportsThisWeek count uses, so the tile's count
+  // always equals the length of the list it opens.
+  reportedAfter: z.string().datetime({ offset: true }).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(50).default(15),
 });

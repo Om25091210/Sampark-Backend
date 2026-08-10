@@ -3,7 +3,7 @@ import { cadreScopeWhere, scopeAdmitsThana, type CadreScope } from '../../lib/sc
 import { Prisma } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
 import { toWireCadre, type WireCadre } from '../../lib/serialize.js';
-import { recencyTierWhere } from '../../lib/recency.js';
+import { recencyTierWhere, pendingReportingWhere } from '../../lib/recency.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
@@ -313,6 +313,8 @@ export function makeCadresService({
       // ADR-041/046: reporting-recency tier — the shared per-category where-builder, the
       // same one /stats/dashboard's tiles use, so the tile count matches the list length.
       if (query.recency !== undefined) and.push(recencyTierWhere(query.recency));
+      // Drill-down for the dashboard's "लंबित रिपोर्टिंग" tile — see pendingReportingWhere.
+      if (query.pendingReporting === true) and.push(pendingReportingWhere());
       if (and.length > 0) where.AND = and;
 
       if (query.search !== undefined && query.search !== '') {

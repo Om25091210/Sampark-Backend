@@ -186,6 +186,8 @@ export function makeReportsService({
       if (scope.kind !== 'all') where.cadre = { thana: { in: [...scope.thanas] } };
       // The route has already resolved `me` to a concrete officer id.
       if (query.reportedBy !== undefined) where.reportedById = query.reportedBy;
+      // Drill-down for the dashboard's "इस सप्ताह रिपोर्ट" tile.
+      if (query.reportedAfter !== undefined) where.reportedAt = { gte: new Date(query.reportedAfter) };
 
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search.trim();

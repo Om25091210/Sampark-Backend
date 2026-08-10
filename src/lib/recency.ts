@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { REPORTING_CADENCE_DAYS } from './serialize.js';
 
 // ADR-041/046/047. Reporting-recency tier → a Prisma where clause over each cadre's
 // report windows. THE one place both the `/cadres?recency` list filter and the
@@ -74,6 +75,18 @@ const CADENCE_BRANCHES: { match: Prisma.CadreWhereInput; caps: TierCaps }[] = [
   { match: { priorityCategory: 'C', permanentStatus: null }, caps: TIER_CAPS.C },
   { match: { priorityCategory: null, permanentStatus: null }, caps: TIER_CAPS.A },
 ];
+
+// The dashboard's/`/cadres?pendingReporting`'s flat 30-day "overdue on the monthly
+// touch" rule — deliberately NOT the same as the per-category recencyTierWhere
+// tiers above (see stats.service.ts's comment on `monthAgo`): every live cadre
+// uses the same cadence here, jail/death/permanentStatus included, unlike the
+// tiers which exempt them into `current`. Shared so `/stats/dashboard`'s
+// pendingReporting count and `/cadres?pendingReporting=true`'s list length can
+// never drift apart, the same no-drift guarantee recencyTierWhere gives the tiles.
+export function pendingReportingWhere(): Prisma.CadreWhereInput {
+  const monthAgo = new Date(Date.now() - REPORTING_CADENCE_DAYS * RECENCY_DAY_MS);
+  return { reports: { none: { deletedAt: null, reportedAt: { gte: monthAgo } } } };
+}
 
 export function recencyTierWhere(tier: RecencyTier): Prisma.CadreWhereInput {
   const now = Date.now();

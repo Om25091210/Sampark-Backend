@@ -9,7 +9,7 @@ import {
 import { nfc } from '../../lib/text.js';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { REPORTING_CADENCE_DAYS } from '../../lib/serialize.js';
-import { recencyTierWhere } from '../../lib/recency.js';
+import { recencyTierWhere, pendingReportingWhere } from '../../lib/recency.js';
 import type {
   DashboardStats,
   HierarchyRow,
@@ -100,10 +100,6 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
     async dashboard(scope) {
       const now = Date.now();
       const weekAgo = new Date(now - 7 * DAY_MS);
-      // The recency tiers now come from recencyTierWhere (ADR-046, per-category). This
-      // constant remains only for `pendingReporting` — the coarse global-30d "overdue on
-      // the monthly touch" count, deliberately distinct from the per-category tiers.
-      const monthAgo = new Date(now - REPORTING_CADENCE_DAYS * DAY_MS);
 
       // ADR-044. Two predicates, because `Cadre` and `Report` scope differently: a cadre
       // is scoped on its OWN thana, a report through its cadre relation. They were one
@@ -145,9 +141,9 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         prisma.report.count({ where: { ...liveReports, reportedAt: { gte: weekAgo } } }),
         // Cadres with no live report in the last 30 days — the "overdue on the monthly
         // check-in" count. `none` covers never-reported too (an empty relation matches).
-        prisma.cadre.count({
-          where: { ...live, reports: { none: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
-        }),
+        // Shared with `/cadres?pendingReporting` (pendingReportingWhere) so the tile's
+        // count always equals the length of the list it drills into.
+        prisma.cadre.count({ where: { ...live, ...pendingReportingWhere() } }),
         // ADR-041/046. The four recency tiers — now PER-CATEGORY, via the shared
         // recencyTierWhere (the same builder /cadres?recency uses, so a tile's count
         // equals the length of the list it drills into). Still disjoint and exhaustive:

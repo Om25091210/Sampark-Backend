@@ -655,6 +655,48 @@ describe('cadres', () => {
     await app.close();
   });
 
+  // ── लंबित रिपोर्टिंग tile drill-down: the flat 30-day rule, distinct from recency tiers ──
+
+  it('pendingReporting=true matches a cadre with no report in the last 30 days, excludes one reported recently', async () => {
+    const app = await makeApp();
+    const overdue = await prisma.cadre.create({
+      data: {
+        name: 'PENDING REPORTING OVERDUE', phone: '+910000000778', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    const current = await prisma.cadre.create({
+      data: {
+        name: 'PENDING REPORTING CURRENT', phone: '+910000000779', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    await prisma.report.createMany({
+      data: [
+        { cadreId: overdue.id, reportedById: officerAId, reportingPlace: 'thana', specificLocation: 'x',
+          personStatus: 'alive', currentPhone: '+910', currentActivity: 'y',
+          reportedAt: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000) },
+        { cadreId: current.id, reportedById: officerAId, reportingPlace: 'thana', specificLocation: 'x',
+          personStatus: 'alive', currentPhone: '+910', currentActivity: 'y',
+          reportedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000) },
+      ],
+    });
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/v1/cadres?search=PENDING%20REPORTING&pendingReporting=true&pageSize=50',
+        headers: auth(superAdminToken),
+      });
+      const ids = (res.json() as ListBody).data.map((r) => r.id);
+      expect(ids).toContain(overdue.id);
+      expect(ids).not.toContain(current.id);
+    } finally {
+      await prisma.report.deleteMany({ where: { cadreId: { in: [overdue.id, current.id] } } });
+      await prisma.cadre.deleteMany({ where: { id: { in: [overdue.id, current.id] } } });
+      await app.close();
+    }
+  });
+
   it('serialNumber is absent when unset, and never falls back to id (ADR-025)', async () => {
     const app = await makeApp();
     const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}`, headers: auth(superAdminToken) });
