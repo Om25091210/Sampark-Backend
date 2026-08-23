@@ -1640,6 +1640,120 @@ describe('cadres otherOriginType backfill', () => {
   });
 });
 
+// ── Bulk field correction (2026-08-23) ────────────────────────────────────────
+describe('cadres field correction', () => {
+  const url = '/api/v1/cadres/field-correction';
+  const FC_TOKEN = 'FCFIXTURE';
+  const created: number[] = [];
+
+  interface FcResp {
+    results: Array<{ serialNumber: string | null; status: string; cadreId?: number; error?: string }>;
+  }
+
+  const makeTarget = async (suffix: string): Promise<{ id: number; serial: string }> => {
+    const serial = `${FC_TOKEN}-${suffix}`;
+    const c = await prisma.cadre.create({
+      data: {
+        name: 'garbled composite text s/o Someone caste Gothikoya', phone: '+910000000801', thana: 'बीजापुर',
+        currentAddress: 'Fc fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], serialNumber: serial,
+        fatherName: null, spouseName: null, caste: null,
+      },
+    });
+    created.push(c.id);
+    return { id: c.id, serial };
+  };
+
+  afterAll(async () => {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'cadre', entityId: { in: created.map(String) } } });
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('rejects an unauthenticated call with 401', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'POST', url, payload: { corrections: [] } });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('rejects an admin JWT with 403 (correction is super_admin-tier)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(adminToken),
+      payload: { corrections: [{ serialNumber: 'x', name: 'y', currentAddress: 'z' }] },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('overwrites name/fatherName/caste/aliases directly, bypasses the ladder, audits the super_admin', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('set');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: {
+        corrections: [{
+          serialNumber: serial, name: 'Someone', fatherName: 'Father', caste: 'Gothikoya',
+          aliases: ['Alias'], currentAddress: 'Fixed address',
+        }],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as FcResp).results[0]).toMatchObject({ serialNumber: serial, status: 'updated', cadreId: id });
+
+    const row = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(row.name).toBe('Someone');
+    expect(row.fatherName).toBe('Father');
+    expect(row.caste).toBe('Gothikoya');
+    expect(row.aliases).toEqual(['Alias']);
+    expect(row.currentAddress).toBe('Fixed address');
+    expect(await prisma.cadreChangeRequest.count({ where: { cadreId: id } })).toBe(0);
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.field_correction' },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit!.actorId).toBe(superAdminId);
+    await app.close();
+  });
+
+  it('overwrites a value that was already set — no skip condition, unlike the backfills', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('already');
+    await prisma.cadre.update({ where: { id }, data: { name: 'Old garbled name', caste: 'OldCaste' } });
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { corrections: [{ serialNumber: serial, name: 'New clean name', caste: 'NewCaste', currentAddress: 'addr' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as FcResp).results[0]).toMatchObject({ status: 'updated', cadreId: id });
+    const row = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(row.name).toBe('New clean name');
+    expect(row.caste).toBe('NewCaste');
+    await app.close();
+  });
+
+  it('reports an unmatched serial as not_found without failing the batch', async () => {
+    const app = await makeApp();
+    const { serial } = await makeTarget('mixed');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: {
+        corrections: [
+          { serialNumber: `${FC_TOKEN}-NOSUCH`, name: 'x', currentAddress: 'y' },
+          { serialNumber: serial, name: 'Fixed', currentAddress: 'addr' },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as FcResp).results;
+    expect(results[0]).toMatchObject({ status: 'not_found' });
+    expect(results[0]!.cadreId).toBeUndefined();
+    expect(results[1]).toMatchObject({ serialNumber: serial, status: 'updated' });
+    await app.close();
+  });
+});
+
 // ── Per-category recency (ADR-046) ────────────────────────────────────────────
 // The recency tiers scale by each cadre's OWN cadence: a grade-A cadre 35 days dark is
 // overdue1m, but a grade-C cadre at the same 35 days is still current. jail/death never

@@ -281,6 +281,36 @@ export const otherOriginTypeBackfillBody = z.object({
     .max(MAX_IMPORT_BATCH),
 });
 
+// ── Bulk field correction (2026-08-23, दीगर-राज्य English-composite parse fix) ──
+// The 705-row other_state register was sent to staging with a name-parsing bug
+// (the whole composite sentence — relation, caste, address, unit — landed in
+// `name`). Fixed going forward in normalizeOtherStateImport(), but the already-
+// created cadres still carry the bad values. Unlike categoryBackfillRow/
+// otherOriginTypeBackfillRow (which SKIP a row that already has a value —
+// backfilling a gap), this UNCONDITIONALLY OVERWRITES — the current values are
+// known-bad, not merely absent. Same super_admin-only, direct-write, bypass-the-
+// ladder, audited contract otherwise.
+export const fieldCorrectionRow = z.object({
+  serialNumber: z.string().trim().min(1, 'serialNumber is required'),
+  name: z.string().trim().min(1, 'name is required'),
+  currentAddress: z.string().trim().min(1, 'currentAddress is required'),
+  permanentAddress: optText,
+  fatherName: optText,
+  spouseName: optText,
+  caste: optText,
+  aliases: z
+    .array(z.string().trim().min(1))
+    .nullish()
+    .transform((v) => v ?? []),
+});
+
+export const fieldCorrectionBody = z.object({
+  corrections: z
+    .array(z.unknown())
+    .min(1, 'corrections must be a non-empty array')
+    .max(MAX_IMPORT_BATCH),
+});
+
 export type ListCadresQuery = z.infer<typeof listCadresQuery>;
 export type TransferBody = z.infer<typeof transferBody>;
 export type ThanaTransferBody = z.infer<typeof thanaTransferBody>;
@@ -288,6 +318,8 @@ export type CategoryBackfillRow = z.infer<typeof categoryBackfillRow>;
 export type CategoryBackfillBody = z.infer<typeof categoryBackfillBody>;
 export type OtherOriginTypeBackfillRow = z.infer<typeof otherOriginTypeBackfillRow>;
 export type OtherOriginTypeBackfillBody = z.infer<typeof otherOriginTypeBackfillBody>;
+export type FieldCorrectionRow = z.infer<typeof fieldCorrectionRow>;
+export type FieldCorrectionBody = z.infer<typeof fieldCorrectionBody>;
 
 // What the service actually receives: the route resolves the `me` sentinel to the
 // caller's id, so the service never has to know who is asking.

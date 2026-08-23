@@ -22,10 +22,12 @@ import {
   avatarBackfillRow,
   categoryBackfillRow,
   otherOriginTypeBackfillRow,
+  fieldCorrectionRow,
   importCadreRow,
   type AvatarBackfillRow,
   type CategoryBackfillRow,
   type OtherOriginTypeBackfillRow,
+  type FieldCorrectionRow,
   type ImportCadreRow,
   type ResolvedListCadresQuery,
 } from './cadres.schema.js';
@@ -124,6 +126,20 @@ export interface OtherOriginTypeBackfillResult {
   results: OtherOriginTypeBackfillRowResult[];
 }
 
+// Unlike the two backfills above, correction has no "skipped" status — every
+// matched row is overwritten unconditionally, so the only outcomes are
+// updated / not_found / error.
+export interface FieldCorrectionRowResult {
+  serialNumber: string | null;
+  status: 'updated' | 'not_found' | 'error';
+  cadreId?: number;
+  error?: string;
+}
+
+export interface FieldCorrectionResult {
+  results: FieldCorrectionRowResult[];
+}
+
 export interface CadresService {
   // ADR-044. `scope` is the caller's row-level authorisation, resolved per request in the
   // auth plugin. It is a REQUIRED parameter, not an optional one: an optional scope is a
@@ -155,6 +171,10 @@ export interface CadresService {
   // shipped. Same super_admin-only, non-nullable actorId, no-scope contract as
   // backfillCategory.
   backfillOtherOriginType(rows: unknown[], actorId: number): Promise<OtherOriginTypeBackfillResult>;
+  // 2026-08-23. Unconditional field correction by serialNumber, for the
+  // दीगर-राज्य English-composite name-parse fix. super_admin-only, non-nullable
+  // actorId, no scope — same posture as the other bulk-write routes.
+  correctFields(rows: unknown[], actorId: number): Promise<FieldCorrectionResult>;
 }
 
 // Echoes whatever serialNumber a raw (possibly invalid) row carried, so a row that
@@ -980,6 +1000,91 @@ export function makeCadresService({
             status: 'error',
             cadreId: match.id,
             error: 'internal error setting otherOriginType',
+          };
+        }
+      }
+
+      return { results };
+    },
+
+    async correctFields(rows, actorId) {
+      // Same validate-resolve-update shape as the backfills, but no "already
+      // has a value" skip — every matched row is overwritten, since the
+      // current name/fatherName/spouseName/caste/aliases/address values are
+      // known-bad (the English-composite parse bug), not merely absent.
+      const results: FieldCorrectionRowResult[] = new Array(rows.length);
+      const valid: { index: number; row: FieldCorrectionRow }[] = [];
+      rows.forEach((raw, index) => {
+        const parsed = fieldCorrectionRow.safeParse(raw);
+        if (!parsed.success) {
+          results[index] = {
+            serialNumber: rawSerial(raw),
+            status: 'error',
+            error: formatIssues(parsed.error),
+          };
+        } else {
+          valid.push({ index, row: parsed.data });
+        }
+      });
+
+      const serials = valid.map((v) => v.row.serialNumber);
+      const existing =
+        serials.length > 0
+          ? await prisma.cadre.findMany({
+              where: { serialNumber: { in: serials }, deletedAt: null },
+              select: { id: true, serialNumber: true, name: true, fatherName: true, spouseName: true, caste: true, aliases: true, currentAddress: true, permanentAddress: true },
+            })
+          : [];
+      const bySerial = new Map<string, (typeof existing)[number]>();
+      for (const e of existing) {
+        if (e.serialNumber !== null) bySerial.set(e.serialNumber, e);
+      }
+
+      for (const { index, row } of valid) {
+        const match = bySerial.get(row.serialNumber);
+        if (match === undefined) {
+          results[index] = { serialNumber: row.serialNumber, status: 'not_found' };
+          continue;
+        }
+        try {
+          await prisma.$transaction(async (tx) => {
+            await tx.cadre.update({
+              where: { id: match.id },
+              data: {
+                name: row.name,
+                fatherName: row.fatherName ?? null,
+                spouseName: row.spouseName ?? null,
+                caste: row.caste ?? null,
+                aliases: row.aliases,
+                currentAddress: row.currentAddress,
+                permanentAddress: row.permanentAddress ?? null,
+              },
+            });
+            await writeAuditLog(tx, {
+              actorId,
+              action: 'cadre.field_correction',
+              entityType: 'cadre',
+              entityId: String(match.id),
+              before: {
+                name: match.name, fatherName: match.fatherName, spouseName: match.spouseName,
+                caste: match.caste, aliases: match.aliases, currentAddress: match.currentAddress,
+                permanentAddress: match.permanentAddress,
+              },
+              after: {
+                serialNumber: row.serialNumber, name: row.name, fatherName: row.fatherName ?? null,
+                spouseName: row.spouseName ?? null, caste: row.caste ?? null, aliases: row.aliases,
+                currentAddress: row.currentAddress, permanentAddress: row.permanentAddress ?? null,
+              },
+            });
+          });
+          results[index] = { serialNumber: row.serialNumber, status: 'updated', cadreId: match.id };
+        } catch (err) {
+          log.error({ err, serialNumber: row.serialNumber }, 'cadre field correction row failed');
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'error',
+            cadreId: match.id,
+            error: 'internal error correcting fields',
           };
         }
       }

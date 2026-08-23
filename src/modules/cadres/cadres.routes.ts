@@ -6,6 +6,7 @@ import {
   cadreIdParam,
   categoryBackfillBody,
   otherOriginTypeBackfillBody,
+  fieldCorrectionBody,
   facetsQuery,
   importCadresBody,
   listCadresQuery,
@@ -217,6 +218,44 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const { otherOriginTypes } = otherOriginTypeBackfillBody.parse(request.body);
       return service.backfillOtherOriginType(otherOriginTypes, request.authUser!.sub);
+    },
+  );
+
+  // 2026-08-23. Unconditional field correction by serialNumber, for the दीगर-राज्य
+  // English-composite name-parse fix — the 705 already-created cadres carry the bug's
+  // output (relation/caste/address text dumped into name) and need overwriting, not
+  // backfilling. Same super_admin-only, direct-write, bypass-the-ladder contract as
+  // the two backfills above, but with NO skip condition: every matched row is
+  // overwritten regardless of its current value. Registered before `/cadres/:id`.
+  app.post(
+    '/cadres/field-correction',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Bulk UNCONDITIONAL field correction by serialNumber (super_admin)',
+        description:
+          'Overwrites name/fatherName/spouseName/caste/aliases/currentAddress/permanentAddress ' +
+          'on EXISTING cadres matched by `serialNumber`. Body is an OBJECT with a `corrections` ' +
+          `array (max ${MAX_IMPORT_BATCH} rows). Unlike category-backfill/other-origin-type-backfill, ` +
+          'this does NOT skip a row that already has a value — it always overwrites, since this ' +
+          'route exists to correct known-bad data, not fill a gap. Bypasses the ADR-026 change-' +
+          'request ladder and writes directly. Returns a per-row result array in input order.',
+        security: bearerAuth,
+        body: zodToJson(fieldCorrectionBody),
+        response: {
+          200: jsonResponse('Per-row field correction results', {
+            results: [
+              { serialNumber: 'OS-1', status: 'updated', cadreId: 1 },
+              { serialNumber: 'OS-9999', status: 'not_found' },
+            ],
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const { corrections } = fieldCorrectionBody.parse(request.body);
+      return service.correctFields(corrections, request.authUser!.sub);
     },
   );
 
