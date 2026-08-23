@@ -98,6 +98,8 @@ interface SeedCadre {
   // ADR-019. Only surrendered cadres have one — it is what the two dashboard
   // tiles split on. Left undefined for jail/thana cadres.
   surrenderOrigin?: 'district' | 'other';
+  // This task. Only meaningful alongside surrenderOrigin='other'.
+  otherOriginType?: 'other_district' | 'other_state';
   surrenderYear?: string;
   regiment?: string;
   subDivision?: string;
@@ -167,6 +169,7 @@ const CADRES: SeedCadre[] = [
     supervisoryOffice: 'पुलिस अधीक्षक दंतेवाड़ा',
     surrenderDate: '22/11/2022', surrenderLocation: 'थाना दंतेवाड़ा',
     surrenderOrigin: 'other',
+    otherOriginType: 'other_district',
     surrenderYear: '2022', regiment: 'वज्र-2011', subDivision: 'दक्षिण दंतेवाड़ा',
     familyGroupInfo: 'पति एवं दो पुत्र, गोमपाड ग्राम में निवासरत',
     incident: 'जनवरी 2023 में दंतेवाड़ा शहर के समीप महिला संगठन की बैठक में भाग लेते हुए गिरफ्तार की गई, बाद में जमानत पर रिहा।',
@@ -239,6 +242,7 @@ async function seedCadre(c: SeedCadre): Promise<void> {
     surrenderDate: parseDMY(c.surrenderDate),
     surrenderLocation: c.surrenderLocation ?? null,
     surrenderOrigin: c.surrenderOrigin ?? null,
+    otherOriginType: c.otherOriginType ?? null,
     surrenderYear: c.surrenderYear ?? null,
     regiment: c.regiment ?? null,
     subDivision: c.subDivision ?? null,

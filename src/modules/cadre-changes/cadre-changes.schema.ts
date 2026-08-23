@@ -25,6 +25,8 @@ const fieldValue = {
   surrenderDate: z.string().datetime({ offset: true }).nullable(),
   surrenderLocation: z.string().trim().max(500).nullable(),
   surrenderOrigin: z.enum(['district', 'other']).nullable(),
+  // This task. Sub-category of surrenderOrigin='other' (दीगर जिला/राज्य tabs).
+  otherOriginType: z.enum(['other_district', 'other_state']).nullable(),
   surrenderYear: z.string().trim().max(10).nullable(),
   regiment: z.string().trim().max(200).nullable(),
   familyGroupInfo: z.string().trim().max(2000).nullable(),

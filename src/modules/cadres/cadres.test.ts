@@ -100,7 +100,9 @@ beforeAll(async () => {
     data: [
       { name: `${ORIGIN_TOKEN}-D1`, surrenderOrigin: 'district' as const, category: 'surrendered' as const },
       { name: `${ORIGIN_TOKEN}-D2`, surrenderOrigin: 'district' as const, category: 'surrendered' as const },
-      { name: `${ORIGIN_TOKEN}-O1`, surrenderOrigin: 'other' as const, category: 'surrendered' as const },
+      { name: `${ORIGIN_TOKEN}-O1`, surrenderOrigin: 'other' as const, otherOriginType: 'other_district' as const, category: 'surrendered' as const },
+      { name: `${ORIGIN_TOKEN}-O2`, surrenderOrigin: 'other' as const, otherOriginType: 'other_state' as const, category: 'surrendered' as const },
+      { name: `${ORIGIN_TOKEN}-O3`, surrenderOrigin: 'other' as const, category: 'surrendered' as const },
       { name: `${ORIGIN_TOKEN}-T1`, surrenderOrigin: null, category: 'thana' as const },
     ].map((c, i) => ({
       ...c, phone: `+91000000020${i}`, thana: 'ओरिजिन',
@@ -333,13 +335,46 @@ describe('cadres', () => {
     const o = (await app.inject({ method: 'GET', url: q('other'), headers: auth(superAdminToken) })).json() as ListBody;
 
     expect(d.total).toBe(2);
-    expect(o.total).toBe(1);
+    expect(o.total).toBe(3);
     expect(d.data.every((c) => c.surrenderOrigin === 'district')).toBe(true);
     expect(o.data.every((c) => c.surrenderOrigin === 'other')).toBe(true);
 
     // The bug this replaces: both tiles returned the same list. They must not overlap.
     const districtIds = new Set(d.data.map((c) => c.id));
     expect(o.data.some((c) => districtIds.has(c.id))).toBe(false);
+    await app.close();
+  });
+
+  // This task: the दीगर जिला/राज्य tabs are one level further into the 'other' bucket.
+  it('otherOriginType splits the surrenderOrigin=other cadres into two disjoint sets', async () => {
+    const app = await makeApp();
+    const q = (type: string) =>
+      `/api/v1/cadres?search=${ORIGIN_TOKEN}&category=surrendered&surrenderOrigin=other&otherOriginType=${type}&pageSize=50`;
+
+    const d = (await app.inject({ method: 'GET', url: q('other_district'), headers: auth(superAdminToken) })).json() as ListBody;
+    const s = (await app.inject({ method: 'GET', url: q('other_state'), headers: auth(superAdminToken) })).json() as ListBody;
+
+    expect(d.total).toBe(1);
+    expect(s.total).toBe(1);
+    expect(d.data.every((c) => c.otherOriginType === 'other_district')).toBe(true);
+    expect(s.data.every((c) => c.otherOriginType === 'other_state')).toBe(true);
+    // The unclassified O3 row (surrenderOrigin='other', no otherOriginType) must be
+    // invisible to both tabs — same "not yet classified" rule as ADR-019 one level up.
+    const otherIds = new Set([...d.data, ...s.data].map((c) => c.id));
+    expect(otherIds.size).toBe(2);
+    await app.close();
+  });
+
+  it('a district-origin cadre carries no otherOriginType on the wire', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?search=${ORIGIN_TOKEN}&category=surrendered&surrenderOrigin=district&pageSize=50`,
+      headers: auth(superAdminToken),
+    });
+    const body = res.json() as ListBody;
+    expect(body.total).toBe(2);
+    expect(body.data.every((c) => !('otherOriginType' in c))).toBe(true);
     await app.close();
   });
 

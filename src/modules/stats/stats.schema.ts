@@ -32,6 +32,12 @@ export const dashboardStatsResponse = z.object({
     surrendered: z.object({
       district: z.number().int(),
       other: z.number().int(),
+      // This task. Sub-split of `other` for the दीगर जिला/राज्य tabs on that tile.
+      // A cadre with surrenderOrigin='other' but no otherOriginType yet counts toward
+      // `other`/`total` but neither of these two — same "invisible to the sub-bucket
+      // until classified" rule ADR-019 already uses one level up.
+      otherDistrict: z.number().int(),
+      otherState: z.number().int(),
       total: z.number().int(),
     }),
     thana: z.number().int(),

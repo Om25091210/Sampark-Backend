@@ -38,6 +38,9 @@ const optionalFacts = {
   surrenderYear: z.string().trim().max(10).nullish(),
   surrenderDate: z.string().datetime({ offset: true }).nullish(),
   surrenderOrigin: z.enum(['district', 'other']).nullish(),
+  // This task. Sub-category of surrenderOrigin='other' (दीगर जिला/राज्य tabs) —
+  // required at that point by the object-level refinement below.
+  otherOriginType: z.enum(['other_district', 'other_state']).nullish(),
   familyGroupInfo: z.string().trim().max(2000).nullish(),
   subDivision: z.string().trim().max(200).nullish(),
   district: z.string().trim().max(200).nullish(),
@@ -59,7 +62,16 @@ const optionalFacts = {
   avatarKey3: z.string().trim().min(1).max(1024).nullish(),
 };
 
-export const createCadreDraftSchema = z.object({ ...requiredCore, ...optionalFacts }).strict();
+// This task: `otherOriginType` is mandatory once surrenderOrigin='other' is chosen
+// (the create-cadre form's second sub-dropdown), same "required at this point in the
+// choice tree" posture as the four top-level category choices themselves.
+export const createCadreDraftSchema = z
+  .object({ ...requiredCore, ...optionalFacts })
+  .strict()
+  .refine((d) => d.surrenderOrigin !== 'other' || d.otherOriginType != null, {
+    message: 'otherOriginType is required when surrenderOrigin is other',
+    path: ['otherOriginType'],
+  });
 export type CreateCadreDraft = z.infer<typeof createCadreDraftSchema>;
 
 export const submitCreateRequestBody = z.object({

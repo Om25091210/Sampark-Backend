@@ -249,6 +249,7 @@ export function makeCadreCreateRequestsService({
         surrenderDate: draft.surrenderDate ? new Date(draft.surrenderDate) : null,
         surrenderLocation: draft.surrenderLocation ?? null,
         surrenderOrigin: draft.surrenderOrigin ?? null,
+        otherOriginType: draft.otherOriginType ?? null,
         surrenderYear: draft.surrenderYear ?? null,
         familyGroupInfo: draft.familyGroupInfo ?? null,
         subDivision: draft.subDivision ?? null,

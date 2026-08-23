@@ -90,6 +90,8 @@ export interface WireCadre {
   surrenderLocation?: string;
   // ADR-019. Only surrendered cadres carry one; absent otherwise.
   surrenderOrigin?: NonNullable<Cadre['surrenderOrigin']>;
+  // This task. Only present when surrenderOrigin='other'; absent otherwise.
+  otherOriginType?: NonNullable<Cadre['otherOriginType']>;
   surrenderYear?: string;
   regiment?: string;
   familyGroupInfo?: string;
@@ -258,6 +260,7 @@ export function toWireCadre(
     surrenderDate: c.surrenderDate?.toISOString(),
     surrenderLocation: c.surrenderLocation ?? undefined,
     surrenderOrigin: c.surrenderOrigin ?? undefined,
+    otherOriginType: c.otherOriginType ?? undefined,
     surrenderYear: c.surrenderYear ?? undefined,
     regiment: c.regiment ?? undefined,
     familyGroupInfo: c.familyGroupInfo ?? undefined,

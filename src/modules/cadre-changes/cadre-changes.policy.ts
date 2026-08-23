@@ -45,6 +45,8 @@ export const APPROVAL_FIELDS = [
   'surrenderDate',
   'surrenderLocation',
   'surrenderOrigin',
+  // This task. Sub-category of surrenderOrigin='other' (दीगर जिला/राज्य tabs).
+  'otherOriginType',
   'surrenderYear',
   'regiment',
   'familyGroupInfo',

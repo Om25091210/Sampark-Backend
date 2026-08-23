@@ -29,6 +29,10 @@ export const listCadresQuery = z.object({
   // Only meaningful alongside category=surrendered; non-surrendered cadres have
   // no origin, so combining it with another category correctly returns nothing.
   surrenderOrigin: z.enum(['district', 'other']).optional(),
+  // This task. Sub-splits the surrenderOrigin='other' bucket into the दीगर जिला/राज्य
+  // tabs. Only meaningful alongside surrenderOrigin=other; combining it with `district`
+  // or omitting surrenderOrigin correctly returns nothing/everything respectively.
+  otherOriginType: z.enum(['other_district', 'other_state']).optional(),
   // ADR-020. Server-side alert-severity filter, so the dashboard's "सक्रिय अलर्ट"
   // tile can drill into exactly the critical cadres rather than filtering a single
   // fetched page client-side (which would miss everyone past the first page).
@@ -137,6 +141,12 @@ export const importCadreRow = z.object({
   surrenderLocation: optText,
   surrenderOrigin: z
     .enum(['district', 'other'])
+    .nullish()
+    .transform((v) => v ?? undefined),
+  // This task. Only present on 'other'-origin rows; the import supplies it directly
+  // rather than it being inferred.
+  otherOriginType: z
+    .enum(['other_district', 'other_state'])
     .nullish()
     .transform((v) => v ?? undefined),
   surrenderYear: optText,

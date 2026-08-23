@@ -403,4 +403,29 @@ describe('cadre create requests', () => {
     expect(second.duplicateWarning?.createRequests.some((r) => r.id === first.id)).toBe(true);
     await app.close();
   });
+
+  // ── This task: otherOriginType (दीगर जिला/राज्य sub-category) ────────────────
+
+  it('otherOriginType is required once surrenderOrigin=other is chosen (400)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/cadre-create-requests',
+      headers: auth(officerToken),
+      payload: { draft: draft({ surrenderOrigin: 'other' }) },
+    });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('a draft with surrenderOrigin=other and otherOriginType set is applied with both fields', async () => {
+    const app = await makeApp();
+    const d = draft({ surrenderOrigin: 'other', otherOriginType: 'other_state' });
+    const req = await submit(app, superToken, d);
+    expect(req.status).toBe('applied');
+    const cadre = await prisma.cadre.findUniqueOrThrow({ where: { id: req.cadreId! } });
+    expect(cadre.surrenderOrigin).toBe('other');
+    expect(cadre.otherOriginType).toBe('other_state');
+    await app.close();
+  });
 });

@@ -71,7 +71,7 @@ interface Stats {
   pendingReporting: number;
   reportingRecency: { current: number; overdue1m: number; overdue2m: number; overdue3m: number };
   byCategory: {
-    surrendered: { district: number; other: number; total: number };
+    surrendered: { district: number; other: number; otherDistrict: number; otherState: number; total: number };
     thana: number;
     jail: number;
   };
@@ -148,8 +148,11 @@ beforeAll(async () => {
     data: { ...base, name: `${TOKEN}-ALERT`, category: 'surrendered', surrenderOrigin: 'district', alertLevel: 'critical' },
   }); // district +1, activeAlerts +1, never-reported -> pending +1
   const cOther = await prisma.cadre.create({
-    data: { ...base, name: `${TOKEN}-OTHER`, category: 'surrendered', surrenderOrigin: 'other', alertLevel: 'normal' },
-  }); // other +1, gets a fresh report -> NOT pending, reportsThisWeek +1
+    data: {
+      ...base, name: `${TOKEN}-OTHER`, category: 'surrendered',
+      surrenderOrigin: 'other', otherOriginType: 'other_state', alertLevel: 'normal',
+    },
+  }); // other +1, otherState +1, gets a fresh report -> NOT pending, reportsThisWeek +1
   const cThana = await prisma.cadre.create({
     data: { ...base, name: `${TOKEN}-THANA`, category: 'thana', alertLevel: 'normal' },
   }); // thana +1, only a stale (40d) report -> pending +1, NOT in reportsThisWeek
@@ -425,8 +428,9 @@ describe('stats', () => {
     expect(res.statusCode).toBe(200);
     const s = res.json() as Stats;
     for (const n of [s.totalCadres, s.activeAlerts, s.reportsThisWeek, s.pendingReporting,
-      s.byCategory.surrendered.district, s.byCategory.surrendered.other, s.byCategory.surrendered.total,
-      s.byCategory.thana, s.byCategory.jail]) {
+      s.byCategory.surrendered.district, s.byCategory.surrendered.other,
+      s.byCategory.surrendered.otherDistrict, s.byCategory.surrendered.otherState,
+      s.byCategory.surrendered.total, s.byCategory.thana, s.byCategory.jail]) {
       expect(Number.isInteger(n)).toBe(true);
       expect(n).toBeGreaterThanOrEqual(0);
     }
@@ -442,6 +446,10 @@ describe('stats', () => {
     // so the two tiles need not sum to the surrendered total.
     expect(s.byCategory.surrendered.district + s.byCategory.surrendered.other)
       .toBeLessThanOrEqual(s.byCategory.surrendered.total);
+    // This task: otherDistrict + otherState ≤ other — a cadre with surrenderOrigin='other'
+    // may still have a NULL otherOriginType (not yet classified), same rule one level down.
+    expect(s.byCategory.surrendered.otherDistrict + s.byCategory.surrendered.otherState)
+      .toBeLessThanOrEqual(s.byCategory.surrendered.other);
     await app.close();
   });
 
@@ -451,6 +459,7 @@ describe('stats', () => {
     // Lower bounds: my fixture contributes at least this much; parallel data only adds.
     expect(s.byCategory.surrendered.district).toBeGreaterThanOrEqual(1);
     expect(s.byCategory.surrendered.other).toBeGreaterThanOrEqual(1);
+    expect(s.byCategory.surrendered.otherState).toBeGreaterThanOrEqual(1);
     expect(s.byCategory.thana).toBeGreaterThanOrEqual(1);
     expect(s.activeAlerts).toBeGreaterThanOrEqual(1);
     expect(s.reportsThisWeek).toBeGreaterThanOrEqual(1); // the 2-day-old report

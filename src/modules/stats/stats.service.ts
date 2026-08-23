@@ -118,6 +118,8 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         surrenderedTotal,
         surrenderedDistrict,
         surrenderedOther,
+        surrenderedOtherDistrict,
+        surrenderedOtherState,
         thana,
         jail,
         activeAlerts,
@@ -133,6 +135,13 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         prisma.cadre.count({ where: { ...live, category: 'surrendered' } }),
         prisma.cadre.count({ where: { ...live, category: 'surrendered', surrenderOrigin: 'district' } }),
         prisma.cadre.count({ where: { ...live, category: 'surrendered', surrenderOrigin: 'other' } }),
+        // This task. The दीगर जिला/राज्य tabs — sub-split of the 'other' bucket above.
+        prisma.cadre.count({
+          where: { ...live, category: 'surrendered', surrenderOrigin: 'other', otherOriginType: 'other_district' },
+        }),
+        prisma.cadre.count({
+          where: { ...live, category: 'surrendered', surrenderOrigin: 'other', otherOriginType: 'other_state' },
+        }),
         prisma.cadre.count({ where: { ...live, category: 'thana' } }),
         prisma.cadre.count({ where: { ...live, category: 'jail' } }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'critical' } }),
@@ -170,8 +179,16 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         byCategory: {
           // A surrendered cadre with a NULL origin (ADR-019) is invisible to both
           // tiles: it counts toward `total` but neither `district` nor `other`, so the
-          // two need not sum to the total. That gap is the unclassified set.
-          surrendered: { district: surrenderedDistrict, other: surrenderedOther, total: surrenderedTotal },
+          // two need not sum to the total. That gap is the unclassified set. Same rule
+          // one level down: an 'other'-origin cadre with no otherOriginType yet counts
+          // toward `other` but neither `otherDistrict` nor `otherState`.
+          surrendered: {
+            district: surrenderedDistrict,
+            other: surrenderedOther,
+            otherDistrict: surrenderedOtherDistrict,
+            otherState: surrenderedOtherState,
+            total: surrenderedTotal,
+          },
           thana,
           jail,
         },

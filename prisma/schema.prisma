@@ -50,6 +50,15 @@ enum SurrenderOrigin {
   other // another district or state
 }
 
+// This task (dashboard "दीगर जिला/राज्य" tabs). Sub-classifies the `other` bucket
+// of SurrenderOrigin into the two tabs the home-dashboard card and create-cadre
+// form now show. Only meaningful when surrenderOrigin = 'other' — same nullable,
+// scoped-to-parent-value pattern as SurrenderOrigin itself relative to category.
+enum OtherOriginType {
+  other_district // another district (not Bijapur)
+  other_state // another state
+}
+
 // ADR-026. Lifecycle of an officer/admin-proposed edit to a cadre record.
 // `applied` is terminal and means the change is live on the cadre; `approved`
 // is never a resting state (approval and application happen in one transaction),
@@ -254,6 +263,9 @@ model Cadre {
   surrenderDate      DateTime?         @map("surrender_date")
   surrenderLocation  String?           @map("surrender_location")
   surrenderOrigin    SurrenderOrigin?  @map("surrender_origin")
+  // This task. Only set when surrenderOrigin = 'other'; null otherwise (including
+  // for the district-origin and non-surrendered cases). See enum comment.
+  otherOriginType    OtherOriginType?  @map("other_origin_type")
   surrenderYear      String?           @map("surrender_year")
   regiment           String?
   familyGroupInfo    String?           @map("family_group_info")
@@ -350,6 +362,8 @@ model Cadre {
   @@index([permanentStatus])
   // The two surrendered dashboard tiles both filter category + origin together.
   @@index([category, surrenderOrigin])
+  // This task. The दीगर जिला/राज्य tabs drill one level further into that filter.
+  @@index([category, surrenderOrigin, otherOriginType])
   @@map("cadres")
 }
 

@@ -174,6 +174,7 @@ function toCreateData(row: ImportCadreRow): Prisma.CadreCreateInput {
     surrenderDate: row.surrenderDate,
     surrenderLocation: row.surrenderLocation,
     surrenderOrigin: row.surrenderOrigin,
+    otherOriginType: row.otherOriginType,
     surrenderYear: row.surrenderYear,
     regiment: row.regiment,
     subDivision: row.subDivision,
@@ -290,6 +291,8 @@ export function makeCadresService({
       if (query.assignedTo !== undefined) where.assignedOfficerId = query.assignedTo;
       // ADR-019: the two surrendered dashboard tiles differ only by this.
       if (query.surrenderOrigin !== undefined) where.surrenderOrigin = query.surrenderOrigin;
+      // This task: sub-splits the दीगर जिला/राज्य tiles/tabs one level further.
+      if (query.otherOriginType !== undefined) where.otherOriginType = query.otherOriginType;
       // ADR-020/033: the "सक्रिय अलर्ट" tile drills into critical cadres; the sheet can
       // select several levels at once.
       if (query.alertLevel !== undefined) where.alertLevel = { in: query.alertLevel };
