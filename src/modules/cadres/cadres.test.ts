@@ -1534,6 +1534,112 @@ describe('cadres category backfill (ADR-046)', () => {
   });
 });
 
+// ── otherOriginType backfill ──────────────────────────────────────────────────
+describe('cadres otherOriginType backfill', () => {
+  const url = '/api/v1/cadres/other-origin-type-backfill';
+  const OOT_TOKEN = 'OOTFIXTURE';
+  const created: number[] = [];
+
+  interface OotResp {
+    results: Array<{ serialNumber: string | null; status: string; cadreId?: number; otherOriginType?: string; error?: string }>;
+  }
+
+  const makeTarget = async (suffix: string, origin: 'other_district' | 'other_state' | null = null): Promise<{ id: number; serial: string }> => {
+    const serial = `${OOT_TOKEN}-${suffix}`;
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${OOT_TOKEN} ${suffix}`, phone: '+910000000701', thana: 'बीजापुर',
+        currentAddress: 'Oot fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], serialNumber: serial,
+        surrenderOrigin: 'other', otherOriginType: origin,
+      },
+    });
+    created.push(c.id);
+    return { id: c.id, serial };
+  };
+
+  afterAll(async () => {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'cadre', entityId: { in: created.map(String) } } });
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('rejects an unauthenticated call with 401', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'POST', url, payload: { otherOriginTypes: [] } });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('rejects an admin JWT with 403 (backfill is super_admin-tier)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(adminToken),
+      payload: { otherOriginTypes: [{ serialNumber: 'x', otherOriginType: 'other_district' }] },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('sets otherOriginType directly, bypasses the ladder, audits the super_admin, and serializes it', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('set');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { otherOriginTypes: [{ serialNumber: serial, otherOriginType: 'other_district' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as OotResp).results[0]).toMatchObject({ serialNumber: serial, status: 'updated', cadreId: id, otherOriginType: 'other_district' });
+
+    const row = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(row.otherOriginType).toBe('other_district');
+    expect(await prisma.cadreChangeRequest.count({ where: { cadreId: id } })).toBe(0);
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.other_origin_type_backfill' },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit!.actorId).toBe(superAdminId);
+
+    const get = await app.inject({ method: 'GET', url: `/api/v1/cadres/${id}`, headers: auth(superAdminToken) });
+    expect((get.json() as { otherOriginType?: string }).otherOriginType).toBe('other_district');
+    await app.close();
+  });
+
+  it('skips a cadre that already has an otherOriginType — a re-run cannot overwrite it', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('already', 'other_district');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { otherOriginTypes: [{ serialNumber: serial, otherOriginType: 'other_state' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as OotResp).results[0]).toMatchObject({ serialNumber: serial, status: 'skipped_has_origin_type', cadreId: id, otherOriginType: 'other_district' });
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id } })).otherOriginType).toBe('other_district');
+    expect(await prisma.auditLog.count({ where: { entityType: 'cadre', entityId: String(id), action: 'cadre.other_origin_type_backfill' } })).toBe(0);
+    await app.close();
+  });
+
+  it('reports an unmatched serial as not_found without failing the batch', async () => {
+    const app = await makeApp();
+    const { serial } = await makeTarget('mixed');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: {
+        otherOriginTypes: [
+          { serialNumber: `${OOT_TOKEN}-NOSUCH`, otherOriginType: 'other_state' },
+          { serialNumber: serial, otherOriginType: 'other_state' },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as OotResp).results;
+    expect(results[0]).toMatchObject({ status: 'not_found' });
+    expect(results[0]!.cadreId).toBeUndefined();
+    expect(results[1]).toMatchObject({ serialNumber: serial, status: 'updated', otherOriginType: 'other_state' });
+    await app.close();
+  });
+});
+
 // ── Per-category recency (ADR-046) ────────────────────────────────────────────
 // The recency tiers scale by each cadre's OWN cadence: a grade-A cadre 35 days dark is
 // overdue1m, but a grade-C cadre at the same 35 days is still current. jail/death never

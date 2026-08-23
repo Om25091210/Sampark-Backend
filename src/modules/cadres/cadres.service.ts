@@ -21,9 +21,11 @@ import { decodeBase64Image, sniffImageType, EXT_BY_TYPE } from '../../lib/images
 import {
   avatarBackfillRow,
   categoryBackfillRow,
+  otherOriginTypeBackfillRow,
   importCadreRow,
   type AvatarBackfillRow,
   type CategoryBackfillRow,
+  type OtherOriginTypeBackfillRow,
   type ImportCadreRow,
   type ResolvedListCadresQuery,
 } from './cadres.schema.js';
@@ -108,6 +110,20 @@ export interface CategoryBackfillResult {
   results: CategoryBackfillRowResult[];
 }
 
+// Same shape as CategoryBackfillRowResult — `skipped_has_origin_type` mirrors
+// `skipped_has_category`: a row already classified is left alone.
+export interface OtherOriginTypeBackfillRowResult {
+  serialNumber: string | null;
+  status: 'updated' | 'skipped_has_origin_type' | 'not_found' | 'error';
+  cadreId?: number;
+  otherOriginType?: OtherOriginTypeBackfillRow['otherOriginType'];
+  error?: string;
+}
+
+export interface OtherOriginTypeBackfillResult {
+  results: OtherOriginTypeBackfillRowResult[];
+}
+
 export interface CadresService {
   // ADR-044. `scope` is the caller's row-level authorisation, resolved per request in the
   // auth plugin. It is a REQUIRED parameter, not an optional one: an optional scope is a
@@ -135,6 +151,10 @@ export interface CadresService {
   // super_admin-only like backfillAvatars, so `actorId` is non-nullable (no machine-key
   // path) and no `scope` parameter (a super_admin's scope is unrestricted, ADR-044).
   backfillCategory(rows: unknown[], actorId: number): Promise<CategoryBackfillResult>;
+  // Bulk otherOriginType backfill by serialNumber, for rows imported before this field
+  // shipped. Same super_admin-only, non-nullable actorId, no-scope contract as
+  // backfillCategory.
+  backfillOtherOriginType(rows: unknown[], actorId: number): Promise<OtherOriginTypeBackfillResult>;
 }
 
 // Echoes whatever serialNumber a raw (possibly invalid) row carried, so a row that
@@ -881,6 +901,85 @@ export function makeCadresService({
             status: 'error',
             cadreId: match.id,
             error: 'internal error setting category',
+          };
+        }
+      }
+
+      return { results };
+    },
+
+    async backfillOtherOriginType(rows, actorId) {
+      // Same three-phase shape as backfillCategory: validate up front, resolve every
+      // serial in one query, then update per row.
+      const results: OtherOriginTypeBackfillRowResult[] = new Array(rows.length);
+      const valid: { index: number; row: OtherOriginTypeBackfillRow }[] = [];
+      rows.forEach((raw, index) => {
+        const parsed = otherOriginTypeBackfillRow.safeParse(raw);
+        if (!parsed.success) {
+          results[index] = {
+            serialNumber: rawSerial(raw),
+            status: 'error',
+            error: formatIssues(parsed.error),
+          };
+        } else {
+          valid.push({ index, row: parsed.data });
+        }
+      });
+
+      const serials = valid.map((v) => v.row.serialNumber);
+      const existing =
+        serials.length > 0
+          ? await prisma.cadre.findMany({
+              where: { serialNumber: { in: serials }, deletedAt: null },
+              select: { id: true, serialNumber: true, otherOriginType: true },
+            })
+          : [];
+      const bySerial = new Map<string, { id: number; otherOriginType: OtherOriginTypeBackfillRow['otherOriginType'] | null }>();
+      for (const e of existing) {
+        if (e.serialNumber !== null) bySerial.set(e.serialNumber, { id: e.id, otherOriginType: e.otherOriginType });
+      }
+
+      for (const { index, row } of valid) {
+        const match = bySerial.get(row.serialNumber);
+        if (match === undefined) {
+          results[index] = { serialNumber: row.serialNumber, status: 'not_found' };
+          continue;
+        }
+        if (match.otherOriginType !== null) {
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'skipped_has_origin_type',
+            cadreId: match.id,
+            otherOriginType: match.otherOriginType,
+          };
+          continue;
+        }
+        try {
+          await prisma.$transaction(async (tx) => {
+            await tx.cadre.update({ where: { id: match.id }, data: { otherOriginType: row.otherOriginType } });
+            await writeAuditLog(tx, {
+              actorId,
+              action: 'cadre.other_origin_type_backfill',
+              entityType: 'cadre',
+              entityId: String(match.id),
+              before: { otherOriginType: null },
+              after: { serialNumber: row.serialNumber, otherOriginType: row.otherOriginType },
+            });
+          });
+          bySerial.set(row.serialNumber, { id: match.id, otherOriginType: row.otherOriginType });
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'updated',
+            cadreId: match.id,
+            otherOriginType: row.otherOriginType,
+          };
+        } catch (err) {
+          log.error({ err, serialNumber: row.serialNumber }, 'cadre otherOriginType backfill row failed');
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'error',
+            cadreId: match.id,
+            error: 'internal error setting otherOriginType',
           };
         }
       }

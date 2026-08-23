@@ -263,11 +263,31 @@ export const categoryBackfillBody = z.object({
     .max(MAX_IMPORT_BATCH),
 });
 
+// ── Bulk otherOriginType backfill ─────────────────────────────────────────────
+// Same shape and discipline as categoryBackfillRow/Body: the two new register
+// imports (दीगर जिला/राज्य, 2026-08-23) landed before this backend deploy shipped
+// otherOriginType, so the already-imported rows carry it as null. Backfill sets it
+// after the fact, matched by serialNumber — same super_admin-only, direct-write,
+// bypass-the-ladder contract as backfillCategory.
+export const otherOriginTypeBackfillRow = z.object({
+  serialNumber: z.string().trim().min(1, 'serialNumber is required'),
+  otherOriginType: z.enum(['other_district', 'other_state']),
+});
+
+export const otherOriginTypeBackfillBody = z.object({
+  otherOriginTypes: z
+    .array(z.unknown())
+    .min(1, 'otherOriginTypes must be a non-empty array')
+    .max(MAX_IMPORT_BATCH),
+});
+
 export type ListCadresQuery = z.infer<typeof listCadresQuery>;
 export type TransferBody = z.infer<typeof transferBody>;
 export type ThanaTransferBody = z.infer<typeof thanaTransferBody>;
 export type CategoryBackfillRow = z.infer<typeof categoryBackfillRow>;
 export type CategoryBackfillBody = z.infer<typeof categoryBackfillBody>;
+export type OtherOriginTypeBackfillRow = z.infer<typeof otherOriginTypeBackfillRow>;
+export type OtherOriginTypeBackfillBody = z.infer<typeof otherOriginTypeBackfillBody>;
 
 // What the service actually receives: the route resolves the `me` sentinel to the
 // caller's id, so the service never has to know who is asking.

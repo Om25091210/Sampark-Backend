@@ -5,6 +5,7 @@ import {
   avatarBackfillBody,
   cadreIdParam,
   categoryBackfillBody,
+  otherOriginTypeBackfillBody,
   facetsQuery,
   importCadresBody,
   listCadresQuery,
@@ -178,6 +179,44 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const { categories } = categoryBackfillBody.parse(request.body);
       return service.backfillCategory(categories, request.authUser!.sub);
+    },
+  );
+
+  // Bulk otherOriginType backfill by serialNumber — for the दीगर जिला/राज्य register rows
+  // imported before this backend deploy shipped otherOriginType, which now carry it as
+  // null. Same super_admin-only, direct-write, bypass-the-ladder contract as
+  // category-backfill. Registered before `/cadres/:id` alongside the other static segments.
+  app.post(
+    '/cadres/other-origin-type-backfill',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Bulk otherOriginType backfill by serialNumber (super_admin)',
+        description:
+          'Sets otherOriginType in bulk, matching EXISTING cadres by `serialNumber`. Body is ' +
+          `an OBJECT with an \`otherOriginTypes\` array (max ${MAX_IMPORT_BATCH} rows). Each row ` +
+          'is `{ serialNumber, otherOriginType }` where otherOriginType is ' +
+          '`other_district|other_state`. Bypasses the ADR-026 change-request ladder and writes ' +
+          'directly, exactly as category-backfill does. A cadre that ALREADY has an ' +
+          'otherOriginType is skipped, never overwritten, so a re-run is idempotent. Returns a ' +
+          'per-row result array in input order.',
+        security: bearerAuth,
+        body: zodToJson(otherOriginTypeBackfillBody),
+        response: {
+          200: jsonResponse('Per-row otherOriginType backfill results', {
+            results: [
+              { serialNumber: 'OD-1', status: 'updated', cadreId: 1, otherOriginType: 'other_district' },
+              { serialNumber: 'OD-2', status: 'skipped_has_origin_type', cadreId: 2, otherOriginType: 'other_district' },
+              { serialNumber: 'OD-9999', status: 'not_found' },
+            ],
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const { otherOriginTypes } = otherOriginTypeBackfillBody.parse(request.body);
+      return service.backfillOtherOriginType(otherOriginTypes, request.authUser!.sub);
     },
   );
 
