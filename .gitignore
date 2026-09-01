@@ -17,7 +17,11 @@ infra/.terraform.tfstate.lock.info
 # Saved plan files are binary and can embed sensitive values.
 infra/*.tfplan
 infra/crash.log
+# Ad-hoc `terraform apply | tee` capture -- not a source artifact.
+infra/apply_output.txt
 
 # NOT ignored, and committed on purpose:
 #   infra/.terraform.lock.hcl   -- pins provider checksums; must be in git
+# Build dirs for the Lambda-packaged infra code (archive_file output_path).
 infra/.canary-build/
+infra/.lambda-build/

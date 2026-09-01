@@ -147,6 +147,17 @@ data "archive_file" "readyz_canary" {
   }
 }
 
+# aws_synthetics_canary does NOT re-upload the zip when only its CONTENT changes --
+# zip_file is the same path string, and the resource exposes no source_code_hash to
+# diff on. On 2026-09-01 (ADR-061) this shipped a new READYZ_URL against the OLD
+# readyz.js: the probe did TLS to port 80 and every run failed with EPROTO until the
+# canary was `terraform taint`ed. This makes the hash a real dependency: when
+# readyz.js changes, its base64 sha changes, this resource updates, and
+# replace_triggered_by below forces the canary to be recreated with the new code.
+resource "terraform_data" "readyz_canary_code" {
+  input = data.archive_file.readyz_canary.output_base64sha256
+}
+
 resource "aws_synthetics_canary" "readyz" {
   # Max 21 chars, lowercase. Not name_prefix'd for that reason.
   name                 = "sampark-stg-readyz"
@@ -172,12 +183,18 @@ resource "aws_synthetics_canary" "readyz" {
     environment_variables = {
       # Not a secret: this hostname is in every mobile build.
       #
+      # ADR-061 (2026-09-01): this was `http://${aws_lb.main.dns_name}/readyz` --
+      # the raw ALB DNS name over cleartext HTTP. The :80 listener became a 301 ->
+      # HTTPS redirect on 2026-07-28 (alb.tf), so from that day every run got a 301,
+      # never reached /readyz, and the alarm stuck in ALARM for five weeks. Probe the
+      # real public URL over TLS, the same endpoint the mobile client hits.
+      #
       # WARNING: the Synthetics API does NOT return environment_variables on read, so
       # Terraform cannot see drift here. If someone repoints READYZ_URL out-of-band
       # (a console edit, a manual `update-canary` during a test), `terraform apply`
       # will report no change and silently leave the drift in place. To force it,
       # taint the canary: `terraform taint aws_synthetics_canary.readyz`.
-      READYZ_URL = "http://${aws_lb.main.dns_name}/readyz"
+      READYZ_URL = "https://${var.api_domain_name}/readyz"
     }
   }
 
@@ -189,6 +206,12 @@ resource "aws_synthetics_canary" "readyz" {
   failure_retention_period = 31
 
   tags = { Name = "${local.name_prefix}-readyz-canary" }
+
+  # See terraform_data.readyz_canary_code above: without this, an edit to readyz.js
+  # updates the env vars / metadata but leaves the OLD code running on the canary.
+  lifecycle {
+    replace_triggered_by = [terraform_data.readyz_canary_code]
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -262,4 +285,80 @@ resource "aws_cloudwatch_metric_alarm" "readyz_failed" {
   ok_actions = [aws_sns_topic.alerts.arn]
 
   tags = { Name = "${local.name_prefix}-readyz-failed" }
+}
+
+# ---------------------------------------------------------------------------
+# A SECOND, INDEPENDENT signal path (ADR-061, 2026-09-01)
+#
+# On 2026-09-01 the RDS master password rotated, the long-running task kept the old
+# one, and every DB-backed route 500'd for hours. The readyz canary above SHOULD
+# have caught it in 30 minutes -- except the canary had been misconfigured and
+# failing continuously since 2026-07-28, so its alarm was already red and SNS
+# (which only fires on a state TRANSITION) had nothing new to say.
+#
+# One prober that can rot into a false-negative is a single point of failure for
+# the whole alerting story. This adds a second path with a different mechanism and
+# a different failure mode: a log metric filter on the application's own output.
+# It is traffic-dependent (the reason the canary exists at all), but a production
+# login flow is never quiet for long, and combined with db_rotation_redeploy.tf
+# the rotation case is now defended three deep: auto-redeploy, canary, log alarm.
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_metric_filter" "db_auth_failed" {
+  name           = "${local.name_prefix}-db-auth-failed"
+  log_group_name = aws_cloudwatch_log_group.backend.name
+
+  # Prisma emits this exact phrase (error P1000) on every query when the credential
+  # is wrong -- a stale password after rotation, or a bad hand-edit. A plain quoted
+  # term matches the raw log line and does not depend on the Pino JSON shape.
+  pattern = "\"Authentication failed against database server\""
+
+  metric_transformation {
+    name          = "DbAuthFailures"
+    namespace     = "Sampark/Backend"
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "db_auth_failed" {
+  alarm_name        = "${local.name_prefix}-db-auth-failed"
+  alarm_description = <<-EOT
+    The backend is logging Prisma P1000 "Authentication failed against database
+    server" -- it is running but cannot authenticate to PostgreSQL. Almost always
+    a stale credential after the 7-day RDS master-password rotation.
+
+    Check, in order:
+      1. Did the RDS master secret rotate recently?
+         aws secretsmanager describe-secret --secret-id <rds-secret-arn> \
+           --query '{LastRotated:LastRotatedDate}'
+      2. When did the running ECS deployment start? If it predates the rotation,
+         db_rotation_redeploy.tf's Lambda should already have forced a redeploy --
+         check its logs (/aws/lambda/${local.name_prefix}-rotation-redeploy).
+      3. Manual recovery: aws ecs update-service --cluster ${local.ecs_cluster_name} \
+           --service ${local.ecs_service_name} --force-new-deployment
+  EOT
+
+  namespace   = "Sampark/Backend"
+  metric_name = "DbAuthFailures"
+
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  datapoints_to_alarm = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+
+  # No traffic -> no log line -> metric is absent, NOT zero (default_value on the
+  # filter only applies when the filter runs against a log event). Absent must read
+  # as "fine" here: this alarm is a supplement to the active canary, not a
+  # replacement, and treating silence as breaching would make it permanently red
+  # exactly like the bug this file's second half exists to correct.
+  treat_missing_data = "notBreaching"
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
+  tags = { Name = "${local.name_prefix}-db-auth-failed" }
 }

@@ -33,12 +33,21 @@ const checkReadyz = async function () {
 
   // `false` = do not follow redirects. A redirect to a login page returning 200
   // would otherwise read as healthy.
+  //
+  // ADR-061 (2026-09-01): this canary probed `http://<raw-ALB-DNS>/readyz` while
+  // the :80 listener had already been switched to a 301 -> HTTPS redirect (alb.tf,
+  // live since 2026-07-28). Every run got a 301, never reached /readyz, and the
+  // SuccessPercent alarm sat red for five weeks -- so when the DB genuinely went
+  // unreachable there was no OK->ALARM transition left to fire on. Probe the real
+  // public URL (`https://api.bsmart.net.in/readyz`) over TLS, exactly as the mobile
+  // client does, and default the port by scheme.
+  const target = new URL(READYZ_URL);
   const requestOptionsStep = {
-    hostname: new URL(READYZ_URL).hostname,
+    hostname: target.hostname,
     method: 'GET',
-    path: new URL(READYZ_URL).pathname,
-    port: new URL(READYZ_URL).port || 80,
-    protocol: new URL(READYZ_URL).protocol,
+    path: target.pathname,
+    port: target.port || (target.protocol === 'https:' ? 443 : 80),
+    protocol: target.protocol,
   };
 
   const stepConfig = {
