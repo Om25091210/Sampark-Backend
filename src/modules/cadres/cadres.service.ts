@@ -239,7 +239,11 @@ function isDuplicateSerial(err: unknown): boolean {
 
 // The cadre's most recent non-deleted report date only (ADR-022) — nothing else
 // of the report is needed for nextReportingDueAt.
-const LATEST_REPORT = {
+//
+// Exported: the sync module's pull endpoint needs the SAME include (a cadre in the
+// offline mirror must carry nextReportingDueAt/lastEditedBy exactly like the live
+// list does) and must not fork its own copy that could drift from this one.
+export const LATEST_REPORT = {
   reports: {
     where: { deletedAt: null },
     orderBy: [{ reportedAt: 'desc' }, { id: 'desc' }],
@@ -249,6 +253,69 @@ const LATEST_REPORT = {
   // ADR-027. The last editor's name, for "अंतिम बदलाव — <officer>".
   lastEditedBy: { select: { id: true, name: true } },
 } as const satisfies Prisma.CadreInclude;
+
+/**
+ * ADR-029 / ADR-054. Signs each row's up-to-three avatar keys into fresh GET
+ * URLs. `presignGet` is a local SigV4 computation, not an S3 round trip (see
+ * ADR-054), so signing all three costs nothing beyond CPU even at full occupancy;
+ * a row with no photos in a given slot still costs nothing for that slot.
+ *
+ * Exported (lifted out of `makeCadresService`'s closure, taking its two config
+ * values as explicit params) so the sync module's pull endpoint can sign avatar
+ * URLs for its own page of cadres without a second implementation of this to
+ * drift from the list/detail routes.
+ */
+export async function avatarUrlsFor(
+  storage: StorageProvider,
+  mediaUrlTtlSeconds: number,
+  rows: { id: number; avatarKey: string | null; avatarKey2: string | null; avatarKey3: string | null }[],
+): Promise<Map<number, { avatarUrl?: string; avatarUrl2?: string; avatarUrl3?: string }>> {
+  const out = new Map<number, { avatarUrl?: string; avatarUrl2?: string; avatarUrl3?: string }>();
+  await Promise.all(
+    rows.map(async (r) => {
+      const [avatarUrl, avatarUrl2, avatarUrl3] = await Promise.all([
+        r.avatarKey !== null ? storage.presignGet(r.avatarKey, mediaUrlTtlSeconds) : undefined,
+        r.avatarKey2 !== null ? storage.presignGet(r.avatarKey2, mediaUrlTtlSeconds) : undefined,
+        r.avatarKey3 !== null ? storage.presignGet(r.avatarKey3, mediaUrlTtlSeconds) : undefined,
+      ]);
+      if (avatarUrl !== undefined || avatarUrl2 !== undefined || avatarUrl3 !== undefined) {
+        out.set(r.id, { avatarUrl, avatarUrl2, avatarUrl3 });
+      }
+    }),
+  );
+  return out;
+}
+
+/**
+ * ADR-027. Which fields have an in-flight change request, for every cadre on the
+ * page — ONE query for the whole page, not one per row. A list endpoint that
+ * fans out per row is how a 15-row page becomes 16 round trips.
+ *
+ * Returns a map that is complete for `ids`: a cadre with nothing pending gets an
+ * empty array, never a missing entry, so callers cannot confuse "none" with
+ * "not looked up".
+ *
+ * Exported for the same reason `avatarUrlsFor` is — the sync module's pull
+ * endpoint needs the identical pendingFields answer, not a re-derived one.
+ */
+export async function pendingFieldsFor(prisma: PrismaClient, ids: number[]): Promise<Map<number, string[]>> {
+  const out = new Map<number, string[]>(ids.map((id) => [id, []]));
+  if (ids.length === 0) return out;
+
+  const rows = await prisma.cadreChangeRequest.findMany({
+    where: { cadreId: { in: ids }, status: 'pending' },
+    select: { cadreId: true, changes: true },
+  });
+
+  for (const r of rows) {
+    const fields = Object.keys(r.changes as Record<string, unknown>);
+    const existing = out.get(r.cadreId);
+    // A cadre can hold several pending requests (on different fields — ADR-026
+    // refuses a second request on the SAME field), so union rather than replace.
+    if (existing !== undefined) for (const f of fields) if (!existing.includes(f)) existing.push(f);
+  }
+  return out;
+}
 
 export function makeCadresService({
   prisma,
@@ -261,58 +328,13 @@ export function makeCadresService({
   // ADR-048. Shared deps for the best-effort immediate push dispatch fired after
   // transfer()/transferThana()'s transaction commits.
   const dispatchDeps: NotificationDispatchDeps = { prisma, pushProvider, log };
-  /**
-   * ADR-029 / ADR-054. Signs each row's up-to-three avatar keys into fresh GET
-   * URLs. `presignGet` is a local SigV4 computation, not an S3 round trip (see
-   * ADR-054), so signing all three costs nothing beyond CPU even at full occupancy;
-   * a row with no photos in a given slot still costs nothing for that slot.
-   */
-  async function avatarUrlsFor(
+  // Thin closures binding the module-level helpers above (now shared with the
+  // sync module) to this service's own deps — every call site below is
+  // unchanged from before the extraction.
+  const avatarUrlsForRows = (
     rows: { id: number; avatarKey: string | null; avatarKey2: string | null; avatarKey3: string | null }[],
-  ): Promise<Map<number, { avatarUrl?: string; avatarUrl2?: string; avatarUrl3?: string }>> {
-    const out = new Map<number, { avatarUrl?: string; avatarUrl2?: string; avatarUrl3?: string }>();
-    await Promise.all(
-      rows.map(async (r) => {
-        const [avatarUrl, avatarUrl2, avatarUrl3] = await Promise.all([
-          r.avatarKey !== null ? storage.presignGet(r.avatarKey, mediaUrlTtlSeconds) : undefined,
-          r.avatarKey2 !== null ? storage.presignGet(r.avatarKey2, mediaUrlTtlSeconds) : undefined,
-          r.avatarKey3 !== null ? storage.presignGet(r.avatarKey3, mediaUrlTtlSeconds) : undefined,
-        ]);
-        if (avatarUrl !== undefined || avatarUrl2 !== undefined || avatarUrl3 !== undefined) {
-          out.set(r.id, { avatarUrl, avatarUrl2, avatarUrl3 });
-        }
-      }),
-    );
-    return out;
-  }
-
-  /**
-   * ADR-027. Which fields have an in-flight change request, for every cadre on the
-   * page — ONE query for the whole page, not one per row. A list endpoint that
-   * fans out per row is how a 15-row page becomes 16 round trips.
-   *
-   * Returns a map that is complete for `ids`: a cadre with nothing pending gets an
-   * empty array, never a missing entry, so callers cannot confuse "none" with
-   * "not looked up".
-   */
-  async function pendingFieldsFor(ids: number[]): Promise<Map<number, string[]>> {
-    const out = new Map<number, string[]>(ids.map((id) => [id, []]));
-    if (ids.length === 0) return out;
-
-    const rows = await prisma.cadreChangeRequest.findMany({
-      where: { cadreId: { in: ids }, status: 'pending' },
-      select: { cadreId: true, changes: true },
-    });
-
-    for (const r of rows) {
-      const fields = Object.keys(r.changes as Record<string, unknown>);
-      const existing = out.get(r.cadreId);
-      // A cadre can hold several pending requests (on different fields — ADR-027
-      // refuses a second request on the SAME field), so union rather than replace.
-      if (existing !== undefined) for (const f of fields) if (!existing.includes(f)) existing.push(f);
-    }
-    return out;
-  }
+  ) => avatarUrlsFor(storage, mediaUrlTtlSeconds, rows);
+  const pendingFieldsForIds = (ids: number[]) => pendingFieldsFor(prisma, ids);
 
   return {
     async list(query, scope) {
@@ -392,8 +414,8 @@ export function makeCadresService({
       ]);
 
       const [pending, avatars] = await Promise.all([
-        pendingFieldsFor(rows.map((r) => r.id)),
-        avatarUrlsFor(rows),
+        pendingFieldsForIds(rows.map((r) => r.id)),
+        avatarUrlsForRows(rows),
       ]);
 
       return {
@@ -459,8 +481,8 @@ export function makeCadresService({
       });
       if (cadre === null) throw notFound('Cadre not found');
       const [pending, avatars] = await Promise.all([
-        pendingFieldsFor([cadre.id]),
-        avatarUrlsFor([cadre]),
+        pendingFieldsForIds([cadre.id]),
+        avatarUrlsForRows([cadre]),
       ]);
       return toWireCadre(cadre, cadre.reports[0]?.reportedAt ?? null, {
         pendingFields: pending.get(cadre.id) ?? [],

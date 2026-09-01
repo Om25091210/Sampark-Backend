@@ -464,6 +464,13 @@ model CadreChangeRequest {
   decidedById   Int?      @map("decided_by_id")
   decidedReason String?   @map("decided_reason")
 
+  // Sync module (extends ADR-013 to this entity). A device offline for weeks
+  // queues a change-request submission in its local outbox and may replay it —
+  // same problem ADR-013 solved for reports. Client-generated UUID v4, unique,
+  // retained for the request's lifetime, no expiry: `submit()` dedupes on it,
+  // returning the existing row on a replay instead of a second pending request.
+  idempotencyKey String? @unique @map("idempotency_key")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -591,6 +598,11 @@ model AuditLog {
   createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([entityType, entityId])
+  // Sync module. `GET /sync/pull` finds cadres that moved OUT of a caller's thana
+  // scope since their last pull (a thana transfer, unlike a soft-delete, leaves
+  // `Cadre.deletedAt` null, so the normal tombstone query can't see it) by scanning
+  // audit rows for `cadre.thana_transfer` since a cursor — see sync.service.ts.
+  @@index([action, createdAt])
   @@map("audit_logs")
 }
 

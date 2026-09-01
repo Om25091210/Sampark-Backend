@@ -77,6 +77,11 @@ export const submitChangeBody = z.object({
     'at least one field must be proposed',
   ),
   note: z.string().trim().max(1000).optional(),
+  // Sync module. Client-generated UUID v4 — same ADR-013 pattern as reports,
+  // extended to this entity (see the Prisma column's comment). Optional here (the
+  // existing online submit form has no outbox to replay), required on the sync
+  // push path, which is the only caller that actually needs the dedupe.
+  idempotency_key: z.string().uuid().optional(),
 });
 
 export const rejectChangeBody = z.object({

@@ -373,6 +373,18 @@ export function makeCadreChangesService({
 
   return {
     async submit(cadreId, body, actor) {
+      // Sync module (ADR-013's pattern, extended to this entity — see the Prisma
+      // column's comment). Checked FIRST, before the permission/cadre checks, so a
+      // retried offline submission is cheap and safe even if something about the
+      // caller or cadre changed meanwhile — matches reports.service.ts's create().
+      if (body.idempotency_key !== undefined) {
+        const existing = await prisma.cadreChangeRequest.findUnique({
+          where: { idempotencyKey: body.idempotency_key },
+          include: WITH_PEOPLE,
+        });
+        if (existing !== null) return toWire(existing as Row, signUrl);
+      }
+
       if (!canSubmit(actor.role)) throw forbidden('Viewers cannot propose changes');
 
       const cadre = await prisma.cadre.findFirst({
@@ -435,39 +447,59 @@ export function makeCadreChangesService({
 
       let notify: { outboxEventId: number; payload: NotificationDispatchPayload } | undefined;
 
-      const created = await prisma.$transaction(async (tx) => {
-        let req = await tx.cadreChangeRequest.create({
-          data: {
-            cadreId,
-            changes: changes as unknown as Prisma.InputJsonValue,
-            submittedById: actor.id,
-            note: body.note ?? null,
-            needsAdmin,
-            needsSuperAdmin,
-          },
-        });
+      let created: CadreChangeRequest;
+      try {
+        created = await prisma.$transaction(async (tx) => {
+          let req = await tx.cadreChangeRequest.create({
+            data: {
+              cadreId,
+              changes: changes as unknown as Prisma.InputJsonValue,
+              submittedById: actor.id,
+              note: body.note ?? null,
+              needsAdmin,
+              needsSuperAdmin,
+              idempotencyKey: body.idempotency_key ?? null,
+            },
+          });
 
-        await writeAuditLog(tx, {
-          actorId: actor.id,
-          action: 'cadre.change.submitted',
-          entityType: 'cadre_change_request',
-          entityId: String(req.id),
-          // No `before`: the request did not exist until now.
-          after: { cadreId, fields: Object.keys(changes), needsAdmin, needsSuperAdmin },
-        });
+          await writeAuditLog(tx, {
+            actorId: actor.id,
+            action: 'cadre.change.submitted',
+            entityType: 'cadre_change_request',
+            entityId: String(req.id),
+            // No `before`: the request did not exist until now.
+            after: { cadreId, fields: Object.keys(changes), needsAdmin, needsSuperAdmin },
+          });
 
-        // super_admin sits at the top of the ladder, so their change needs nobody:
-        // it applies in this same transaction. The request row is still written —
-        // an unapproved-but-applied edit still belongs in the trail, and skipping
-        // the row would make super_admin edits invisible to history.
-        if (!needsAdmin && !needsSuperAdmin) {
-          const result = await applyWithin(tx, req, actor.id);
-          req = result.request;
-          notify = result.notify;
+          // super_admin sits at the top of the ladder, so their change needs
+          // nobody: it applies in this same transaction. The request row is still
+          // written — an unapproved-but-applied edit still belongs in the trail,
+          // and skipping the row would make super_admin edits invisible to history.
+          if (!needsAdmin && !needsSuperAdmin) {
+            const result = await applyWithin(tx, req, actor.id);
+            req = result.request;
+            notify = result.notify;
+          }
+
+          return req;
+        });
+      } catch (err) {
+        // Sync module. Concurrent replay lost the race on the unique idempotency
+        // key — fetch and return the winner's record instead of surfacing the
+        // conflict (same recovery reports.service.ts's create() already does).
+        if (
+          err instanceof Prisma.PrismaClientKnownRequestError &&
+          err.code === 'P2002' &&
+          body.idempotency_key !== undefined
+        ) {
+          const winner = await prisma.cadreChangeRequest.findUnique({
+            where: { idempotencyKey: body.idempotency_key },
+            include: WITH_PEOPLE,
+          });
+          if (winner !== null) return toWire(winner as Row, signUrl);
         }
-
-        return req;
-      });
+        throw err;
+      }
 
       // ADR-048. Fired only after the transaction above has committed — never call
       // SNS from inside $transaction.
