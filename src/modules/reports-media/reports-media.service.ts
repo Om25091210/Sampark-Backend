@@ -90,10 +90,10 @@ export function makeReportsMediaService(deps: ReportsMediaDeps): ReportsMediaSer
         reports: reports.map((r) => ({
           reportedAt: r.reportedAt,
           reportingPlace: r.reportingPlace,
-          specificLocation: r.specificLocation,
+          specificLocation: r.specificLocation ?? undefined,
           personStatus: r.personStatus,
-          currentPhone: r.currentPhone,
-          currentActivity: r.currentActivity,
+          currentPhone: r.currentPhone ?? undefined,
+          currentActivity: r.currentActivity ?? undefined,
           surrenderNetworkDetails: r.surrenderNetworkDetails ?? undefined,
           otherInformation: r.otherInformation ?? undefined,
           reporterName: r.reportedBy.name,

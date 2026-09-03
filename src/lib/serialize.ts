@@ -73,6 +73,11 @@ export interface WireCadre {
   // This task (item 7). Separate permanent mark — see the Prisma enum's comment.
   // Absent when null (no mark).
   permanentStatus?: NonNullable<Cadre['permanentStatus']>;
+  // This task. Only meaningful alongside permanentStatus='deceased' — set by
+  // report-time death sync, once the ladder approves it. Absent otherwise, same
+  // `?? undefined` convention as dateOfBirth below. `@db.Date`, so an ISO DATE
+  // (`1990-05-16`), not a datetime — see dateOfBirth's own comment for why.
+  deceasedDate?: string;
   filter?: NonNullable<Cadre['filter']>;
   alertLevel: Cadre['alertLevel'];
   avatarUrl?: string;
@@ -240,6 +245,7 @@ export function toWireCadre(
     category: c.category,
     priorityCategory: c.priorityCategory ?? undefined,
     permanentStatus: c.permanentStatus ?? undefined,
+    deceasedDate: c.deceasedDate?.toISOString().slice(0, 10),
     filter: c.filter ?? undefined,
     alertLevel: c.alertLevel,
     // ADR-029. Prefer a freshly-signed URL from the durable `avatarKey`; fall back
@@ -300,10 +306,12 @@ export interface WireReport {
   cadreId: number;
   cadre?: Pick<WireCadre, 'id' | 'name' | 'phone' | 'avatarUrl'>;
   reportingPlace: Report['reportingPlace'];
-  specificLocation: string;
+  // This task. Optional (omitted when null) — a person_status='dead' report has
+  // none of these three; see reports.schema.ts's checkDeathRequirements.
+  specificLocation?: string;
   personStatus: Report['personStatus'];
-  currentPhone: string;
-  currentActivity: string;
+  currentPhone?: string;
+  currentActivity?: string;
   /** ADR-050. "अन्य माओवादियों से समर्पण हुआ विवरण". Omitted when null. */
   surrenderNetworkDetails?: string;
   /** ADR-050. "अन्य जानकारी" — free-form catch-all. Omitted when null. */
@@ -332,10 +340,10 @@ export async function toWireReport(r: ReportWithCadre, signUrl?: SignUrl): Promi
     id: r.id,
     cadreId: r.cadreId,
     reportingPlace: r.reportingPlace,
-    specificLocation: r.specificLocation,
+    specificLocation: r.specificLocation ?? undefined,
     personStatus: r.personStatus,
-    currentPhone: r.currentPhone,
-    currentActivity: r.currentActivity,
+    currentPhone: r.currentPhone ?? undefined,
+    currentActivity: r.currentActivity ?? undefined,
     surrenderNetworkDetails: r.surrenderNetworkDetails ?? undefined,
     otherInformation: r.otherInformation ?? undefined,
     photoUrl: r.photoUrl ?? undefined,

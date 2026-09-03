@@ -138,14 +138,17 @@ enum PriorityCategory {
 // value added to PriorityCategory or CadreCategory (confirmed with the
 // maintainer): फौत (deceased) here is its own field, distinct from
 // PriorityCategory's existing `death` grade, and the other three (शासकीय नौकरी /
-// GS / अन्य जिले में निवासरत) never were priority grades at all. Any of the four
+// GS / अन्य जिले में निवासरत) never were priority grades at all. Any of the five
 // is a PERMANENT mark meaning "no attendance/reporting required going forward" —
 // see recency.ts's exemption and reports.service.ts's ADR-049-style block.
+// `untraceable` (अप्राप्य, later task) is the fifth: a cadre nobody can currently
+// locate carries the same reporting exemption as the other four.
 enum PermanentStatus {
   deceased
   government_job
   gs
   living_elsewhere
+  untraceable
 }
 
 // ─── Users (officers + admins) ─────────────────────────────────────────────────
@@ -251,6 +254,13 @@ model Cadre {
   // This task (item 7). Separate from priorityCategory — see the enum's comment.
   // Nullable; null = no permanent mark. Approval-gated (cadre-changes.policy.ts).
   permanentStatus    PermanentStatus?  @map("permanent_status")
+  // This task. Only meaningful alongside permanentStatus='deceased' — set by
+  // report-time death sync (a report's person_status='dead' proposes BOTH
+  // fields together, one bundled change, so the ladder can never approve a
+  // date without the mark or vice versa). Approval-gated like every other
+  // fact of record; @db.Date for the same reason as dateOfBirth below (a
+  // calendar date, not a moment).
+  deceasedDate       DateTime?         @map("deceased_date") @db.Date
   filter             CadreFilter?
   alertLevel         AlertLevel        @map("alert_level")
   avatarUrl          String?           @map("avatar_url")
@@ -373,15 +383,21 @@ model Report {
   id                      Int            @id @default(autoincrement())
   cadreId                 Int            @map("cadre_id")
   reportingPlace          ReportingPlace @map("reporting_place")
-  specificLocation        String         @map("specific_location")
+  // This task. Nullable — a personStatus='dead' report needs none of these
+  // three (see reports.schema.ts's superRefine): there is no "current"
+  // location/phone/activity for a person the officer is reporting as dead,
+  // only अन्य जानकारी (otherInformation) describing what was learned. Every
+  // personStatus='alive' report still requires all three, enforced at the
+  // Zod boundary, not here.
+  specificLocation        String?        @map("specific_location")
   personStatus            PersonStatus   @map("person_status")
-  currentPhone            String         @map("current_phone")
+  currentPhone            String?        @map("current_phone")
   // ADR-050. This is the "वर्तमान में क्या कार्य कर रहा है" (current activity) field
   // of the three-field split — kept as this SAME column, not a new one. The old
   // single "वर्तमान विवरण" form's placeholder already asked for exactly this
   // ("वर्तमान कार्य दर्ज करें"), so every pre-split row's value is already the
   // correct answer to the new, narrower question; nothing needed migrating.
-  currentActivity         String         @map("current_activity")
+  currentActivity         String?        @map("current_activity")
   // ADR-050. New: "अन्य माओवादियों से समर्पण हुआ विवरण" — details of surrender in
   // relation to other Maoists. Nullable — existing rows predate the split.
   surrenderNetworkDetails String?        @map("surrender_network_details")
@@ -471,6 +487,14 @@ model CadreChangeRequest {
   // returning the existing row on a replay instead of a second pending request.
   idempotencyKey String? @unique @map("idempotency_key")
 
+  // This task. Set only by report-time death sync (reports.service.ts) — the
+  // ONE report whose person_status='dead' triggered this proposal. A bare id,
+  // no Prisma relation (same lightweight-reference style as Notification's
+  // cadreChangeId): deleting a report must never cascade-touch this row, only
+  // reports.service.ts's remove() explicitly cancels a still-PENDING one found
+  // by this id. Null for every change proposed any other way.
+  sourceReportId Int? @map("source_report_id")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -485,6 +509,7 @@ model CadreChangeRequest {
   @@index([status, submittedAt])
   @@index([cadreId])
   @@index([submittedById])
+  @@index([sourceReportId])
   @@map("cadre_change_requests")
 }
 

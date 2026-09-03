@@ -360,6 +360,9 @@ export function makeCadresService({
       if (query.alertLevel !== undefined) where.alertLevel = { in: query.alertLevel };
       // ADR-047. The master filter's category chips (A/B/C).
       if (query.priorityCategory !== undefined) where.priorityCategory = { in: query.priorityCategory };
+      // This task. The master filter's जेल/GS/शासकीय नौकरी/अप्राप्य group — a
+      // separate field from priorityCategory, see cadres.schema.ts's comment.
+      if (query.permanentStatus !== undefined) where.permanentStatus = { in: query.permanentStatus };
 
       // ADR-033: thana/designation match as substrings, so several chips OR together
       // within a facet while the facets themselves AND. Kept in `AND` rather than the

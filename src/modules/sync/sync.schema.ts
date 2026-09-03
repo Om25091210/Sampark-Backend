@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { createReportBody } from '../reports/reports.schema.js';
+import { createReportBodyShape, checkDeathRequirements } from '../reports/reports.schema.js';
 import { changeableFieldsSchema } from '../cadre-changes/cadre-changes.schema.js';
 
 // ─── Pull (server → device) ────────────────────────────────────────────────────
@@ -28,7 +28,13 @@ export type SyncPullQuery = z.infer<typeof syncPullQuery>;
 // there is no positional fallback.
 export const syncPushBody = z.object({
   reports: z
-    .array(createReportBody.extend({ cadre_id: z.number().int().positive(), idempotency_key: z.string().uuid() }))
+    .array(
+      createReportBodyShape
+        .extend({ cadre_id: z.number().int().positive(), idempotency_key: z.string().uuid() })
+        // This task. Same death-report requirements as the direct create route —
+        // see reports.schema.ts's checkDeathRequirements comment.
+        .superRefine(checkDeathRequirements),
+    )
     .max(100)
     .default([]),
   cadreChangeRequests: z

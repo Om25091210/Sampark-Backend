@@ -22,9 +22,11 @@ export interface ReportsDeps {
   // Storage + TTL power the per-read re-signing of photo keys (ADR-016).
   storage: StorageProvider;
   mediaUrlTtlSeconds: number;
-  // ADR-052. Only `submit` is needed — report creation proposes a phone change
-  // exactly the way the manual edit form does, never applies one directly.
-  cadreChanges: Pick<CadreChangesService, 'submit'>;
+  // ADR-052. `submit` proposes a phone/photo/death change exactly the way the
+  // manual edit form does, never applies one directly. This task adds
+  // `cancelBySourceReport` — the withdraw half of death sync, called from
+  // `remove()` when a person_status='dead' report is deleted.
+  cadreChanges: Pick<CadreChangesService, 'submit' | 'cancelBySourceReport'>;
 }
 
 export interface Paginated<T> {
@@ -312,7 +314,10 @@ export function makeReportsService({
         // create (never a replay): an unrelated in-flight phone change (409
         // CHANGE_PENDING) or any other failure here must never fail the report
         // itself — filing the report is this endpoint's job, not editing the cadre.
-        if (body.current_phone !== cadre.phone) {
+        // This task: current_phone is no longer always sent (a 'dead' report
+        // omits it), so an absent value must not read as "propose phone: null" —
+        // only a REAL, different phone number triggers the sync.
+        if (body.current_phone !== undefined && body.current_phone !== cadre.phone) {
           try {
             await cadreChanges.submit(
               cadreId,
@@ -323,6 +328,65 @@ export function makeReportsService({
             log.warn(
               { err, cadreId, reportId: report.id },
               'report-time phone sync to cadre record failed; report was still created',
+            );
+          }
+        }
+
+        // This task. Report-time PHOTO sync — same ADR-052 idiom (propose through
+        // the approval ladder, best-effort, never fails the report), applied to
+        // the three avatar slots. Deliberately THREE INDEPENDENT submit() calls,
+        // not one multi-field submit: a pending lock on, say, avatarKey2 must not
+        // block front/left syncing too — the same "one pending photo never blocks
+        // the other two" rule edit.tsx's own three-slot uploader already follows.
+        // Not every report carries all three (or any) — each is simply skipped
+        // when absent.
+        const photoSlots: { field: 'avatarKey' | 'avatarKey2' | 'avatarKey3'; key: string | undefined }[] = [
+          { field: 'avatarKey', key: body.front_photo_key },
+          { field: 'avatarKey2', key: body.right_photo_key },
+          { field: 'avatarKey3', key: body.left_photo_key },
+        ];
+        for (const slot of photoSlots) {
+          if (slot.key === undefined) continue;
+          try {
+            await cadreChanges.submit(
+              cadreId,
+              { changes: { [slot.field]: slot.key } },
+              { id: reporterId, role: reporterRole, scope },
+            );
+          } catch (err) {
+            log.warn(
+              { err, cadreId, reportId: report.id, slot: slot.field },
+              'report-time photo sync to cadre record failed; report was still created',
+            );
+          }
+        }
+
+        // This task. Report-time DEATH sync — same ADR-052 idiom again, but ONE
+        // bundled submit() (not independent per-field like the photo slots above):
+        // permanentStatus='deceased' and deceasedDate are a single fact, and the
+        // ladder must approve or reject them together — approving the mark
+        // without the date (or vice versa) is not a state anyone asked for.
+        // The `!== 'deceased'` guard is technically redundant right now — ADR-049's
+        // reportability check above already 400s CADRE_NOT_REPORTABLE for ANY
+        // non-null permanentStatus, so this line can only be reached with
+        // permanentStatus already null — but it's kept, matching ADR-052's own
+        // `!==` idiom, as a harmless guard against that check ever loosening.
+        if (body.person_status === 'dead' && cadre.permanentStatus !== 'deceased') {
+          try {
+            const result = await cadreChanges.submit(
+              cadreId,
+              { changes: { permanentStatus: 'deceased', deceasedDate: body.death_date! } },
+              { id: reporterId, role: reporterRole, scope },
+              { sourceReportId: report.id },
+            );
+            log.info(
+              { cadreId, reportId: report.id, changeRequestId: result.id },
+              'report-time death sync proposed permanentStatus+deceasedDate',
+            );
+          } catch (err) {
+            log.warn(
+              { err, cadreId, reportId: report.id },
+              'report-time death sync to cadre record failed; report was still created',
             );
           }
         }
@@ -386,6 +450,25 @@ export function makeReportsService({
           payload: { reportId, cadreId },
         });
       });
+
+      // This task. Deleting the ONE report that proposed a death mark withdraws
+      // that still-pending proposal too — "the officer can also delete the
+      // reporting, changing the status from death back to previous" (the
+      // maintainer's own framing). Best-effort and outside the transaction
+      // above: the report is already deleted regardless of whether this
+      // succeeds. A no-op if the change was never pending (already decided, or
+      // this report never proposed one) — see cancelBySourceReport's own doc
+      // comment for why an already-APPLIED mark is deliberately left alone.
+      if (report.personStatus === 'dead') {
+        try {
+          await cadreChanges.cancelBySourceReport(reportId, actorId);
+        } catch (err) {
+          log.warn(
+            { err, cadreId, reportId },
+            'withdrawing the death-sync change request for a deleted report failed',
+          );
+        }
+      }
     },
   };
 }

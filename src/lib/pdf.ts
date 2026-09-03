@@ -22,10 +22,13 @@ const STATUS_LABEL: Record<'alive' | 'dead', string> = { alive: 'जीवित
 export interface ReportExportRow {
   reportedAt: Date;
   reportingPlace: 'thana' | 'village';
-  specificLocation: string;
+  // This task. Optional — a personStatus='dead' row has none of these three
+  // (see reports.schema.ts's checkDeathRequirements); rendered as '—' below,
+  // same convention the two already-optional fields below already use.
+  specificLocation?: string;
   personStatus: 'alive' | 'dead';
-  currentPhone: string;
-  currentActivity: string;
+  currentPhone?: string;
+  currentActivity?: string;
   // ADR-050. The other two fields of the three-field split. Optional — nullable
   // on rows created before the split, and not every report fills them.
   surrenderNetworkDetails?: string;
@@ -85,10 +88,10 @@ export async function generateReportsPdf(data: ReportExportData): Promise<Buffer
     { text: String(i + 1), style: 'td' },
     { text: formatDate(r.reportedAt), style: 'td' },
     { text: PLACE_LABEL[r.reportingPlace], style: 'td' },
-    { text: r.specificLocation, style: 'td' },
+    { text: r.specificLocation || '—', style: 'td' },
     { text: STATUS_LABEL[r.personStatus], style: 'td' },
-    { text: r.currentPhone, style: 'td' },
-    { text: r.currentActivity, style: 'td' },
+    { text: r.currentPhone || '—', style: 'td' },
+    { text: r.currentActivity || '—', style: 'td' },
     { text: r.surrenderNetworkDetails || '—', style: 'td' },
     { text: r.otherInformation || '—', style: 'td' },
     { text: r.reporterName, style: 'td' },

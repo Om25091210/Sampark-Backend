@@ -613,6 +613,265 @@ describe('reports', () => {
     });
   });
 
+  // ── report-time photo sync (this task) — mirrors ADR-052's phone sync ───────
+
+  describe('report-time photo sync (this task)', () => {
+    it('officer report with all three photo keys → three independent pending avatar CadreChangeRequests, cadre avatars unchanged', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken),
+        payload: {
+          ...validBody(),
+          front_photo_key: 'reports/front.jpg',
+          right_photo_key: 'reports/right.jpg',
+          left_photo_key: 'reports/left.jpg',
+        },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
+      // Three photo slots + the phone sync every validBody() also triggers.
+      expect(pending).toHaveLength(4);
+      const byField = new Map(
+        pending.map((c) => [Object.keys(c.changes as Record<string, unknown>)[0], c.changes as Record<string, { new: string }>]),
+      );
+      expect(byField.get('avatarKey')?.avatarKey?.new).toBe('reports/front.jpg');
+      expect(byField.get('avatarKey2')?.avatarKey2?.new).toBe('reports/right.jpg');
+      expect(byField.get('avatarKey3')?.avatarKey3?.new).toBe('reports/left.jpg');
+
+      const cadre = await prisma.cadre.findUnique({
+        where: { id: cadreId }, select: { avatarKey: true, avatarKey2: true, avatarKey3: true },
+      });
+      expect(cadre).toMatchObject({ avatarKey: null, avatarKey2: null, avatarKey3: null });
+      await app.close();
+    });
+
+    it('report with only one photo key (right) → only that slot is proposed, the other two are not touched', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken),
+        payload: { ...validBody(), right_photo_key: 'reports/right-only.jpg' },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
+      const avatarChanges = pending.filter((c) => Object.keys(c.changes as Record<string, unknown>)[0]?.startsWith('avatarKey'));
+      expect(avatarChanges).toHaveLength(1);
+      const changes = avatarChanges[0]!.changes as Record<string, { new: string }>;
+      expect(changes.avatarKey2?.new).toBe('reports/right-only.jpg');
+      await app.close();
+    });
+
+    it('report with no photo keys → no avatar change request proposed', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: validBody(),
+      });
+      expect(res.statusCode).toBe(201);
+      const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
+      expect(pending.some((c) => Object.keys(c.changes as Record<string, unknown>)[0]?.startsWith('avatarKey'))).toBe(false);
+      await app.close();
+    });
+
+    it('super_admin report with a front photo key → applies immediately, same as any other super_admin edit', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(superAdminToken),
+        payload: { ...validBody(), front_photo_key: 'reports/super-front.jpg' },
+      });
+      expect(res.statusCode).toBe(201);
+
+      const cadre = await prisma.cadre.findUnique({ where: { id: cadreId }, select: { avatarKey: true } });
+      expect(cadre?.avatarKey).toBe('reports/super-front.jpg');
+
+      // Restore the fixture so later/re-runs see no avatar again.
+      await prisma.cadre.update({ where: { id: cadreId }, data: { avatarKey: null } });
+      await app.close();
+    });
+
+    it('a report that collides with an already-pending avatar change still succeeds (201) — the collision is swallowed, not surfaced', async () => {
+      const app = await makeApp();
+      const first = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken),
+        payload: { ...validBody(), front_photo_key: 'reports/first-front.jpg' },
+      });
+      expect(first.statusCode).toBe(201);
+
+      // Second report, same slot → submit() would 409 CHANGE_PENDING internally;
+      // the report itself must not fail because of it.
+      const second = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken),
+        payload: { ...validBody(), specific_location: 'दूसरी रिपोर्ट', front_photo_key: 'reports/second-front.jpg' },
+      });
+      expect(second.statusCode).toBe(201);
+
+      // Still exactly one pending avatarKey request — the second attempt did not
+      // create a duplicate or clobber the first.
+      const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
+      const avatarChanges = pending.filter((c) => Object.keys(c.changes as Record<string, unknown>)[0] === 'avatarKey');
+      expect(avatarChanges).toHaveLength(1);
+      await app.close();
+    });
+  });
+
+  // ── report-time death sync (this task) ───────────────────────────────────────
+  describe('report-time death sync (this task)', () => {
+    const deadBody = (overrides: Record<string, unknown> = {}) => ({
+      cadre_id: cadreId,
+      reporting_place: 'village' as const,
+      person_status: 'dead' as const,
+      other_information: 'गाँव वालों के अनुसार मुठभेड़ में मृत्यु हुई',
+      death_date: '2026-08-15T00:00:00.000Z',
+      ...overrides,
+    });
+
+    it('a dead report with only other_information + death_date → 201, no specific_location/current_phone/current_activity required', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: deadBody(),
+      });
+      expect(res.statusCode).toBe(201);
+      await app.close();
+    });
+
+    it('a dead report missing other_information → 400', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: deadBody({ other_information: '' }),
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it('a dead report missing death_date → 400', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: deadBody({ death_date: undefined }),
+      });
+      expect(res.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it('an alive report still requires specific_location/current_phone/current_activity → 400 each when missing', async () => {
+      const app = await makeApp();
+      const base = { cadre_id: cadreId, reporting_place: 'village' as const, person_status: 'alive' as const };
+      const missingLocation = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: { ...base, current_phone: 'x', current_activity: 'x' },
+      });
+      expect(missingLocation.statusCode).toBe(400);
+      const missingPhone = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: { ...base, specific_location: 'x', current_activity: 'x' },
+      });
+      expect(missingPhone.statusCode).toBe(400);
+      const missingActivity = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: { ...base, specific_location: 'x', current_phone: 'x' },
+      });
+      expect(missingActivity.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it('officer dead report → ONE bundled pending change proposing permanentStatus+deceasedDate together, cadre unchanged', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: deadBody(),
+      });
+      expect(res.statusCode).toBe(201);
+
+      const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
+      expect(pending).toHaveLength(1);
+      const changes = pending[0]!.changes as Record<string, { old: unknown; new: unknown }>;
+      expect(changes.permanentStatus).toEqual({ old: null, new: 'deceased' });
+      expect(changes.deceasedDate?.new).toBe('2026-08-15T00:00:00.000Z');
+      // Officer submitted → needs both rungs.
+      expect(pending[0]!.needsAdmin).toBe(true);
+      expect(pending[0]!.needsSuperAdmin).toBe(true);
+
+      const cadre = await prisma.cadre.findUnique({ where: { id: cadreId }, select: { permanentStatus: true, deceasedDate: true } });
+      expect(cadre).toMatchObject({ permanentStatus: null, deceasedDate: null });
+      await app.close();
+    });
+
+    it('super_admin dead report → applies immediately, cadre marked deceased with the date set', async () => {
+      const app = await makeApp();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(superAdminToken), payload: deadBody(),
+      });
+      expect(res.statusCode).toBe(201);
+
+      const cadre = await prisma.cadre.findUnique({ where: { id: cadreId }, select: { permanentStatus: true, deceasedDate: true } });
+      expect(cadre?.permanentStatus).toBe('deceased');
+      expect(cadre?.deceasedDate?.toISOString()).toBe('2026-08-15T00:00:00.000Z');
+
+      // Restore the fixture so later/re-runs are unaffected — same pattern the
+      // photo-sync and phone-sync super_admin tests already use.
+      await prisma.cadre.update({ where: { id: cadreId }, data: { permanentStatus: null, deceasedDate: null } });
+      await app.close();
+    });
+
+    it('deleting the report that proposed a still-pending death mark withdraws it — status effectively reverts to "not deceased"', async () => {
+      const app = await makeApp();
+      const create = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: deadBody(),
+      });
+      expect(create.statusCode).toBe(201);
+      const reportId = (create.json() as WireReportBody).id;
+
+      const beforeDelete = await prisma.cadreChangeRequest.findFirst({ where: { cadreId, status: 'pending' } });
+      expect(beforeDelete).not.toBeNull();
+
+      const del = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`,
+        headers: auth(officerToken),
+      });
+      expect(del.statusCode).toBe(204);
+
+      const after = await prisma.cadreChangeRequest.findUnique({ where: { id: beforeDelete!.id } });
+      expect(after?.status).toBe('cancelled');
+
+      const cadre = await prisma.cadre.findUnique({ where: { id: cadreId }, select: { permanentStatus: true } });
+      expect(cadre?.permanentStatus).toBe(null);
+      await app.close();
+    });
+
+    it('deleting a report whose death mark was ALREADY applied does not revert the cadre — that stays a deliberate profile edit', async () => {
+      const app = await makeApp();
+      const create = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(superAdminToken), payload: deadBody(),
+      });
+      expect(create.statusCode).toBe(201);
+      const reportId = (create.json() as WireReportBody).id;
+
+      const del = await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${cadreId}/reports/${reportId}`,
+        headers: auth(superAdminToken),
+      });
+      expect(del.statusCode).toBe(204);
+
+      const cadre = await prisma.cadre.findUnique({ where: { id: cadreId }, select: { permanentStatus: true, deceasedDate: true } });
+      expect(cadre?.permanentStatus).toBe('deceased');
+
+      // Restore the fixture.
+      await prisma.cadre.update({ where: { id: cadreId }, data: { permanentStatus: null, deceasedDate: null } });
+      await app.close();
+    });
+  });
+
   // ── DELETE /cadres/:cadreId/reports/:reportId (this task, item 3) ───────────
 
   describe('DELETE report', () => {

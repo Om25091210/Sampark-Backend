@@ -83,7 +83,8 @@ function toColumn(field: string, v: JsonValue): unknown {
 
 // ADR-036: dateOfBirth joins surrenderDate here — both arrive as ISO strings in the
 // change JSON and must become Date objects before Prisma writes the column.
-const DATE_FIELDS = new Set(['surrenderDate', 'dateOfBirth']);
+// This task: deceasedDate is the same shape.
+const DATE_FIELDS = new Set(['surrenderDate', 'dateOfBirth', 'deceasedDate']);
 
 function sameValue(a: JsonValue, b: JsonValue): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -203,12 +204,36 @@ const WITH_PEOPLE = {
   superAdminApprovedBy: { select: { id: true, name: true } },
 } as const;
 
+export interface SubmitOptions {
+  /** This task. Set only by reports.service.ts's report-time death sync — links
+   *  the resulting request back to the ONE report that proposed it, so deleting
+   *  that report can find and cancel it again (see cancelBySourceReport below).
+   *  Never set by the HTTP route: this is an internal, service-to-service option,
+   *  not a client-controllable field. */
+  sourceReportId?: number;
+}
+
 export interface CadreChangesService {
-  submit(cadreId: number, body: SubmitChangeBody, actor: Actor): Promise<WireChangeRequest>;
+  submit(cadreId: number, body: SubmitChangeBody, actor: Actor, opts?: SubmitOptions): Promise<WireChangeRequest>;
   list(query: ResolvedListChangesQuery, actor: Actor): Promise<Paginated<WireChangeRequest>>;
   approve(id: number, actor: Actor): Promise<WireChangeRequest>;
   reject(id: number, reason: string, actor: Actor): Promise<WireChangeRequest>;
   cancel(id: number, actor: Actor): Promise<WireChangeRequest>;
+  /**
+   * This task. Withdraws the SPECIFIC pending request that report-time death
+   * sync created for `reportId`, if one still exists and is still pending —
+   * e.g. an officer deletes their own just-filed mistaken death report before
+   * anyone has approved it. A no-op (never throws) when there is none, or it
+   * already moved past pending: the caller (reports.service.ts's remove()) has
+   * ALREADY authorized the report deletion under its own rules, so this is a
+   * mechanical cleanup, not a separately-gated action — unlike `cancel` above,
+   * it does not check "is this actor the submitter". Deliberately does NOT
+   * touch an already-APPLIED request: once two approvers have signed off on a
+   * death, deleting the report that first reported it does not silently
+   * un-mark the cadre — that stays a deliberate profile edit, same as clearing
+   * any other permanentStatus mark.
+   */
+  cancelBySourceReport(reportId: number, actorId: number): Promise<void>;
   patchDirect(cadreId: number, body: PatchCadreBody, actor: Actor): Promise<void>;
 }
 
@@ -372,7 +397,7 @@ export function makeCadreChangesService({
   }
 
   return {
-    async submit(cadreId, body, actor) {
+    async submit(cadreId, body, actor, opts) {
       // Sync module (ADR-013's pattern, extended to this entity — see the Prisma
       // column's comment). Checked FIRST, before the permission/cadre checks, so a
       // retried offline submission is cheap and safe even if something about the
@@ -459,6 +484,7 @@ export function makeCadreChangesService({
               needsAdmin,
               needsSuperAdmin,
               idempotencyKey: body.idempotency_key ?? null,
+              sourceReportId: opts?.sourceReportId ?? null,
             },
           });
 
@@ -712,6 +738,31 @@ export function makeCadreChangesService({
       });
 
       return toWire(await loadOrThrow(id), signUrl);
+    },
+
+    async cancelBySourceReport(reportId, actorId) {
+      const req = await prisma.cadreChangeRequest.findFirst({
+        where: { sourceReportId: reportId, status: 'pending' },
+      });
+      // No matching request, or it already left `pending` (approved, rejected,
+      // or gone stale) — nothing to do. See the interface doc comment for why
+      // an already-applied one is deliberately left untouched.
+      if (req === null) return;
+
+      await prisma.$transaction(async (tx) => {
+        await tx.cadreChangeRequest.update({
+          where: { id: req.id },
+          data: { status: 'cancelled', decidedAt: new Date(), decidedById: actorId },
+        });
+        await writeAuditLog(tx, {
+          actorId,
+          action: 'cadre.change.cancelled',
+          entityType: 'cadre_change_request',
+          entityId: String(req.id),
+          before: { status: 'pending' },
+          after: { status: 'cancelled', reason: 'source report deleted' },
+        });
+      });
     },
 
     async patchDirect(cadreId, body, actor) {

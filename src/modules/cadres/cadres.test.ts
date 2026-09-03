@@ -1950,3 +1950,49 @@ describe('cadres priorityCategory filter (ADR-047)', () => {
     await app.close();
   });
 });
+
+// ── permanentStatus list filter (this task) ───────────────────────────────────
+// The master filter's जेल/GS/शासकीय नौकरी/अप्राप्य group — mirrors the
+// priorityCategory filter test above, over the separate permanentStatus field.
+describe('cadres permanentStatus filter (this task)', () => {
+  const PSF_TOKEN = 'PSFFIXTURE';
+  const created: number[] = [];
+
+  const makeStatus = async (
+    suffix: string,
+    status: 'deceased' | 'government_job' | 'gs' | 'living_elsewhere' | 'untraceable' | null,
+  ): Promise<number> => {
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${PSF_TOKEN} ${suffix}`, phone: '+910000000901', thana: 'बीजापुर',
+        currentAddress: 'Psf fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], permanentStatus: status,
+      },
+    });
+    created.push(c.id);
+    return c.id;
+  };
+
+  afterAll(async () => {
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('filters to the selected marks, OR-s multiple values together, and excludes the untagged/other marks', async () => {
+    const app = await makeApp();
+    const gsId = await makeStatus('GS', 'gs');
+    const untraceableId = await makeStatus('UNTRACEABLE', 'untraceable');
+    const deceasedId = await makeStatus('DECEASED', 'deceased');
+    const unmarkedId = await makeStatus('UNMARKED', null);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres?search=${PSF_TOKEN}&permanentStatus=gs&permanentStatus=untraceable&pageSize=50`,
+      headers: auth(superAdminToken),
+    });
+    const ids = (res.json() as ListBody).data.map((r) => r.id);
+    expect(ids).toEqual(expect.arrayContaining([gsId, untraceableId]));
+    expect(ids).not.toContain(deceasedId);
+    expect(ids).not.toContain(unmarkedId);
+    await app.close();
+  });
+});

@@ -42,6 +42,11 @@ export const listCadresQuery = z.object({
   // ADR-047. The register's कैटेगरी grade — the master filter's replacement for the
   // alert-level chips, now that alertTag is no longer officer-editable (ADR-046).
   priorityCategory: multi(z.enum(['A', 'B', 'C', 'jail', 'death'])),
+  // This task. The master filter's नया स्थायी चिह्न group (जेल/GS/शासकीय नौकरी/अप्राप्य) —
+  // `permanentStatus` is a SEPARATE field from priorityCategory (see the Prisma enum's
+  // comment), so it gets its own multi-valued filter rather than piggybacking on
+  // priorityCategory's `jail`/`death`.
+  permanentStatus: multi(z.enum(['deceased', 'government_job', 'gs', 'living_elsewhere', 'untraceable'])),
   // ADR-041. Reporting-recency tier filter — the dashboard's four recency tiles drill
   // in here. Same 30/60/90-day windows as /stats/dashboard's reportingRecency counts,
   // so a tile's count equals the length of the list it opens.

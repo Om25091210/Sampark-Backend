@@ -89,6 +89,8 @@ export const APPROVAL_FIELDS = [
   // जिले में निवासरत) that also exempts the cadre from the reporting cadence
   // (recency.ts) — same weight as priorityCategory, same reasoning.
   'permanentStatus',
+  // This task. Paired with permanentStatus — see cadre-changes.schema.ts's comment.
+  'deceasedDate',
 ] as const;
 
 export type DirectField = (typeof DIRECT_FIELDS)[number];

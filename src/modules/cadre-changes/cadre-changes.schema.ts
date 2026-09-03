@@ -63,7 +63,14 @@ const fieldValue = {
   // convention every other enum here follows.
   priorityCategory: z.enum(['A', 'B', 'C', 'jail', 'death']).nullable(),
   // This task (item 7). Separate from priorityCategory — see the Prisma enum's comment.
-  permanentStatus: z.enum(['deceased', 'government_job', 'gs', 'living_elsewhere']).nullable(),
+  // `untraceable` (later task) is the fifth mark, same nullable single-value shape.
+  permanentStatus: z.enum(['deceased', 'government_job', 'gs', 'living_elsewhere', 'untraceable']).nullable(),
+  // This task. Only meaningful alongside permanentStatus='deceased' — report-time
+  // death sync always proposes both in the SAME submit() call (see
+  // reports.service.ts), so the ladder approves/rejects them as one fact, never
+  // a date without the mark. Same ISO-datetime-in/Date-column-out shape as
+  // dateOfBirth/surrenderDate above.
+  deceasedDate: z.string().datetime({ offset: true }).nullable(),
 } as const satisfies Record<(typeof APPROVAL_FIELDS)[number], z.ZodTypeAny>;
 
 export const changeableFieldsSchema = z.object(fieldValue).partial();
