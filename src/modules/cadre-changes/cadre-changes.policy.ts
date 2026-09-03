@@ -91,6 +91,11 @@ export const APPROVAL_FIELDS = [
   'permanentStatus',
   // This task. Paired with permanentStatus — see cadre-changes.schema.ts's comment.
   'deceasedDate',
+  // This task. A live custody flag (हिरासत में/जेल में vs रिहा/जेल से बाहर),
+  // separate from category='jail' and priorityCategory='jail' — see
+  // CustodyStatus's own comment in schema.prisma. Same weight as
+  // permanentStatus: a claim about a person, signed off the same way.
+  'custodyStatus',
 ] as const;
 
 export type DirectField = (typeof DIRECT_FIELDS)[number];

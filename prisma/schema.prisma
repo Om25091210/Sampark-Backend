@@ -151,6 +151,21 @@ enum PermanentStatus {
   untraceable
 }
 
+// This task. A LIVE, reversible custody state — deliberately NOT folded into
+// `CadreCategory.jail` (that is the register/list a cadre belongs to —
+// surrendered/jail/thana — set once at import, never a day-to-day toggle) and
+// NOT into `PriorityCategory.jail` (a reporting-cadence grade). A cadre in the
+// `surrendered` or `thana` register can be picked back up into custody, and one
+// in the `jail` register can be released — this field tracks THAT fact, on any
+// cadre, independent of which register they're filed under. Null (the default
+// for every cadre, including ones already in the jail register) means "never
+// explicitly flagged through the हिरासत की स्थिति menu" — the field stays
+// hidden on the profile until an officer sets it.
+enum CustodyStatus {
+  in_custody
+  released
+}
+
 // ─── Users (officers + admins) ─────────────────────────────────────────────────
 
 model User {
@@ -261,6 +276,10 @@ model Cadre {
   // fact of record; @db.Date for the same reason as dateOfBirth below (a
   // calendar date, not a moment).
   deceasedDate       DateTime?         @map("deceased_date") @db.Date
+  // This task. See CustodyStatus's own comment — null until an officer
+  // explicitly flags it via the हिरासत की स्थिति menu; approval-gated like
+  // every other fact of record.
+  custodyStatus      CustodyStatus?    @map("custody_status")
   filter             CadreFilter?
   alertLevel         AlertLevel        @map("alert_level")
   avatarUrl          String?           @map("avatar_url")

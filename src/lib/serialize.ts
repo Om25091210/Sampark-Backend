@@ -78,6 +78,9 @@ export interface WireCadre {
   // `?? undefined` convention as dateOfBirth below. `@db.Date`, so an ISO DATE
   // (`1990-05-16`), not a datetime — see dateOfBirth's own comment for why.
   deceasedDate?: string;
+  // This task. Live custody flag — see CustodyStatus's comment in schema.prisma.
+  // Absent when null (never flagged), same convention as permanentStatus.
+  custodyStatus?: NonNullable<Cadre['custodyStatus']>;
   filter?: NonNullable<Cadre['filter']>;
   alertLevel: Cadre['alertLevel'];
   avatarUrl?: string;
@@ -246,6 +249,7 @@ export function toWireCadre(
     priorityCategory: c.priorityCategory ?? undefined,
     permanentStatus: c.permanentStatus ?? undefined,
     deceasedDate: c.deceasedDate?.toISOString().slice(0, 10),
+    custodyStatus: c.custodyStatus ?? undefined,
     filter: c.filter ?? undefined,
     alertLevel: c.alertLevel,
     // ADR-029. Prefer a freshly-signed URL from the durable `avatarKey`; fall back

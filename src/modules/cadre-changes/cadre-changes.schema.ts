@@ -71,6 +71,8 @@ const fieldValue = {
   // a date without the mark. Same ISO-datetime-in/Date-column-out shape as
   // dateOfBirth/surrenderDate above.
   deceasedDate: z.string().datetime({ offset: true }).nullable(),
+  // This task. हिरासत की स्थिति — see CustodyStatus's comment in schema.prisma.
+  custodyStatus: z.enum(['in_custody', 'released']).nullable(),
 } as const satisfies Record<(typeof APPROVAL_FIELDS)[number], z.ZodTypeAny>;
 
 export const changeableFieldsSchema = z.object(fieldValue).partial();

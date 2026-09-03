@@ -226,6 +226,25 @@ describe('cadre change requests (ADR-026)', () => {
     await app.close();
   });
 
+  // This task: custodyStatus — a LIVE, reversible flag, separate from both
+  // permanentStatus and category/priorityCategory's 'jail' values. Same
+  // approval weight and clear-back-to-null shape as permanentStatus above.
+  it('custodyStatus goes through the approval chain, and can be cleared back to null', async () => {
+    const app = await makeApp();
+    const req = await submit(app, superToken, { custodyStatus: 'in_custody' });
+    expect(req.status).toBe('applied');
+    expect(
+      (await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).custodyStatus,
+    ).toBe('in_custody');
+
+    const clear = await submit(app, superToken, { custodyStatus: null });
+    expect(clear.status).toBe('applied');
+    expect(
+      (await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).custodyStatus,
+    ).toBeNull();
+    await app.close();
+  });
+
   // ── ADR-036: dateOfBirth + relations go through the approval chain ──────────
 
   it('applies dateOfBirth (as a Date) and the three relation names', async () => {
