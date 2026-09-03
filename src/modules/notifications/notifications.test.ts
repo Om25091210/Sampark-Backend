@@ -174,6 +174,27 @@ describe('notifications (ADR-048 in-app inbox)', () => {
     expect(res.statusCode).toBe(404);
   });
 
+  // This task. Backs the mobile notice-board dialog's `type=broadcast&unreadOnly=true`
+  // fetch — must return only broadcasts, never the other notification types.
+  it('list filters by type', async () => {
+    const app = await makeApp();
+    await prisma.notification.create({
+      data: { userId: officerInId, type: 'broadcast', title: 'सूचना', body: 'बॉडी' },
+    });
+    await prisma.notification.create({
+      data: { userId: officerInId, type: 'thana_transfer', title: 'स्थानांतरण', body: 'बॉडी' },
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/notifications?type=broadcast',
+      headers: auth(officerInToken),
+    });
+    const body = res.json() as { total: number; data: { type: string }[] };
+    expect(body.total).toBe(1);
+    expect(body.data.every((n) => n.type === 'broadcast')).toBe(true);
+  });
+
   it('RBAC: officer/viewer 403 on broadcast, admin/super_admin 201', async () => {
     const app = await makeApp();
 

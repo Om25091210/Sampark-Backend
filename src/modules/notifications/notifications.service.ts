@@ -74,6 +74,7 @@ export function makeNotificationsService(deps: NotificationsDeps): Notifications
         userId,
         deletedAt: null,
         ...(query.unreadOnly === true ? { readAt: null } : {}),
+        ...(query.type !== undefined ? { type: query.type } : {}),
       };
 
       const [total, rows] = await prisma.$transaction([

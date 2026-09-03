@@ -5,6 +5,11 @@ import { z } from 'zod';
 
 export const listNotificationsQuery = z.object({
   unreadOnly: z.coerce.boolean().optional(),
+  // This task. Lets a caller narrow to one notification type — e.g. the mobile
+  // notice-board dialog asks for `type=broadcast&unreadOnly=true` specifically,
+  // rather than filtering a mixed unread page client-side and risking a
+  // broadcast buried past page 1 of other unread types.
+  type: z.enum(['report_overdue', 'cadre_change_outcome', 'cadre_create_outcome', 'thana_transfer', 'broadcast']).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(50).default(20),
 });
