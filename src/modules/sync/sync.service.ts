@@ -21,14 +21,22 @@ export interface SyncDeps {
   cadreChanges: Pick<CadreChangesService, 'submit'>;
 }
 
-// Hard cap per entity, per pull. At the current roster size (~1,790 cadres) a single
-// response comfortably covers a full snapshot; if either table ever outgrows this,
-// `truncated` below tells the CLIENT (never advance its cursor past a truncated
-// response — retry instead) and the log line tells the operator, rather than either
-// silently dropping rows or crashing on the mobile side. Real resumable keyset
-// pagination is a documented follow-up, not built pre-emptively for a scale this
-// app is nowhere near yet (solo-maintainer simplicity).
-const SYNC_PAGE_CAP = 2000;
+// Hard cap per entity, per pull. Originally 2000 against a ~1,790-cadre baseline — too
+// tight a margin, and it bit for real (2026-09-05): an admin scoped to the full
+// district roster (`scope.kind === 'all'`) has 8,000+ cadres, so every pull came back
+// `truncated`. The documented client contract for `truncated` is "retry with the SAME
+// lastPulledAt, never advance the cursor" (sync.routes.ts) — which is NOT a working
+// pagination mechanism (a retry with an unchanged cursor is a deterministic query,
+// so it returns the identical first page forever). The mobile client cannot safely
+// paginate around this on its own without violating that documented contract, so the
+// real fix is here: a cap with real headroom over any scope actually in use, not a
+// client-side workaround. If either table ever outgrows THIS cap, `truncated` still
+// tells the CLIENT (which still must not advance its cursor) and the log line tells
+// the operator — but that should mean "raise this again," not "the client is expected
+// to recover on its own." Real resumable keyset pagination remains a documented
+// follow-up for whenever a single entity block genuinely outgrows a comfortable
+// single-response size, not a scale this app is at yet (solo-maintainer simplicity).
+const SYNC_PAGE_CAP = 20000;
 
 export interface SyncEntityBlock<T> {
   upserted: T[];
