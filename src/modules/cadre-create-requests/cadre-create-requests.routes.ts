@@ -3,6 +3,7 @@ import type { Role } from '@prisma/client';
 import { makeCadreCreateRequestsService, type Actor } from './cadre-create-requests.service.js';
 import { AppError, badRequest, forbidden } from '../../lib/errors.js';
 import {
+  bulkApproveCreateBody,
   createRequestIdParam,
   listCreateRequestsQuery,
   rejectCreateRequestBody,
@@ -125,6 +126,42 @@ export async function cadreCreateRequestsRoutes(app: FastifyInstance): Promise<v
     async (request) => {
       const { id } = createRequestIdParam.parse(request.params);
       return service.approve(id, actorOf(request));
+    },
+  );
+
+  app.post(
+    '/cadre-create-requests/approve-bulk',
+    {
+      preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
+      schema: {
+        tags: ['Cadre create requests'],
+        summary: 'Approve many create requests at once (admin+)',
+        description:
+          'The approver-queue "select all". Body is an explicit id list (max 100). Each id runs ' +
+          'through the same single-approve path independently — its own transaction, scope check, ' +
+          'self-approval guard and notification — so one forbidden id never rolls back the rest. ' +
+          'The response tallies the outcomes (`applied` / `approved` / `error` with an AppError ' +
+          '`code`; a create request never goes `stale`); the call is 200 even when every id failed.',
+        security: bearerAuth,
+        body: zodToJson(bulkApproveCreateBody),
+        response: {
+          200: jsonResponse('Per-id outcomes and tallies', {
+            results: [
+              { id: 1, status: 'applied' },
+              { id: 2, status: 'approved' },
+              { id: 3, status: 'error', code: 'NOT_PENDING' },
+            ],
+            applied: 1,
+            approved: 1,
+            stale: 0,
+            failed: 1,
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const { ids } = bulkApproveCreateBody.parse(request.body);
+      return service.approveBulk(ids, actorOf(request));
     },
   );
 

@@ -4,7 +4,12 @@ import { Prisma, type PrismaClient, type Role, type CadreChangeRequest, type Ale
 import { tagToLevel } from '../../lib/alert-tags.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
-import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
+import { AppError, badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
+import {
+  tallyBulkApprove,
+  type BulkApproveOutcome,
+  type BulkApproveResult,
+} from '../../lib/bulk-approve.js';
 import type { StorageProvider } from '../../lib/storage.js';
 import type { PushProvider } from '../../lib/push.js';
 import { writeNotification } from '../../lib/notifications.js';
@@ -217,6 +222,14 @@ export interface CadreChangesService {
   submit(cadreId: number, body: SubmitChangeBody, actor: Actor, opts?: SubmitOptions): Promise<WireChangeRequest>;
   list(query: ResolvedListChangesQuery, actor: Actor): Promise<Paginated<WireChangeRequest>>;
   approve(id: number, actor: Actor): Promise<WireChangeRequest>;
+  /**
+   * Approve many requests in one call — the approver's "select all". Each id runs
+   * through the SAME `approve` path (its own transaction, scope check, drift check,
+   * self-approval guard, notification) — there is no shared transaction, so one
+   * stale or forbidden id never rolls back the ones that succeeded. Ids are
+   * de-duplicated; order of `results` follows the de-duplicated input.
+   */
+  approveBulk(ids: number[], actor: Actor): Promise<BulkApproveResult>;
   reject(id: number, reason: string, actor: Actor): Promise<WireChangeRequest>;
   cancel(id: number, actor: Actor): Promise<WireChangeRequest>;
   /**
@@ -396,7 +409,7 @@ export function makeCadreChangesService({
     if (cadre === null) throw notFound('Change request not found');
   }
 
-  return {
+  const service: CadreChangesService = {
     async submit(cadreId, body, actor, opts) {
       // Sync module (ADR-013's pattern, extended to this entity — see the Prisma
       // column's comment). Checked FIRST, before the permission/cadre checks, so a
@@ -645,6 +658,34 @@ export function makeCadreChangesService({
       return toWire(await loadOrThrow(updated.id), signUrl);
     },
 
+    async approveBulk(ids, actor) {
+      // De-dupe but keep the order the approver saw on screen.
+      const unique = [...new Set(ids)];
+      const results: BulkApproveOutcome[] = [];
+
+      // Sequential, not Promise.all: each `approve` opens its own transaction and
+      // fires its own push. Running them in parallel would multiply the DB
+      // connections held at once and interleave the audit chain writes for no real
+      // speed-up on a queue this size (<= 100).
+      for (const id of unique) {
+        try {
+          const wire = await service.approve(id, actor);
+          results.push({
+            id,
+            status:
+              wire.status === 'applied' ? 'applied' : wire.status === 'stale' ? 'stale' : 'approved',
+          });
+        } catch (err) {
+          // A failed id must not sink the batch — record why and move on. Anything
+          // that is not an AppError is a real bug, so let it propagate.
+          if (!(err instanceof AppError)) throw err;
+          results.push({ id, status: 'error', code: err.code });
+        }
+      }
+
+      return tallyBulkApprove(results);
+    },
+
     async reject(id, reason, actor) {
       const req = await loadOrThrow(id);
       await assertRequestInScope(req, actor);
@@ -816,4 +857,6 @@ export function makeCadreChangesService({
       });
     },
   };
+
+  return service;
 }

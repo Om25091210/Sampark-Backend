@@ -784,3 +784,97 @@ describe('cadre change requests (ADR-026)', () => {
     await app.close();
   });
 });
+
+// ── Bulk approve — the approver-queue "select all" (approvals.tsx) ─────────────
+interface BulkResult {
+  results: { id: number; status: string; code?: string }[];
+  applied: number;
+  approved: number;
+  stale: number;
+  failed: number;
+}
+
+describe('cadre change requests — bulk approve', () => {
+  const bulk = (token: string, ids: number[]) =>
+    makeApp().then((app) =>
+      app
+        .inject({ method: 'POST', url: '/api/v1/changes/approve-bulk', headers: auth(token), payload: { ids } })
+        .then(async (res) => {
+          await app.close();
+          return res;
+        }),
+    );
+
+  it('one admin call signs the first rung of every id — none applied yet', async () => {
+    const app = await makeApp();
+    const r1 = await submit(app, officerToken, { phone: '+910000000097' });
+    const r2 = await submit(app, officerToken, { currentAddress: 'नया पता क' });
+    await app.close();
+
+    const res = await bulk(adminToken, [r1.id, r2.id]);
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as BulkResult;
+    expect(body.approved).toBe(2);
+    expect(body.applied).toBe(0);
+    expect(body.results.map((x) => x.status)).toEqual(['approved', 'approved']);
+    // Nothing on the cadre moved — the super_admin rung is still outstanding.
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(c.phone).toBe(ORIGINAL_PHONE);
+  });
+
+  it('the last rung applies every id in the batch', async () => {
+    const app = await makeApp();
+    const r1 = await submit(app, adminToken, { phone: '+910000000096' }); // admin-submitted → needs super only
+    const r2 = await submit(app, adminToken, { currentAddress: 'नया पता ख' });
+    await app.close();
+
+    const res = await bulk(superToken, [r1.id, r2.id]);
+    const body = res.json() as BulkResult;
+    expect(body.applied).toBe(2);
+    const c = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    expect(c.phone).toBe('+910000000096');
+    expect(c.currentAddress).toBe('नया पता ख');
+  });
+
+  it('a failed id is recorded, not thrown — the rest still go through', async () => {
+    const app = await makeApp();
+    const good = await submit(app, adminToken, { phone: '+910000000095' });
+    const decided = await submit(app, adminToken, { residingVillage: 'गाँव-क' });
+    // Take `decided` out of pending first.
+    await app.inject({
+      method: 'POST', url: `/api/v1/changes/${decided.id}/reject`,
+      headers: auth(superToken), payload: { reason: 'नहीं' },
+    });
+    await app.close();
+
+    const res = await bulk(superToken, [good.id, decided.id]);
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as BulkResult;
+    expect(body.applied).toBe(1);
+    expect(body.failed).toBe(1);
+    expect(body.results.find((x) => x.id === decided.id)).toMatchObject({ status: 'error', code: 'NOT_PENDING' });
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } })).phone).toBe('+910000000095');
+  });
+
+  it("an approver's own proposal in the batch comes back as an error, not self-approved", async () => {
+    const app = await makeApp();
+    const mine = await submit(app, adminToken, { phone: '+910000000094' });
+    const other = await submit(app, officerToken, { currentAddress: 'नया पता ग' });
+    await app.close();
+
+    const body = (await bulk(adminToken, [mine.id, other.id])).json() as BulkResult;
+    expect(body.results.find((x) => x.id === mine.id)?.status).toBe('error');
+    expect(body.results.find((x) => x.id === other.id)?.status).toBe('approved');
+  });
+
+  it('is forbidden for officers (403)', async () => {
+    const app = await makeApp();
+    const r = await submit(app, adminToken, { phone: '+910000000093' });
+    await app.close();
+    expect((await bulk(officerToken, [r.id])).statusCode).toBe(403);
+  });
+
+  it('rejects an empty id list (400)', async () => {
+    expect((await bulk(adminToken, [])).statusCode).toBe(400);
+  });
+});

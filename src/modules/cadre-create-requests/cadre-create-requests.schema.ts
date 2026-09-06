@@ -96,6 +96,13 @@ export const listCreateRequestsQuery = z.object({
 
 export const createRequestIdParam = z.object({ id: z.coerce.number().int().positive() });
 
+// Bulk approve (approver "select all"). Explicit id list, capped at 100 — same shape
+// and reasoning as cadre-changes.schema.ts's bulkApproveBody.
+export const bulkApproveCreateBody = z.object({
+  ids: z.array(z.number().int().positive()).min(1).max(100),
+});
+export type BulkApproveCreateBody = z.infer<typeof bulkApproveCreateBody>;
+
 export type SubmitCreateRequestBody = z.infer<typeof submitCreateRequestBody>;
 export type RejectCreateRequestBody = z.infer<typeof rejectCreateRequestBody>;
 export type ListCreateRequestsQuery = z.infer<typeof listCreateRequestsQuery>;

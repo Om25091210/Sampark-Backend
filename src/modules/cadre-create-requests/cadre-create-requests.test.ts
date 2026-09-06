@@ -429,3 +429,82 @@ describe('cadre create requests', () => {
     await app.close();
   });
 });
+
+// ── Bulk approve — the approver-queue "select all" (approvals.tsx) ─────────────
+interface BulkResult {
+  results: { id: number; status: string; code?: string }[];
+  applied: number;
+  approved: number;
+  stale: number;
+  failed: number;
+}
+
+describe('cadre create requests — bulk approve', () => {
+  const bulk = async (token: string, ids: number[]) => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/cadre-create-requests/approve-bulk',
+      headers: auth(token), payload: { ids },
+    });
+    await app.close();
+    return res;
+  };
+
+  it('the last rung applies every id — real cadres are created', async () => {
+    const app = await makeApp();
+    const n1 = `${NAME_PREFIX} bulk-apply-1`;
+    const n2 = `${NAME_PREFIX} bulk-apply-2`;
+    const r1 = await submit(app, adminToken, draft({ name: n1 })); // admin-submitted → needs super only
+    const r2 = await submit(app, adminToken, draft({ name: n2 }));
+    await app.close();
+
+    const res = await bulk(superToken, [r1.id, r2.id]);
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as BulkResult;
+    expect(body.applied).toBe(2);
+    expect(body.stale).toBe(0);
+    expect(await prisma.cadre.findFirst({ where: { name: n1 } })).not.toBeNull();
+    expect(await prisma.cadre.findFirst({ where: { name: n2 } })).not.toBeNull();
+  });
+
+  it('an admin call on officer submissions signs one rung — none created yet', async () => {
+    const app = await makeApp();
+    const n1 = `${NAME_PREFIX} bulk-mid-1`;
+    const n2 = `${NAME_PREFIX} bulk-mid-2`;
+    const r1 = await submit(app, officerToken, draft({ name: n1 }));
+    const r2 = await submit(app, officerToken, draft({ name: n2 }));
+    await app.close();
+
+    const body = (await bulk(adminToken, [r1.id, r2.id])).json() as BulkResult;
+    expect(body.approved).toBe(2);
+    expect(body.applied).toBe(0);
+    expect(await prisma.cadre.findFirst({ where: { name: { in: [n1, n2] } } })).toBeNull();
+  });
+
+  it('a decided id in the batch is an error, the rest still apply', async () => {
+    const app = await makeApp();
+    const good = await submit(app, adminToken, draft());
+    const decided = await submit(app, adminToken, draft());
+    await app.inject({
+      method: 'POST', url: `/api/v1/cadre-create-requests/${decided.id}/reject`,
+      headers: auth(superToken), payload: { reason: 'नहीं' },
+    });
+    await app.close();
+
+    const body = (await bulk(superToken, [good.id, decided.id])).json() as BulkResult;
+    expect(body.applied).toBe(1);
+    expect(body.failed).toBe(1);
+    expect(body.results.find((x) => x.id === decided.id)).toMatchObject({ status: 'error', code: 'NOT_PENDING' });
+  });
+
+  it('is forbidden for officers (403)', async () => {
+    const app = await makeApp();
+    const r = await submit(app, adminToken, draft());
+    await app.close();
+    expect((await bulk(officerToken, [r.id])).statusCode).toBe(403);
+  });
+
+  it('rejects an empty id list (400)', async () => {
+    expect((await bulk(adminToken, [])).statusCode).toBe(400);
+  });
+});

@@ -113,6 +113,15 @@ export const listChangesQuery = z.object({
 export const changeIdParam = z.object({ id: z.coerce.number().int().positive() });
 export const cadreIdParam = z.object({ cadreId: z.coerce.number().int().positive() });
 
+// Bulk approve (approver "select all" — approvals.tsx). An explicit id list, not a
+// blanket "approve everything": the approver chose these on screen. Capped at 100 so
+// one request cannot fan out into an unbounded sequence of transactions; the client
+// pages its queue anyway. Each id is approved independently — see the service.
+export const bulkApproveBody = z.object({
+  ids: z.array(z.number().int().positive()).min(1).max(100),
+});
+export type BulkApproveBody = z.infer<typeof bulkApproveBody>;
+
 export type SubmitChangeBody = z.infer<typeof submitChangeBody>;
 export type RejectChangeBody = z.infer<typeof rejectChangeBody>;
 export type ListChangesQuery = z.infer<typeof listChangesQuery>;

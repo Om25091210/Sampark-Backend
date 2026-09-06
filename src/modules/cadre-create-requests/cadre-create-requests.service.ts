@@ -4,7 +4,12 @@ import { cadreScopeWhere, scopeAdmitsThana, type CadreScope } from '../../lib/sc
 import { Prisma, type PrismaClient, type Role, type CadreCreateRequest } from '@prisma/client';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
-import { badRequest, forbidden, notFound } from '../../lib/errors.js';
+import { AppError, badRequest, forbidden, notFound } from '../../lib/errors.js';
+import {
+  tallyBulkApprove,
+  type BulkApproveOutcome,
+  type BulkApproveResult,
+} from '../../lib/bulk-approve.js';
 import type { StorageProvider } from '../../lib/storage.js';
 import type { PushProvider } from '../../lib/push.js';
 import { writeNotification } from '../../lib/notifications.js';
@@ -192,6 +197,14 @@ export interface CadreCreateRequestsService {
   submit(body: SubmitCreateRequestBody, actor: Actor): Promise<WireCreateRequest>;
   list(query: ResolvedListCreateRequestsQuery, actor: Actor): Promise<Paginated<WireCreateRequest>>;
   approve(id: number, actor: Actor): Promise<WireCreateRequest>;
+  /**
+   * Approve many create requests at once — the approver's "select all". Each id runs
+   * through the same single-approve path (its own transaction, scope check,
+   * self-approval guard, notification); a failed id is recorded, not thrown, so it
+   * never rolls back the rest. Ids are de-duplicated. A create request has no prior
+   * value, so `stale` never appears in the results here.
+   */
+  approveBulk(ids: number[], actor: Actor): Promise<BulkApproveResult>;
   reject(id: number, reason: string, actor: Actor): Promise<WireCreateRequest>;
   cancel(id: number, actor: Actor): Promise<WireCreateRequest>;
   uploadDraftAvatar(file: UploadInput, actor: Actor): Promise<{ key: string; url: string }>;
@@ -344,7 +357,7 @@ export function makeCadreCreateRequestsService({
     if (!scopeAdmitsThana(actor.scope, req.thana)) throw notFound('Create request not found');
   }
 
-  return {
+  const service: CadreCreateRequestsService = {
     async submit(body, actor) {
       if (!canSubmit(actor.role)) throw forbidden('Viewers cannot propose a new cadre');
 
@@ -505,6 +518,25 @@ export function makeCadreCreateRequestsService({
       return toWire(await loadOrThrow(updated.id), signUrl);
     },
 
+    async approveBulk(ids, actor) {
+      const unique = [...new Set(ids)];
+      const results: BulkApproveOutcome[] = [];
+
+      // Sequential — each `approve` is its own transaction + push; see the
+      // cadre-changes service's approveBulk for the full reasoning.
+      for (const id of unique) {
+        try {
+          const wire = await service.approve(id, actor);
+          results.push({ id, status: wire.status === 'applied' ? 'applied' : 'approved' });
+        } catch (err) {
+          if (!(err instanceof AppError)) throw err;
+          results.push({ id, status: 'error', code: err.code });
+        }
+      }
+
+      return tallyBulkApprove(results);
+    },
+
     async reject(id, reason, actor) {
       const req = await loadOrThrow(id);
       assertRequestInScope(req, actor);
@@ -608,4 +640,6 @@ export function makeCadreCreateRequestsService({
       return { key, url };
     },
   };
+
+  return service;
 }

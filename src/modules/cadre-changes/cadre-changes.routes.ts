@@ -3,6 +3,7 @@ import type { Role } from '@prisma/client';
 import { makeCadreChangesService, type Actor } from './cadre-changes.service.js';
 import { forbidden } from '../../lib/errors.js';
 import {
+  bulkApproveBody,
   cadreIdParam,
   changeIdParam,
   listChangesQuery,
@@ -123,6 +124,44 @@ export async function cadreChangesRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const { id } = changeIdParam.parse(request.params);
       return service.approve(id, actorOf(request));
+    },
+  );
+
+  app.post(
+    '/changes/approve-bulk',
+    {
+      preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
+      schema: {
+        tags: ['Cadre changes'],
+        summary: 'Approve many change requests at once (admin+)',
+        description:
+          'The approver-queue "select all". Body is an explicit id list (max 100), not a blanket ' +
+          '"approve everything". Each id runs through the same single-approve path independently — ' +
+          'its own transaction, scope check, drift check, self-approval guard and notification — so ' +
+          'one stale or forbidden id never rolls back the rest. The response tallies the outcomes ' +
+          '(`applied` / `approved` / `stale` / `error` with an AppError `code`); the call itself is ' +
+          '200 even when every id failed.',
+        security: bearerAuth,
+        body: zodToJson(bulkApproveBody),
+        response: {
+          200: jsonResponse('Per-id outcomes and tallies', {
+            results: [
+              { id: 1, status: 'applied' },
+              { id: 2, status: 'approved' },
+              { id: 3, status: 'stale' },
+              { id: 4, status: 'error', code: 'NOT_PENDING' },
+            ],
+            applied: 1,
+            approved: 1,
+            stale: 1,
+            failed: 1,
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const { ids } = bulkApproveBody.parse(request.body);
+      return service.approveBulk(ids, actorOf(request));
     },
   );
 
