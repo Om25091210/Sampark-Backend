@@ -29,7 +29,8 @@ import {
   EXAMPLE_IMPORT_RESULT,
 } from '../../lib/openapi.js';
 
-// Cadre records. All routes require authentication; transfer is admin+.
+// Cadre records. All routes require authentication; officer-reassignment transfer is admin+,
+// thana-transfer is officer+ (ADR-046 amended 2026-09-06).
 export async function cadresRoutes(app: FastifyInstance): Promise<void> {
   const service = makeCadresService({
     prisma: app.prisma,
@@ -353,19 +354,23 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // ADR-046. Move a cadre to another station (admin+). Honours ADR-044 on both ends: the
-  // cadre must be in the caller's scope, and the destination thana must be admitted by it
-  // (400 THANA_OUT_OF_SCOPE otherwise). Clears the assignment; leaves sub-division as-is.
+  // ADR-046 (amended 2026-09-06). Move a cadre to another station. The SOURCE cadre must be
+  // in the caller's scope (404 otherwise). The DESTINATION rule depends on role: admin+ are
+  // held to their own ADR-044 jurisdiction; an officer may move a cadre they hold to any of
+  // the 22 canonical stations (400 THANA_OUT_OF_SCOPE for a non-canonical name). Clears the
+  // assignment; leaves sub-division as-is.
   app.post(
     '/cadres/:cadreId/thana-transfer',
     {
-      preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
+      preHandler: [app.authenticate, app.requireRole('officer', 'admin', 'super_admin')],
       schema: {
         tags: ['Cadres'],
-        summary: 'Move a cadre to another station (admin+)',
+        summary: 'Move a cadre to another station (officer+)',
         description:
           'ADR-046. Reassigns the cadre to a different thana — a real move, not a copy. ' +
-          'Enforces ADR-044 jurisdiction on BOTH ends (source in scope, destination admitted). ' +
+          'Source end enforces ADR-044 scope (cadre must be found in the caller\'s jurisdiction). ' +
+          'Destination end: admin+ are bounded by their own jurisdiction, an officer by the set ' +
+          'of 22 canonical stations (amended 2026-09-06). ' +
           'Clears `assignedOfficerId` (the old station\'s officer loses scope) and leaves ' +
           '`subDivision` un-re-derived (ADR-043).',
         security: bearerAuth,
@@ -377,7 +382,13 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const { cadreId } = transferParams.parse(request.params);
       const { thana } = thanaTransferBody.parse(request.body);
-      await service.transferThana(cadreId, thana, request.authUser!.sub, request.scope!);
+      await service.transferThana(
+        cadreId,
+        thana,
+        request.authUser!.sub,
+        request.authUser!.role,
+        request.scope!,
+      );
       return reply.code(204).send();
     },
   );

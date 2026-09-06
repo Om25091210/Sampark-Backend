@@ -142,3 +142,14 @@ export function scopeAdmitsThana(scope: CadreScope, thana: string): boolean {
   const t = nfc(thana);
   return scope.thanas.some((s) => nfc(s) === t);
 }
+
+/**
+ * Is `thana` one of the 22 canonical stations? NFC-compared on both sides, like
+ * `scopeAdmitsThana`. ADR-046 (amended 2026-09-06): an officer's thana-transfer
+ * destination is bounded by THIS rather than by their single-thana scope — that
+ * scope would forbid every move to a different station, making the feature inert
+ * for them. The source end of the check still honours the officer's scope.
+ */
+export function isCanonicalThana(thana: string): boolean {
+  return THANA_TO_SUB_DIVISION.has(nfc(thana));
+}

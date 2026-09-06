@@ -1,5 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
-import { cadreScopeWhere, scopeAdmitsThana, type CadreScope } from '../../lib/scope.js';
+import { cadreScopeWhere, scopeAdmitsThana, isCanonicalThana, type CadreScope } from '../../lib/scope.js';
 import { Prisma } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
 import { toWireCadre, type WireCadre } from '../../lib/serialize.js';
@@ -151,10 +151,18 @@ export interface CadresService {
   facets(scope: CadreScope, category?: 'surrendered' | 'jail' | 'thana' | 'all'): Promise<CadreFacets>;
   getById(id: number, scope: CadreScope): Promise<WireCadre>;
   transfer(cadreId: number, toOfficerId: number, actorId: number, scope: CadreScope): Promise<void>;
-  // ADR-046. Move a cadre to another station. `scope` enforces ADR-044 on BOTH ends —
-  // the cadre must be in scope to be found AND the destination thana must be admitted —
-  // for the same reason `transfer`'s `scope` is required, not optional.
-  transferThana(cadreId: number, newThana: string, actorId: number, scope: CadreScope): Promise<void>;
+  // ADR-046. Move a cadre to another station. `scope` enforces ADR-044 on the SOURCE end —
+  // the cadre must be in scope to be found — for the same reason `transfer`'s `scope` is
+  // required, not optional. The DESTINATION end depends on `actorRole` (amended 2026-09-06):
+  // admin+ are held to their own jurisdiction, an officer may send a cadre they hold to any
+  // of the 22 canonical stations (their single-thana scope would otherwise forbid every move).
+  transferThana(
+    cadreId: number,
+    newThana: string,
+    actorId: number,
+    actorRole: string,
+    scope: CadreScope,
+  ): Promise<void>;
   // ADR-038. Bulk historical import. `actorId` is the super_admin's id for an
   // interactive call, or null when authenticated by the SDR-007 machine key.
   importCadres(rows: unknown[], actorId: number | null): Promise<ImportResult>;
@@ -559,19 +567,25 @@ export function makeCadresService({
       if (notify !== undefined) fireImmediateDispatch(dispatchDeps, notify.outboxEventId, notify.payload);
     },
 
-    async transferThana(cadreId, newThana, actorId, scope) {
+    async transferThana(cadreId, newThana, actorId, actorRole, scope) {
       // Source end of the scope check: an out-of-scope cadre is a 404, same as getById.
+      // This still holds for an officer — they can only move a cadre that sits in their
+      // own thana to begin with.
       const cadre = await prisma.cadre.findFirst({
         where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(scope) },
       });
       if (cadre === null) throw notFound('Cadre not found');
 
-      // Destination end (ADR-044). Without this an SDOP could move a cadre they hold to a
-      // station in another sub-division — pushing the record out of their own jurisdiction
-      // and permanently out of their own reach. Same escape the officer-transfer guard
-      // above closes, one axis over. `newThana` is already NFC-normalised by the schema,
-      // matching how scope thanas are stored, so the comparison cannot fail on encoding.
-      if (!scopeAdmitsThana(scope, newThana)) {
+      // Destination end. For admin+ this is ADR-044: without it an SDOP could move a cadre
+      // they hold to a station in another sub-division — pushing the record out of their own
+      // jurisdiction and permanently out of their own reach. An OFFICER's scope is a single
+      // thana, so that same rule would forbid every real move; ADR-046 (amended 2026-09-06)
+      // instead lets them send the cadre to any of the 22 canonical stations — a relocated
+      // cadre is exactly what the field officer is placed to record. `newThana` is already
+      // NFC-normalised by the schema, so neither comparison can fail on encoding alone.
+      const destinationOk =
+        actorRole === 'officer' ? isCanonicalThana(newThana) : scopeAdmitsThana(scope, newThana);
+      if (!destinationOk) {
         throw badRequest('thana is outside your jurisdiction', 'THANA_OUT_OF_SCOPE');
       }
 

@@ -1315,11 +1315,13 @@ describe('cadres avatar backfill (Design-Docs#8)', () => {
   });
 });
 
-// ── Thana transfer (ADR-046) ──────────────────────────────────────────────────
-// Moves a cadre to another station. ADR-044 is enforced on BOTH ends: the cadre must
-// be in the caller's scope to be found, and the destination thana must be admitted by
-// it. adminToken is scoped to the बीजापुर sub-division (thanas: [बीजापुर]); superAdmin
-// is unrestricted. गंगालूर and पामेड़ are canonical thanas in OTHER sub-divisions.
+// ── Thana transfer (ADR-046, amended 2026-09-06) ──────────────────────────────
+// Moves a cadre to another station. The SOURCE end always enforces ADR-044 scope (the
+// cadre must be found in the caller's jurisdiction). The DESTINATION end is role-shaped:
+// admin+ are bounded by their own jurisdiction, an officer by the 22 canonical stations.
+// adminToken is scoped to the बीजापुर sub-division (thanas: [बीजापुर]); superAdmin is
+// unrestricted; officerToken (Officer A) is scoped to the single thana बीजापुर. गंगालूर
+// and पामेड़ are canonical thanas in OTHER sub-divisions.
 describe('cadres thana transfer (ADR-046)', () => {
   const TXN_TOKEN = 'TXNFIXTURE';
   const created: number[] = [];
@@ -1341,14 +1343,52 @@ describe('cadres thana transfer (ADR-046)', () => {
     await prisma.cadre.deleteMany({ where: { id: { in: created } } });
   });
 
-  it('is forbidden for officers (403)', async () => {
+  // ADR-046 amended 2026-09-06: an officer may move a cadre out of their own thana to ANY
+  // canonical station — गंगालूर is in a different sub-division, which an admin could not do.
+  it('officer move → 204, to any canonical thana, clears the assignment', async () => {
     const app = await makeApp();
-    const id = await makeCadre('officer-403', 'बीजापुर');
+    const id = await makeCadre('officer-happy', 'बीजापुर');
     const res = await app.inject({
       method: 'POST', url: `/api/v1/cadres/${id}/thana-transfer`,
       headers: auth(officerToken), payload: { thana: 'गंगालूर' },
     });
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(204);
+
+    const updated = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(updated.thana).toBe('गंगालूर');
+    expect(updated.assignedOfficerId).toBeNull();
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.thana_transfer' },
+    });
+    expect(audit).not.toBeNull();
+    await app.close();
+  });
+
+  // The officer's destination is bounded by the 22 canonical stations, not left free.
+  it('officer move to a non-canonical thana → 400 THANA_OUT_OF_SCOPE', async () => {
+    const app = await makeApp();
+    const id = await makeCadre('officer-junk-dest', 'बीजापुर');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${id}/thana-transfer`,
+      headers: auth(officerToken), payload: { thana: 'कहीं और' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: { code: string } }).error.code).toBe('THANA_OUT_OF_SCOPE');
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id } })).thana).toBe('बीजापुर');
+    await app.close();
+  });
+
+  // The SOURCE end still honours the officer's scope — they cannot touch a cadre that
+  // does not sit in their own thana (पामेड़ ≠ बीजापुर → indistinguishable from absent).
+  it('officer cannot move a cadre outside their own thana → 404', async () => {
+    const app = await makeApp();
+    const id = await makeCadre('officer-src-oos', 'पामेड़');
+    const res = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${id}/thana-transfer`,
+      headers: auth(officerToken), payload: { thana: 'गंगालूर' },
+    });
+    expect(res.statusCode).toBe(404);
     await app.close();
   });
 
