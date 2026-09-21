@@ -163,6 +163,15 @@ export interface CadresService {
     actorRole: string,
     scope: CadreScope,
   ): Promise<void>;
+  // Task 2 (super-admin cadre delete). Soft-delete only — sets `Cadre.deletedAt`,
+  // which every read path already excludes (see `list`/`getById` above). Related
+  // rows (reports, change/create requests, notifications) are deliberately left
+  // untouched: they keep pointing at the now-deleted cadre for audit purposes,
+  // exactly like the schema's lack of an `onDelete` cascade already implies.
+  // super_admin-only (route-enforced), so — like backfillCategory/correctFields
+  // below — there is no `scope` parameter: a super_admin's scope is unrestricted
+  // by definition (ADR-044).
+  remove(id: number, actorId: number): Promise<void>;
   // ADR-038. Bulk historical import. `actorId` is the super_admin's id for an
   // interactive call, or null when authenticated by the SDR-007 machine key.
   importCadres(rows: unknown[], actorId: number | null): Promise<ImportResult>;
@@ -652,6 +661,33 @@ export function makeCadresService({
       });
 
       for (const n of notify) fireImmediateDispatch(dispatchDeps, n.outboxEventId, n.payload);
+    },
+
+    // Task 2. `applyWithin` (cadre-changes.service.ts) already reloads the cadre
+    // with `deletedAt: null` before applying any pending change request, so an
+    // in-flight approval on a cadre deleted in the meantime fails closed (stale)
+    // rather than resurrecting data through a side door.
+    async remove(id, actorId) {
+      const cadre = await prisma.cadre.findFirst({ where: { id, deletedAt: null } });
+      if (cadre === null) throw notFound('Cadre not found');
+
+      await prisma.$transaction(async (tx) => {
+        const updated = await tx.cadre.update({ where: { id }, data: { deletedAt: new Date() } });
+        await writeAuditLog(tx, {
+          actorId,
+          action: 'cadre.delete',
+          entityType: 'cadre',
+          entityId: String(id),
+          before: { name: cadre.name, deletedAt: null },
+          after: { deletedAt: updated.deletedAt!.toISOString() },
+        });
+        await writeOutboxEvent(tx, {
+          aggregateType: 'cadre',
+          aggregateId: String(id),
+          eventType: 'cadre.deleted',
+          payload: { cadreId: id, actorId },
+        });
+      });
     },
 
     async importCadres(rows, actorId) {

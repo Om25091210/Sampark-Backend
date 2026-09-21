@@ -2036,3 +2036,105 @@ describe('cadres permanentStatus filter (this task)', () => {
     await app.close();
   });
 });
+
+// ── Delete (Task 2, super_admin) ──────────────────────────────────────────────
+describe('cadres delete (super_admin)', () => {
+  const DEL_TOKEN = 'DELFIXTURE';
+  const created: number[] = [];
+
+  const makeTarget = async (suffix: string): Promise<number> => {
+    const c = await prisma.cadre.create({
+      data: {
+        name: `${DEL_TOKEN} ${suffix}`, phone: '+910000001001', thana: 'बीजापुर',
+        currentAddress: 'Delete fixture', designation: 'Fixture', category: 'surrendered',
+        alertLevel: 'normal', aliases: [],
+      },
+    });
+    created.push(c.id);
+    return c.id;
+  };
+
+  afterAll(async () => {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'cadre', entityId: { in: created.map(String) } } });
+    await prisma.outboxEvent.deleteMany({ where: { aggregateType: 'cadre', aggregateId: { in: created.map(String) } } });
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('rejects an unauthenticated call with 401', async () => {
+    const app = await makeApp();
+    const id = await makeTarget('unauth');
+    const res = await app.inject({ method: 'DELETE', url: `/api/v1/cadres/${id}` });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('rejects an admin JWT with 403 (delete is super_admin-tier)', async () => {
+    const app = await makeApp();
+    const id = await makeTarget('admin-403');
+    const res = await app.inject({ method: 'DELETE', url: `/api/v1/cadres/${id}`, headers: auth(adminToken) });
+    expect(res.statusCode).toBe(403);
+    expect((await prisma.cadre.findUniqueOrThrow({ where: { id } })).deletedAt).toBeNull();
+    await app.close();
+  });
+
+  it('rejects an officer JWT with 403', async () => {
+    const app = await makeApp();
+    const id = await makeTarget('officer-403');
+    const res = await app.inject({ method: 'DELETE', url: `/api/v1/cadres/${id}`, headers: auth(officerToken) });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('a non-existent id is a 404', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'DELETE', url: '/api/v1/cadres/999999999', headers: auth(superAdminToken) });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('super_admin delete → 204, sets deletedAt, audits + outboxes, and disappears from the default list', async () => {
+    const app = await makeApp();
+    const id = await makeTarget('happy');
+    const res = await app.inject({ method: 'DELETE', url: `/api/v1/cadres/${id}`, headers: auth(superAdminToken) });
+    expect(res.statusCode).toBe(204);
+
+    const updated = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(updated.deletedAt).not.toBeNull();
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.delete' },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit?.hash).toBeTruthy();
+
+    const event = await prisma.outboxEvent.findFirst({
+      where: { aggregateType: 'cadre', aggregateId: String(id), eventType: 'cadre.deleted' },
+    });
+    expect(event).not.toBeNull();
+
+    // Default list/search already excludes deletedAt rows -- confirm the deleted
+    // cadre is genuinely gone from the caller-facing view, not just flagged.
+    const listRes = await app.inject({
+      method: 'GET', url: `/api/v1/cadres?search=${DEL_TOKEN}`, headers: auth(superAdminToken),
+    });
+    const ids = (listRes.json() as ListBody).data.map((r) => r.id);
+    expect(ids).not.toContain(id);
+
+    // getById still 404s for everyone -- a soft-deleted cadre is not independently
+    // "reopenable" the way a deactivated user is; it stays queryable only via the
+    // audit log/direct DB access, per this task's read-only-for-audit requirement.
+    const getRes = await app.inject({ method: 'GET', url: `/api/v1/cadres/${id}`, headers: auth(superAdminToken) });
+    expect(getRes.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('deleting an already-deleted cadre is a 404, not a silent success or a crash', async () => {
+    const app = await makeApp();
+    const id = await makeTarget('double-delete');
+    const first = await app.inject({ method: 'DELETE', url: `/api/v1/cadres/${id}`, headers: auth(superAdminToken) });
+    expect(first.statusCode).toBe(204);
+    const second = await app.inject({ method: 'DELETE', url: `/api/v1/cadres/${id}`, headers: auth(superAdminToken) });
+    expect(second.statusCode).toBe(404);
+    await app.close();
+  });
+});

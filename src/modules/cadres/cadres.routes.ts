@@ -333,6 +333,31 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.delete(
+    '/cadres/:id',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Soft-delete a cadre (super_admin)',
+        description:
+          'SOFT delete — sets `deletedAt`, exactly like the `/users/:userId` deactivate route. ' +
+          'The cadre disappears from every default list/search/filter (which already exclude ' +
+          '`deletedAt: null` rows) but the row itself, and everything still pointing at it ' +
+          '(reports, change/create requests, notifications), is left in place for audit — ' +
+          'never hard-deleted, never cascaded.',
+        security: bearerAuth,
+        params: zodToJson(cadreIdParam),
+        response: { 204: emptyResponse('Deleted') },
+      },
+    },
+    async (request, reply) => {
+      const { id } = cadreIdParam.parse(request.params);
+      await service.remove(id, request.authUser!.sub);
+      return reply.code(204).send();
+    },
+  );
+
   app.post(
     '/cadres/:cadreId/transfer',
     {
