@@ -233,6 +233,7 @@ model User {
 
   // ADR-064. Proforma ladder (mirrors the change/create relations above).
   lastEditedProformaAs         CadreProformaA[]        @relation("ProformaALastEditor")
+  lastEditedProformaBs         CadreProformaB[]        @relation("ProformaBLastEditor")
   submittedProformaChanges     ProformaChangeRequest[] @relation("ProformaChangeSubmitter")
   adminApprovedProformaChanges ProformaChangeRequest[] @relation("ProformaChangeAdminApprover")
   superApprovedProformaChanges ProformaChangeRequest[] @relation("ProformaChangeSuperAdminApprover")
@@ -390,6 +391,7 @@ model Cadre {
   createRequest          CadreCreateRequest?     @relation("CadreFromCreateRequest")
   // ADR-064.
   proformaA              CadreProformaA?
+  proformaBs             CadreProformaB[]
   proformaChangeRequests ProformaChangeRequest[]
 
   @@index([category])
@@ -777,6 +779,83 @@ model ProformaChangeRequest {
   @@index([cadreId])
   @@index([submittedById])
   @@map("proforma_change_requests")
+}
+
+// B Proforma (ADR-064 addendum). Recurring — one row per ~2-month filing period,
+// created/edited through the SAME ProformaChangeRequest ladder as CadreProformaA
+// (proformaType='b'), never a direct write. Unlike CadreProformaA this is NOT
+// 1:1 — `filedAt` orders the history, and there is no uniqueness constraint on
+// cadreId: a new period is a new row, not an edit of the last one.
+model CadreProformaB {
+  id      Int      @id @default(autoincrement())
+  cadreId Int      @map("cadre_id")
+  filedAt DateTime @default(now()) @map("filed_at")
+
+  // Items 1-3, 6, 6a — snapshotted from Cadre at fill time (editable). NOT a
+  // live join: a filing is a point-in-time record of what was confirmed for
+  // that period and must not silently change if the master profile is edited
+  // later. `nativeAddress`/`currentAddressDetails` are small structured
+  // objects (village/thana/district/state/phone per the source document's
+  // compound column) — Json, same posture as CadreProformaA's `relatives`.
+  fullNameWithAlias     String
+  nativeAddress         Json      @map("native_address")
+  currentAddressDetails Json      @map("current_address_details")
+  surrenderDate         DateTime? @map("surrender_date") @db.Date
+  surrenderPlaceAndBy   String?   @map("surrender_place_and_by")
+
+  // Items 4/4a-c, 5/5a-b, 8/8a, 10, 11, 13 — carry-forward fields. The value
+  // here is whatever the officer confirmed for THIS period (via the new-draft
+  // prefill, cadre-proforma-b.service.ts), not a live reference to the prior
+  // row — each filing is a complete, independent snapshot.
+  ownHouseDetails         String? @map("own_house_details")
+  agriculturalLandDetails String? @map("agricultural_land_details")
+  vehicleDetails          String? @map("vehicle_details")
+  familyEducationDetails  String? @map("family_education_details")
+  familyEmploymentDetails String? @map("family_employment_details")
+  priorCriminalCases      String? @map("prior_criminal_cases")
+  aadhaarVoterCardStatus  String? @map("aadhaar_voter_card_status")
+  bankDetails             String? @map("bank_details")
+  healthCondition         String? @map("health_condition")
+
+  // Items 6b/6c, 7/7a-c, 8b, 9/9a-b, 10b, 11b, 12/12a, 14-19 — time-bound to
+  // this period; always blank on a new filing, never carried forward.
+  handlerDetails               String? @map("handler_details")
+  liaisonOfficerDetails        String? @map("liaison_officer_details")
+  currentWorkTypeAndPlace      String? @map("current_work_type_and_place")
+  employerDetails              String? @map("employer_details")
+  wageDetails                  String? @map("wage_details")
+  newCriminalCases             String? @map("new_criminal_cases")
+  fullRewardReceivedDetails    String? @map("full_reward_received_details")
+  pendingRewardStatus          String? @map("pending_reward_status")
+  applicationDateAndPlace      String? @map("application_date_and_place")
+  applicationStatus            String? @map("application_status")
+  rewardWithdrawn              String? @map("reward_withdrawn")
+  rewardUsageDetails           String? @map("reward_usage_details")
+  currentMaoistContact         String? @map("current_maoist_contact")
+  contactWithWhom              String? @map("contact_with_whom")
+  newSkillsLearned             String? @map("new_skills_learned")
+  needsAndRequirements         String? @map("needs_and_requirements")
+  maoistMovementInfo           String? @map("maoist_movement_info")
+  maoistContactAttempt         String? @map("maoist_contact_attempt")
+  otherSurrenderedArrestedInfo String? @map("other_surrendered_arrested_info")
+  anyProblems                  String? @map("any_problems")
+
+  // Item 20 — mobile-camera-only capture (reuses the report-photo camera-only
+  // flow client-side). Durable S3 key, never a presigned URL, same convention
+  // as CadreProformaA.fingerprintKey.
+  currentPhotoKey String? @map("current_photo_key")
+
+  deletedAt      DateTime? @map("deleted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  lastEditedAt   DateTime? @map("last_edited_at")
+  lastEditedById Int?      @map("last_edited_by_id")
+
+  cadre        Cadre @relation(fields: [cadreId], references: [id])
+  lastEditedBy User? @relation("ProformaBLastEditor", fields: [lastEditedById], references: [id])
+
+  @@index([cadreId, filedAt])
+  @@map("cadre_proforma_b")
 }
 
 // ─── Auth support ──────────────────────────────────────────────────────────────

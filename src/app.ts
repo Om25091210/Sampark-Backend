@@ -21,6 +21,7 @@ import { cadresRoutes } from './modules/cadres/cadres.routes.js';
 import { cadreChangesRoutes } from './modules/cadre-changes/cadre-changes.routes.js';
 import { cadreCreateRequestsRoutes } from './modules/cadre-create-requests/cadre-create-requests.routes.js';
 import { cadreProformaARoutes } from './modules/cadre-proforma-a/cadre-proforma-a.routes.js';
+import { cadreProformaBRoutes } from './modules/cadre-proforma-b/cadre-proforma-b.routes.js';
 import { officersRoutes } from './modules/officers/officers.routes.js';
 import { reportsRoutes } from './modules/reports/reports.routes.js';
 import { reportsMediaRoutes } from './modules/reports-media/reports-media.routes.js';
@@ -159,6 +160,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       await api.register(cadreChangesRoutes); // ADR-026
       await api.register(cadreCreateRequestsRoutes); // Cadre creation ladder
       await api.register(cadreProformaARoutes); // ADR-064: AB Proforma ladder
+      await api.register(cadreProformaBRoutes); // ADR-064: B Proforma ladder
       await api.register(officersRoutes);
       await api.register(reportsRoutes);
       await api.register(reportsMediaRoutes);
