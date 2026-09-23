@@ -120,6 +120,28 @@ describe('B Proforma (ADR-064 addendum)', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it('this task: a non-surrendered (jail/thana) cadre is refused — proforma only applies to the surrendered register', async () => {
+    const jailCadre = await prisma.cadre.create({
+      data: {
+        name: 'TEST CADRE PROFORMA B JAIL', phone: '+910000000902', thana: 'बीजापुर', currentAddress: 'फिक्स्चर पता',
+        designation: 'Fixture', category: 'jail', alertLevel: 'normal', aliases: [],
+      },
+    });
+    const app = await makeApp();
+    const list = await app.inject({
+      method: 'GET', url: `/api/v1/cadres/${jailCadre.id}/proforma-b`, headers: auth(officerToken),
+    });
+    expect(list.statusCode).toBe(400);
+    const create = await app.inject({
+      method: 'POST', url: `/api/v1/cadres/${jailCadre.id}/proforma-b`,
+      headers: auth(officerToken), payload: { fields: minimalFields() },
+    });
+    expect(create.statusCode).toBe(400);
+    expect((create.json() as { error: { code: string } }).error.code).toBe('CADRE_NOT_SURRENDERED');
+    await prisma.cadre.delete({ where: { id: jailCadre.id } });
+    await app.close();
+  });
+
   it('lists an empty history before any filing exists', async () => {
     const app = await makeApp();
     const res = await app.inject({

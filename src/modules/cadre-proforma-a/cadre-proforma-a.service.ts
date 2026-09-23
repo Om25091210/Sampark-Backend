@@ -143,12 +143,19 @@ export interface CadreProformaAService {
 }
 
 export function makeCadreProformaAService({ prisma, storage, mediaUrlTtlSeconds }: CadreProformaADeps): CadreProformaAService {
+  // This task: ADR-064 scopes both paper proformas to "SP Bijapur's surrendered-cadre
+  // master file" — a jail-register or thana-level cadre has no AB/B paperwork to
+  // digitise. The mobile entry point already hides itself for non-surrendered
+  // cadres; this is the backstop for a direct API call.
   async function assertCadreInScope(cadreId: number, actor: Actor): Promise<void> {
     const cadre = await prisma.cadre.findFirst({
       where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(actor.scope) },
-      select: { id: true },
+      select: { id: true, category: true },
     });
     if (cadre === null) throw notFound('Cadre not found');
+    if (cadre.category !== 'surrendered') {
+      throw badRequest('Proforma is only available for surrendered cadres', 'CADRE_NOT_SURRENDERED');
+    }
   }
 
   async function loadOrThrow(id: number): Promise<Row> {
