@@ -7,6 +7,8 @@ import type { StorageProvider } from '../../lib/storage.js';
 import { AppError } from '../../lib/errors.js';
 import type { ReportsService } from '../reports/reports.service.js';
 import type { Actor, CadreChangesService } from '../cadre-changes/cadre-changes.service.js';
+import type { CadreProformaAService } from '../cadre-proforma-a/cadre-proforma-a.service.js';
+import type { CadreProformaBService } from '../cadre-proforma-b/cadre-proforma-b.service.js';
 import type { SyncPullQuery, SyncPushBody } from './sync.schema.js';
 
 export interface SyncDeps {
@@ -19,6 +21,11 @@ export interface SyncDeps {
   // write mechanism with its own rules.
   reports: Pick<ReportsService, 'create'>;
   cadreChanges: Pick<CadreChangesService, 'submit'>;
+  // ADR-064 offline addendum. Same posture — submitCreate/submitEdit already
+  // dedupe on idempotency_key, so the push path is a thin replay, not a second
+  // write mechanism.
+  proformaA: Pick<CadreProformaAService, 'submitCreate' | 'submitEdit'>;
+  proformaB: Pick<CadreProformaBService, 'submitCreate' | 'submitEdit'>;
 }
 
 // Hard cap per entity, per pull. Originally 2000 against a ~1,790-cadre baseline — too
@@ -70,6 +77,8 @@ export interface SyncPushItemResult {
 export interface SyncPushResult {
   reports: SyncPushItemResult[];
   cadreChangeRequests: SyncPushItemResult[];
+  proformaAChangeRequests: SyncPushItemResult[];
+  proformaBChangeRequests: SyncPushItemResult[];
 }
 
 export interface SyncService {
@@ -122,7 +131,7 @@ function describeError(err: unknown, log: FastifyBaseLogger, context: Record<str
   return 'आंतरिक त्रुटि — बाद में पुनः प्रयास करें';
 }
 
-export function makeSyncService({ prisma, log, storage, mediaUrlTtlSeconds, reports, cadreChanges }: SyncDeps): SyncService {
+export function makeSyncService({ prisma, log, storage, mediaUrlTtlSeconds, reports, cadreChanges, proformaA, proformaB }: SyncDeps): SyncService {
   return {
     async pull(query, scope, actorRole) {
       // Captured once, BEFORE any read runs, and handed back as the next cursor. A
@@ -305,7 +314,66 @@ export function makeSyncService({ prisma, log, storage, mediaUrlTtlSeconds, repo
         }
       }
 
-      return { reports: reportResults, cadreChangeRequests: changeResults };
+      // ADR-064 offline addendum. Same serial-not-parallel reasoning as the change
+      // requests above, and same per-item isolation — one bad item never sinks the
+      // batch.
+      const proformaAResults: SyncPushItemResult[] = [];
+      for (const item of body.proformaAChangeRequests) {
+        try {
+          const req =
+            item.kind === 'create'
+              ? await proformaA.submitCreate(
+                  item.cadre_id,
+                  { fields: item.fields, note: item.note, idempotency_key: item.idempotency_key },
+                  actor,
+                )
+              : await proformaA.submitEdit(
+                  item.cadre_id,
+                  { changes: item.changes, note: item.note, idempotency_key: item.idempotency_key },
+                  actor,
+                );
+          proformaAResults.push({ clientKey: item.idempotency_key, status: 'created', serverId: req.id });
+        } catch (err) {
+          proformaAResults.push({
+            clientKey: item.idempotency_key,
+            status: 'error',
+            error: describeError(err, log, { entity: 'proformaAChangeRequest', cadreId: item.cadre_id }),
+          });
+        }
+      }
+
+      const proformaBResults: SyncPushItemResult[] = [];
+      for (const item of body.proformaBChangeRequests) {
+        try {
+          const req =
+            item.kind === 'create'
+              ? await proformaB.submitCreate(
+                  item.cadre_id,
+                  { fields: item.fields, note: item.note, idempotency_key: item.idempotency_key },
+                  actor,
+                )
+              : await proformaB.submitEdit(
+                  item.cadre_id,
+                  item.b_id,
+                  { changes: item.changes, note: item.note, idempotency_key: item.idempotency_key },
+                  actor,
+                );
+          proformaBResults.push({ clientKey: item.idempotency_key, status: 'created', serverId: req.id });
+        } catch (err) {
+          proformaBResults.push({
+            clientKey: item.idempotency_key,
+            status: 'error',
+            error: describeError(err, log, { entity: 'proformaBChangeRequest', cadreId: item.cadre_id }),
+          });
+        }
+      }
+
+      return {
+        reports: reportResults,
+        cadreChangeRequests: changeResults,
+        proformaAChangeRequests: proformaAResults,
+        proformaBChangeRequests: proformaBResults,
+      };
     },
   };
 }

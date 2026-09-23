@@ -9,7 +9,7 @@ import { signAccessToken } from '../../lib/tokens.js';
 const prisma = new PrismaClient();
 const config = testConfig();
 // Distinct phone block so this suite never collides with the others.
-const PHONES = ['+919000000070', '+919000000071', '+919000000072'];
+const PHONES = ['+919000000070', '+919000000071', '+919000000072', '+919000000073'];
 const CADRE_IN_SCOPE = 'TEST CADRE SYNC IN SCOPE';
 const CADRE_OUT_OF_SCOPE = 'TEST CADRE SYNC OUT OF SCOPE';
 const CADRE_NARROWING = 'TEST CADRE SYNC NARROWING';
@@ -17,9 +17,11 @@ const CADRE_NARROWING = 'TEST CADRE SYNC NARROWING';
 let officerId = 0;
 let adminId = 0;
 let viewerId = 0;
+let superId = 0;
 let officerToken = '';
 let adminToken = '';
 let viewerToken = '';
+let superToken = '';
 let cadreInScopeId = 0;
 let cadreOutOfScopeId = 0;
 let cadreNarrowingId = 0;
@@ -47,6 +49,8 @@ interface PushItemResult {
 interface PushBody {
   reports: PushItemResult[];
   cadreChangeRequests: PushItemResult[];
+  proformaAChangeRequests: PushItemResult[];
+  proformaBChangeRequests: PushItemResult[];
 }
 
 async function cleanupCadre(name: string): Promise<void> {
@@ -63,8 +67,48 @@ async function cleanupCadre(name: string): Promise<void> {
   await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: entityIds } } });
   await prisma.report.deleteMany({ where: { cadreId: cadre.id } });
   await prisma.cadreChangeRequest.deleteMany({ where: { cadreId: cadre.id } });
+  await prisma.proformaChangeRequest.deleteMany({ where: { cadreId: cadre.id } });
+  await prisma.cadreProformaB.deleteMany({ where: { cadreId: cadre.id } });
+  await prisma.cadreProformaA.deleteMany({ where: { cadreId: cadre.id } });
   await prisma.cadre.delete({ where: { id: cadre.id } });
 }
+
+// Every field is a required-but-nullable key on the Zod schema (no `.partial()`
+// at the top level), so a `create` push item must spell out every key — same
+// fixture shape as cadre-proforma-a.test.ts's MINIMAL_FIELDS.
+const MINIMAL_PROFORMA_A_FIELDS = {
+  party: null, fatherOccupation: null, spouseOccupation: null, subCaste: null, religion: null, placeOfBirth: null,
+  aadhaarNumber: null, identifierMobile: null, identifierEmail: null, socialMediaHandle: null,
+  rationCardNumber: null, voterIdNumber: null, drivingLicenseNumber: null, bankAccountNumber: null,
+  postOfficeAccountNumber: null, educationalQualification: null, occupation: null,
+  economicStatus: null, fingerprintKey: null,
+  height: null, build: null, complexion: null, distinguishingFeatures: null, hair: null,
+  eyebrows: null, eyes: null, irisColor: null, nose: null, teeth: null, lips: null, fingers: null,
+  chin: null, ears: null, face: null, beard: null, moustache: null, marksOrTattoos: null, deformity: null,
+  specialHabits: null, vulnerabilities: null, handwritingSampleKey: null, friendsAndAssociates: null,
+  childhoodFriends: null, classmates: null, organizationAssociatesChronological: null, relatives: null,
+  identifyingPoliceOfficers: null, otherPointsOfInterest: null,
+  priorArrestDetails: null, convictions: null, areaOfOperation: null,
+  sectionB: null, sectionC: null, sectionD: null,
+};
+
+const ADDRESS = { village: '', thana: '', district: '', state: '', phone: '' };
+const MINIMAL_PROFORMA_B_FIELDS = {
+  fullNameWithAlias: 'सिंक टेस्ट कैडर', nativeAddress: ADDRESS, currentAddressDetails: ADDRESS,
+  surrenderDate: null, surrenderPlaceAndBy: null,
+  ownHouseDetails: null, agriculturalLandDetails: null, vehicleDetails: null,
+  familyEducationDetails: null, familyEmploymentDetails: null,
+  priorCriminalCases: null, aadhaarVoterCardStatus: null, bankDetails: null, healthCondition: null,
+  handlerDetails: null, liaisonOfficerDetails: null, currentWorkTypeAndPlace: null,
+  employerDetails: null, wageDetails: null, newCriminalCases: null,
+  fullRewardReceivedDetails: null, pendingRewardStatus: null,
+  applicationDateAndPlace: null, applicationStatus: null,
+  rewardWithdrawn: null, rewardUsageDetails: null,
+  currentMaoistContact: null, contactWithWhom: null,
+  newSkillsLearned: null, needsAndRequirements: null, maoistMovementInfo: null,
+  maoistContactAttempt: null, otherSurrenderedArrestedInfo: null, anyProblems: null,
+  currentPhotoKey: null,
+};
 
 beforeAll(async () => {
   const officer = await prisma.user.upsert({
@@ -84,9 +128,15 @@ beforeAll(async () => {
     update: { deletedAt: null, role: 'viewer', name: 'Sync Viewer' },
     create: { phone: PHONES[2]!, name: 'Sync Viewer', role: 'viewer' },
   });
+  const superAdmin = await prisma.user.upsert({
+    where: { phone: PHONES[3] },
+    update: { deletedAt: null, role: 'super_admin', name: 'Sync Super' },
+    create: { phone: PHONES[3]!, name: 'Sync Super', role: 'super_admin' },
+  });
   officerId = officer.id;
   adminId = admin.id;
   viewerId = viewer.id;
+  superId = superAdmin.id;
 
   await cleanupCadre(CADRE_IN_SCOPE);
   await cleanupCadre(CADRE_OUT_OF_SCOPE);
@@ -120,6 +170,7 @@ beforeAll(async () => {
   officerToken = await signAccessToken({ sub: officerId, role: 'officer' }, config.jwtSecret, '15m');
   adminToken = await signAccessToken({ sub: adminId, role: 'admin' }, config.jwtSecret, '15m');
   viewerToken = await signAccessToken({ sub: viewerId, role: 'viewer' }, config.jwtSecret, '15m');
+  superToken = await signAccessToken({ sub: superId, role: 'super_admin' }, config.jwtSecret, '15m');
 });
 
 afterAll(async () => {
@@ -260,6 +311,80 @@ describe('sync', () => {
     const rows = await prisma.cadreChangeRequest.findMany({ where: { cadreId: cadreInScopeId } });
     const incidentRows = rows.filter((r) => 'incident' in (r.changes as Record<string, unknown>));
     expect(incidentRows).toHaveLength(1);
+    await app.close();
+  });
+
+  it('POST /sync/push creates then edits an AB Proforma, idempotently (ADR-064 offline addendum)', async () => {
+    const app = await makeApp();
+    const createKey = randomUUID();
+
+    const create = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: {
+        proformaAChangeRequests: [
+          { kind: 'create', idempotency_key: createKey, cadre_id: cadreInScopeId, fields: MINIMAL_PROFORMA_A_FIELDS },
+        ],
+      },
+    });
+    expect(create.statusCode).toBe(200);
+    const createBody = create.json() as PushBody;
+    expect(createBody.proformaAChangeRequests[0]!.status).toBe('created');
+
+    // Replayed create push (e.g. the device's own ack was lost) — same serverId, no duplicate.
+    const replay = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: {
+        proformaAChangeRequests: [
+          { kind: 'create', idempotency_key: createKey, cadre_id: cadreInScopeId, fields: MINIMAL_PROFORMA_A_FIELDS },
+        ],
+      },
+    });
+    expect((replay.json() as PushBody).proformaAChangeRequests[0]!.serverId).toBe(createBody.proformaAChangeRequests[0]!.serverId);
+
+    const editKey = randomUUID();
+    const edit = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: {
+        proformaAChangeRequests: [
+          { kind: 'edit', idempotency_key: editKey, cadre_id: cadreInScopeId, changes: { occupation: 'सिंक टेस्ट व्यवसाय' } },
+        ],
+      },
+    });
+    expect(edit.statusCode).toBe(200);
+    expect((edit.json() as PushBody).proformaAChangeRequests[0]!.status).toBe('created');
+    await app.close();
+  });
+
+  it('POST /sync/push creates then edits a B Proforma filing, idempotently', async () => {
+    const app = await makeApp();
+    const createKey = randomUUID();
+
+    const create = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: {
+        proformaBChangeRequests: [
+          { kind: 'create', idempotency_key: createKey, cadre_id: cadreInScopeId, fields: MINIMAL_PROFORMA_B_FIELDS },
+        ],
+      },
+    });
+    expect(create.statusCode).toBe(200);
+    const createBody = create.json() as PushBody;
+    expect(createBody.proformaBChangeRequests[0]!.status).toBe('created');
+    const bId = await prisma.proformaChangeRequest
+      .findUniqueOrThrow({ where: { idempotencyKey: createKey } })
+      .then((r) => r.targetId!);
+
+    const editKey = randomUUID();
+    const edit = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: {
+        proformaBChangeRequests: [
+          { kind: 'edit', idempotency_key: editKey, cadre_id: cadreInScopeId, b_id: bId, changes: { anyProblems: 'सिंक टेस्ट समस्या' } },
+        ],
+      },
+    });
+    expect(edit.statusCode).toBe(200);
+    expect((edit.json() as PushBody).proformaBChangeRequests[0]!.status).toBe('created');
     await app.close();
   });
 

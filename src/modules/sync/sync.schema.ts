@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { createReportBodyShape, checkDeathRequirements } from '../reports/reports.schema.js';
 import { changeableFieldsSchema } from '../cadre-changes/cadre-changes.schema.js';
+import { proformaAFieldsSchema, proformaAFieldsPartial } from '../cadre-proforma-a/cadre-proforma-a.schema.js';
+import { proformaBFieldsSchema, proformaBFieldsPartial } from '../cadre-proforma-b/cadre-proforma-b.schema.js';
 
 // ─── Pull (server → device) ────────────────────────────────────────────────────
 //
@@ -48,6 +50,61 @@ export const syncPushBody = z.object({
         ),
         note: z.string().trim().max(1000).optional(),
       }),
+    )
+    .max(100)
+    .default([]),
+  // ADR-064 offline addendum. Same ADR-013 idempotency pattern, generalised to the
+  // proforma ladder. `kind` discriminates create (no existing row — `fields` is the
+  // full record, mirrors CadreCreateRequest.draft) from edit (`changes` is a partial
+  // diff against the record the device last saw, mirrors cadreChangeRequests above).
+  proformaAChangeRequests: z
+    .array(
+      z.discriminatedUnion('kind', [
+        z.object({
+          kind: z.literal('create'),
+          idempotency_key: z.string().uuid(),
+          cadre_id: z.number().int().positive(),
+          fields: proformaAFieldsSchema,
+          note: z.string().trim().max(1000).optional(),
+        }),
+        z.object({
+          kind: z.literal('edit'),
+          idempotency_key: z.string().uuid(),
+          cadre_id: z.number().int().positive(),
+          changes: proformaAFieldsPartial.refine(
+            (c) => Object.keys(c).length > 0,
+            'at least one field must be proposed',
+          ),
+          note: z.string().trim().max(1000).optional(),
+        }),
+      ]),
+    )
+    .max(100)
+    .default([]),
+  // Same shape, plus `b_id` (required on `edit` — which filing this changes; a
+  // `create` has none yet, same reasoning as CadreProformaB's targetId).
+  proformaBChangeRequests: z
+    .array(
+      z.discriminatedUnion('kind', [
+        z.object({
+          kind: z.literal('create'),
+          idempotency_key: z.string().uuid(),
+          cadre_id: z.number().int().positive(),
+          fields: proformaBFieldsSchema,
+          note: z.string().trim().max(1000).optional(),
+        }),
+        z.object({
+          kind: z.literal('edit'),
+          idempotency_key: z.string().uuid(),
+          cadre_id: z.number().int().positive(),
+          b_id: z.number().int().positive(),
+          changes: proformaBFieldsPartial.refine(
+            (c) => Object.keys(c).length > 0,
+            'at least one field must be proposed',
+          ),
+          note: z.string().trim().max(1000).optional(),
+        }),
+      ]),
     )
     .max(100)
     .default([]),

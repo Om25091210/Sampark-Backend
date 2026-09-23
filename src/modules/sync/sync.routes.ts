@@ -4,6 +4,8 @@ import { makeSyncService } from './sync.service.js';
 import { syncPullQuery, syncPushBody } from './sync.schema.js';
 import { makeReportsService } from '../reports/reports.service.js';
 import { makeCadreChangesService } from '../cadre-changes/cadre-changes.service.js';
+import { makeCadreProformaAService } from '../cadre-proforma-a/cadre-proforma-a.service.js';
+import { makeCadreProformaBService } from '../cadre-proforma-b/cadre-proforma-b.service.js';
 import { forbidden } from '../../lib/errors.js';
 import { bearerAuth, jsonResponse, zodToJson } from '../../lib/openapi.js';
 
@@ -32,6 +34,18 @@ export async function syncRoutes(app: FastifyInstance): Promise<void> {
     mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
     cadreChanges,
   });
+  const proformaA = makeCadreProformaAService({
+    prisma: app.prisma,
+    log: app.log,
+    storage: app.storage,
+    mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+  });
+  const proformaB = makeCadreProformaBService({
+    prisma: app.prisma,
+    log: app.log,
+    storage: app.storage,
+    mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
+  });
   const service = makeSyncService({
     prisma: app.prisma,
     log: app.log,
@@ -39,6 +53,8 @@ export async function syncRoutes(app: FastifyInstance): Promise<void> {
     mediaUrlTtlSeconds: app.config.mediaUrlTtlSeconds,
     reports,
     cadreChanges,
+    proformaA,
+    proformaB,
   });
 
   app.get(
@@ -93,6 +109,8 @@ export async function syncRoutes(app: FastifyInstance): Promise<void> {
           200: jsonResponse('Per-item results, in the SAME order as the request', {
             reports: [{ clientKey: '9f1c2b7e-...', status: 'created', serverId: 501 }],
             cadreChangeRequests: [{ clientKey: '4b7e6a4d-...', status: 'created', serverId: 88 }],
+            proformaAChangeRequests: [{ clientKey: '2a1e5c3f-...', status: 'created', serverId: 12 }],
+            proformaBChangeRequests: [{ clientKey: '7d4f8b2a-...', status: 'created', serverId: 34 }],
           }),
         },
       },
