@@ -129,6 +129,16 @@ export type HierarchyRow = z.infer<typeof hierarchyRow>;
 // `hierarchyRow`, "assignedCadres" here means every live cadre AT that thana
 // (Cadre.thana), not just those with an assigned officer — a thana's reporting
 // completion is a fact about the thana, not about staffing.
+//
+// Also unlike `hierarchyRow`: `currentCadres`/`overdueCadres`/`reportingCompletion`
+// here are COVERAGE ("has this cadre ever had a live report filed, at all"), not
+// RECENCY ("within the last REPORTING_CADENCE_DAYS", which is what those same
+// field names mean on `hierarchyRow` and on `/stats/me`). A deliberate, client-
+// requested divergence — see stats.service.ts's `hierarchy()` thana branch for
+// the reasoning. Same field NAMES on purpose (the client already reads
+// `reportingCompletion` off a thana row and needs no contract change), different
+// MEANING — this is its own schema, never shared with `hierarchyRow`, precisely
+// so the two can diverge like this safely.
 export const hierarchyThanaRow = z.object({
   thana: z.string(),
   subDivision: z.string().nullable(),

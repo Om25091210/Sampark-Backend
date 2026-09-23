@@ -349,40 +349,55 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       // reporting completion is a fact about the thana, not about staffing. HQ gets
       // all 22 canonical thanas; an admin gets only their own sub-division's, via
       // the same `cadreScopeWhere` every other scoped query uses (ADR-044).
+      //
+      // DELIBERATE DIVERGENCE from hierarchyRow's (officer/admin) meaning, per the
+      // client's explicit request: `currentCadres` here is COVERAGE — has this cadre
+      // EVER had a live report filed, no matter how long ago — not RECENCY (a report
+      // within the last REPORTING_CADENCE_DAYS, which is what the officer/admin rows
+      // and /stats/me still mean). "थाना पूर्णता दर" is meant to answer "how much of
+      // this thana's register has been reported on at all so far", not "how current
+      // is it right now" — those are different questions, and conflating them under
+      // one number was the bug being fixed here. `hierarchyThanaRow` is its own Zod
+      // schema (not shared with hierarchyRow), so this divergence costs nothing on
+      // the wire — only the field's MEANING changes, not its name or shape.
+      //
+      // `EXISTS`, not a `COUNT(r.*) > 0` join, is what makes this a per-CADRE
+      // (unique) count rather than a per-REPORT one — a cadre with five reports
+      // still contributes exactly one to `assigned`'s COUNT(*) and is filtered in
+      // or out of the coverage bucket once, not five times.
       if (opts?.by === 'thana') {
         const scopedThanas = scope.kind === 'all' ? CANONICAL_THANAS : scope.thanas;
 
-        const grouped = await prisma.$queryRaw<{ thana: string; assigned: bigint; overdue: bigint }[]>`
+        const grouped = await prisma.$queryRaw<{ thana: string; assigned: bigint; reported: bigint }[]>`
           SELECT c.thana AS thana,
                  COUNT(*) AS assigned,
                  COUNT(*) FILTER (
-                   WHERE NOT EXISTS (
+                   WHERE EXISTS (
                      SELECT 1 FROM reports r
-                     WHERE r.cadre_id = c.id AND r.deleted_at IS NULL AND r.reported_at >= ${monthAgo}
+                     WHERE r.cadre_id = c.id AND r.deleted_at IS NULL
                    )
-                 ) AS overdue
+                 ) AS reported
           FROM cadres c
           WHERE c.deleted_at IS NULL
             ${scope.kind === 'all' ? Prisma.empty : Prisma.sql`AND c.thana IN (${Prisma.join(scope.thanas)})`}
           GROUP BY c.thana
         `;
         const byThana = new Map(
-          grouped.map((g) => [nfc(g.thana), { assigned: Number(g.assigned), overdue: Number(g.overdue) }]),
+          grouped.map((g) => [nfc(g.thana), { assigned: Number(g.assigned), reported: Number(g.reported) }]),
         );
 
         // Every scoped thana gets a row, even one with zero cadres (0/0/0%) — a
         // completion list that silently drops empty thanas hides a data gap as an
         // absence rather than showing it.
         const thanaRows: HierarchyThanaRow[] = scopedThanas.map((t) => {
-          const g = byThana.get(nfc(t)) ?? { assigned: 0, overdue: 0 };
-          const current = g.assigned - g.overdue;
+          const g = byThana.get(nfc(t)) ?? { assigned: 0, reported: 0 };
           return {
             thana: t,
             subDivision: subDivisionForThana(t),
             assignedCadres: g.assigned,
-            overdueCadres: g.overdue,
-            currentCadres: current,
-            reportingCompletion: g.assigned === 0 ? 0 : Math.round((current / g.assigned) * 100),
+            overdueCadres: g.assigned - g.reported,
+            currentCadres: g.reported,
+            reportingCompletion: g.assigned === 0 ? 0 : Math.round((g.reported / g.assigned) * 100),
           };
         });
 
