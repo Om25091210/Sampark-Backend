@@ -34,6 +34,10 @@ const validBody = () => ({
   current_activity: 'खेती कर रहा है',
   gps_coords: { latitude: 18.79, longitude: 80.9, address: 'बीजापुर' },
   is_home_address: true,
+  // This task: an 'alive' report now requires at least one photo (checkDeathRequirements
+  // in reports.schema.ts) — the default valid body needs one so tests unrelated to photos
+  // don't spuriously 400.
+  front_photo_key: 'reports/default-front.jpg',
 });
 
 // Removes every report (and its audit/outbox rows) written against the test cadre,
@@ -561,7 +565,16 @@ describe('reports', () => {
       const app = await makeApp();
       const res = await app.inject({
         method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
-        headers: auth(officerToken), payload: { ...validBody(), current_phone: CADRE_ORIGINAL_PHONE },
+        headers: auth(officerToken),
+        // front_photo_key excluded (would itself propose an avatarKey change) and
+        // replaced with a non-slot photo_keys entry — still a valid 'alive' report,
+        // just not one that touches any avatar slot.
+        payload: {
+          ...validBody(),
+          current_phone: CADRE_ORIGINAL_PHONE,
+          front_photo_key: undefined,
+          photo_keys: ['reports/gallery-only.jpg'],
+        },
       });
       expect(res.statusCode).toBe(201);
       const change = await prisma.cadreChangeRequest.findFirst({ where: { cadreId } });
@@ -573,7 +586,11 @@ describe('reports', () => {
       const app = await makeApp();
       const res = await app.inject({
         method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
-        headers: auth(superAdminToken), payload: validBody(),
+        headers: auth(superAdminToken),
+        // front_photo_key excluded (would itself apply an avatarKey change
+        // immediately — super_admin edits bypass the approval ladder — and leak
+        // into later tests) and replaced with a non-slot photo_keys entry.
+        payload: { ...validBody(), front_photo_key: undefined, photo_keys: ['reports/gallery-only.jpg'] },
       });
       expect(res.statusCode).toBe(201);
 
@@ -606,8 +623,11 @@ describe('reports', () => {
       expect(second.statusCode).toBe(201);
 
       // Still exactly one pending phone request — the second attempt did not
-      // create a duplicate or clobber the first.
-      const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
+      // create a duplicate or clobber the first. Filtered to phone-change rows:
+      // validBody()'s default photo also proposes (and collides on) an avatarKey
+      // change, which is a separate row not under test here.
+      const allPending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
+      const pending = allPending.filter((c) => Object.keys(c.changes as Record<string, unknown>)[0] === 'phone');
       expect(pending).toHaveLength(1);
       await app.close();
     });
@@ -652,7 +672,9 @@ describe('reports', () => {
       const res = await app.inject({
         method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
         headers: auth(officerToken),
-        payload: { ...validBody(), right_photo_key: 'reports/right-only.jpg' },
+        // front_photo_key cleared: validBody()'s default would otherwise ALSO
+        // propose an avatarKey change, defeating "only that slot is proposed".
+        payload: { ...validBody(), front_photo_key: undefined, right_photo_key: 'reports/right-only.jpg' },
       });
       expect(res.statusCode).toBe(201);
 
@@ -668,7 +690,12 @@ describe('reports', () => {
       const app = await makeApp();
       const res = await app.inject({
         method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
-        headers: auth(officerToken), payload: validBody(),
+        // front_photo_key excluded (would itself propose an avatarKey change,
+        // defeating this test's point) but a non-slot photo_keys entry included —
+        // an 'alive' report must carry at least one photo, just not necessarily
+        // one of the three positional slots.
+        headers: auth(officerToken),
+        payload: { ...validBody(), front_photo_key: undefined, photo_keys: ['reports/gallery-only.jpg'] },
       });
       expect(res.statusCode).toBe(201);
       const pending = await prisma.cadreChangeRequest.findMany({ where: { cadreId, status: 'pending' } });
@@ -779,6 +806,17 @@ describe('reports', () => {
         headers: auth(officerToken), payload: { ...base, specific_location: 'x', current_phone: 'x' },
       });
       expect(missingActivity.statusCode).toBe(400);
+      await app.close();
+    });
+
+    it('this task: an alive report with no photo at all → 400', async () => {
+      const app = await makeApp();
+      const { front_photo_key, ...withoutPhoto } = validBody();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${cadreId}/reports`,
+        headers: auth(officerToken), payload: withoutPhoto,
+      });
+      expect(res.statusCode).toBe(400);
       await app.close();
     });
 

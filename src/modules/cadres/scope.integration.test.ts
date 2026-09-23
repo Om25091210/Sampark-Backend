@@ -144,6 +144,7 @@ describe('ADR-044 scope enforcement over HTTP', () => {
         person_status: 'alive', current_phone: '+919812345678', current_activity: 'x',
         gps_coords: { latitude: 18.79, longitude: 80.9, address: 'x' }, is_home_address: true,
         idempotency_key: '11111111-1111-4111-8111-111111111111',
+        front_photo_key: 'reports/scope-test-front.jpg',
       },
     });
     expect(post.statusCode).toBe(404);

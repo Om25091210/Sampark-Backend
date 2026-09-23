@@ -141,6 +141,10 @@ export function checkDeathRequirements(
     current_activity?: string;
     other_information?: string;
     death_date?: string;
+    photo_keys?: string[];
+    front_photo_key?: string;
+    right_photo_key?: string;
+    left_photo_key?: string;
   },
   ctx: z.RefinementCtx,
 ): void {
@@ -168,6 +172,23 @@ export function checkDeathRequirements(
     }
     if (!body.current_activity || body.current_activity.trim() === '') {
       ctx.addIssue({ code: 'custom', message: 'current_activity is required', path: ['current_activity'] });
+    }
+    // This task: an 'alive' report is evidentiary and must carry at least one
+    // identification photo. Any one of the three positional slots (or a legacy
+    // photo_keys entry) satisfies it — the backstop deliberately doesn't demand
+    // all three, only that the officer captured SOMETHING. 'dead' reports stay
+    // exempt (no requirement to photograph a corpse in the field).
+    const hasPhoto =
+      !!body.front_photo_key ||
+      !!body.right_photo_key ||
+      !!body.left_photo_key ||
+      (Array.isArray(body.photo_keys) && body.photo_keys.length > 0);
+    if (!hasPhoto) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'at least one photo is required when person_status is alive',
+        path: ['photo_keys'],
+      });
     }
   }
 }

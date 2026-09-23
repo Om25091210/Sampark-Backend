@@ -254,6 +254,7 @@ describe('sync', () => {
           person_status: 'alive',
           current_phone: '+919812345000',
           current_activity: 'खेती कर रहा है',
+          front_photo_key: 'reports/sync-push-front.jpg',
         },
       ],
     };
