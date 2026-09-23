@@ -231,6 +231,13 @@ model User {
   superApprovedCreateRequests CadreCreateRequest[] @relation("CreateReqSuperAdminApprover")
   decidedCreateRequests       CadreCreateRequest[] @relation("CreateReqDecider")
 
+  // ADR-064. Proforma ladder (mirrors the change/create relations above).
+  lastEditedProformaAs         CadreProformaA[]        @relation("ProformaALastEditor")
+  submittedProformaChanges     ProformaChangeRequest[] @relation("ProformaChangeSubmitter")
+  adminApprovedProformaChanges ProformaChangeRequest[] @relation("ProformaChangeAdminApprover")
+  superApprovedProformaChanges ProformaChangeRequest[] @relation("ProformaChangeSuperAdminApprover")
+  decidedProformaChanges       ProformaChangeRequest[] @relation("ProformaChangeDecider")
+
   configUpdates ConfigEntry[] @relation("ConfigUpdatedBy") // ADR-059
 
   @@map("users")
@@ -374,13 +381,16 @@ model Cadre {
   createdAt          DateTime          @default(now()) @map("created_at")
   updatedAt          DateTime          @updatedAt @map("updated_at")
 
-  assignedOfficer User?                @relation("CadreAssignedOfficer", fields: [assignedOfficerId], references: [id])
-  lastEditedBy    User?                @relation("CadreLastEditor", fields: [lastEditedById], references: [id]) // ADR-027
-  reports         Report[]
-  changeRequests  CadreChangeRequest[] // ADR-026
-  notifications   Notification[]
+  assignedOfficer        User?                   @relation("CadreAssignedOfficer", fields: [assignedOfficerId], references: [id])
+  lastEditedBy           User?                   @relation("CadreLastEditor", fields: [lastEditedById], references: [id]) // ADR-027
+  reports                Report[]
+  changeRequests         CadreChangeRequest[] // ADR-026
+  notifications          Notification[]
   // The create request this cadre was born from — absent for seeded/imported rows.
-  createRequest   CadreCreateRequest?  @relation("CadreFromCreateRequest")
+  createRequest          CadreCreateRequest?     @relation("CadreFromCreateRequest")
+  // ADR-064.
+  proformaA              CadreProformaA?
+  proformaChangeRequests ProformaChangeRequest[]
 
   @@index([category])
   @@index([alertLevel])
@@ -589,6 +599,186 @@ model CadreCreateRequest {
   @@map("cadre_create_requests")
 }
 
+// ─── Proforma (ADR-064) ─────────────────────────────────────────────────────────
+//
+// AB Proforma: filled once per cadre — Section A (personal/physical description,
+// new fields only; name/father's name/spouse's name/caste/gender/DOB/addresses are
+// already on Cadre and read off the relation) plus Sections B/C/D (Maoist
+// organisation debrief). B Proforma (CadreProformaB, a later module) refiles every
+// ~2 months. Neither is ever written directly — both go through
+// ProformaChangeRequest below, including for super_admin, who applies immediately
+// but still goes through the ladder (ADR-064 §5).
+
+enum EconomicStatus {
+  poor
+  average
+  fair
+}
+
+model CadreProformaA {
+  id      Int @id @default(autoincrement())
+  cadreId Int @unique @map("cadre_id")
+
+  // Item 1-8 identity fields NOT already on Cadre.
+  party            String?
+  fatherOccupation String? @map("father_occupation")
+  spouseOccupation String? @map("spouse_occupation")
+  subCaste         String? @map("sub_caste")
+  religion         String?
+  placeOfBirth     String? @map("place_of_birth")
+
+  // Item 9 — one column per unique identifier type.
+  aadhaarNumber           String? @map("aadhaar_number")
+  identifierMobile        String? @map("identifier_mobile")
+  identifierEmail         String? @map("identifier_email")
+  socialMediaHandle       String? @map("social_media_handle")
+  rationCardNumber        String? @map("ration_card_number")
+  voterIdNumber           String? @map("voter_id_number")
+  drivingLicenseNumber    String? @map("driving_license_number")
+  bankAccountNumber       String? @map("bank_account_number")
+  postOfficeAccountNumber String? @map("post_office_account_number")
+
+  educationalQualification String?         @map("educational_qualification")
+  occupation               String?
+  economicStatus           EconomicStatus? @map("economic_status")
+  fingerprintKey           String?         @map("fingerprint_key")
+
+  // Item 14 — descriptive appearance. `build`, `complexion`, `hair`, `eyebrows`,
+  // `eyes`, `irisColor`, `nose`, `teeth`, `lips`, `fingers`, `chin`, `ears`,
+  // `face`, `beard`, `moustache` are dropdowns whose option lists (ADR-064 §4,
+  // read from the source Proforma AB.docx) live in
+  // cadre-proforma-a.schema.ts's PROFORMA_DROPDOWN_OPTIONS — deliberately NOT a
+  // DB enum, since the document's own lists end in "इत्यादि" (etc.) for every
+  // one of them.
+  height                 String?
+  build                  String?
+  complexion             String?
+  distinguishingFeatures String? @map("distinguishing_features")
+  hair                   String?
+  eyebrows               String?
+  eyes                   String?
+  irisColor              String? @map("iris_color")
+  nose                   String?
+  teeth                  String?
+  lips                   String?
+  fingers                String?
+  chin                   String?
+  ears                   String?
+  face                   String?
+  beard                  String?
+  moustache              String?
+  marksOrTattoos         String? @map("marks_or_tattoos")
+  deformity              String?
+
+  specialHabits        String? @map("special_habits")
+  vulnerabilities      String?
+  handwritingSampleKey String? @map("handwriting_sample_key")
+  friendsAndAssociates String? @map("friends_and_associates")
+
+  // Items 19-23, 27 — repeatable tables. Zod-typed JSON (cadre-proforma-a.schema.ts),
+  // the same storage class as CadreChangeRequest.changes; never queried at the DB
+  // level, so no relational child tables.
+  childhoodFriends                    Json? @map("childhood_friends")
+  classmates                          Json?
+  organizationAssociatesChronological Json? @map("organization_associates_chronological")
+  relatives                           Json?
+  identifyingPoliceOfficers           Json? @map("identifying_police_officers")
+  otherPointsOfInterest               Json? @map("other_points_of_interest")
+
+  priorArrestDetails String? @map("prior_arrest_details")
+  convictions        String?
+  areaOfOperation    String? @map("area_of_operation")
+
+  // Sections B/C/D (ADR-064 §2) — one JSON blob per section, internally
+  // Zod-typed, never individually queried. Breaks from the rest of this model's
+  // "individual column per field" shape deliberately: ~65 more nullable text
+  // columns for a block that is written once, read once, and never filtered
+  // would be schema weight with no query benefit.
+  sectionB Json? @map("section_b")
+  sectionC Json? @map("section_c")
+  sectionD Json? @map("section_d")
+
+  deletedAt      DateTime? @map("deleted_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  lastEditedAt   DateTime? @map("last_edited_at")
+  lastEditedById Int?      @map("last_edited_by_id")
+
+  cadre        Cadre @relation(fields: [cadreId], references: [id])
+  lastEditedBy User? @relation("ProformaALastEditor", fields: [lastEditedById], references: [id])
+
+  @@map("cadre_proforma_a")
+}
+
+enum ProformaType {
+  ab
+  b
+}
+
+enum ProformaChangeType {
+  create
+  edit
+}
+
+// ADR-064 §3. One ladder implementation for both proforma types, both create and
+// edit — mirrors CadreChangeRequest/CadreCreateRequest's shape and ladder
+// semantics exactly, reusing cadre-changes.policy.ts's requiredApprovalsFor /
+// canApproveNext unchanged. Does NOT replace either of those live tables (too
+// risky to retrofit in-flight production approvals for a schema-cleanliness win)
+// — this generalisation applies only to proforma, going forward.
+model ProformaChangeRequest {
+  id           Int                @id @default(autoincrement())
+  cadreId      Int                @map("cadre_id")
+  proformaType ProformaType       @map("proforma_type")
+  changeType   ProformaChangeType @map("change_type")
+  // The CadreProformaA/B id this edits — null for `create` (no row exists yet,
+  // same reason CadreCreateRequest has no "old" value). Deliberately a bare Int,
+  // no Prisma relation: it points at CadreProformaA when proformaType=ab and at
+  // a future CadreProformaB when proformaType=b, so a single FK could never be
+  // correct for both — same posture as CadreChangeRequest.sourceReportId.
+  targetId     Int?               @map("target_id")
+
+  // Exactly one of these is set, matching changeType — enforced in the service
+  // layer, not the DB (same posture as CadreCreateRequest.draft /
+  // CadreChangeRequest.changes).
+  draft   Json?
+  changes Json?
+
+  submittedById Int      @map("submitted_by_id")
+  submittedAt   DateTime @default(now()) @map("submitted_at")
+  note          String?
+
+  status ChangeRequestStatus @default(pending)
+
+  needsAdmin      Boolean @default(true) @map("needs_admin")
+  needsSuperAdmin Boolean @default(true) @map("needs_super_admin")
+
+  adminApprovedById      Int?      @map("admin_approved_by_id")
+  adminApprovedAt        DateTime? @map("admin_approved_at")
+  superAdminApprovedById Int?      @map("super_admin_approved_by_id")
+  superAdminApprovedAt   DateTime? @map("super_admin_approved_at")
+
+  decidedAt     DateTime? @map("decided_at")
+  decidedById   Int?      @map("decided_by_id")
+  decidedReason String?   @map("decided_reason")
+
+  idempotencyKey String? @unique @map("idempotency_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  cadre                Cadre @relation(fields: [cadreId], references: [id])
+  submittedBy          User  @relation("ProformaChangeSubmitter", fields: [submittedById], references: [id])
+  adminApprovedBy      User? @relation("ProformaChangeAdminApprover", fields: [adminApprovedById], references: [id])
+  superAdminApprovedBy User? @relation("ProformaChangeSuperAdminApprover", fields: [superAdminApprovedById], references: [id])
+  decidedBy            User? @relation("ProformaChangeDecider", fields: [decidedById], references: [id])
+
+  @@index([status, submittedAt])
+  @@index([cadreId])
+  @@index([submittedById])
+  @@map("proforma_change_requests")
+}
+
 // ─── Auth support ──────────────────────────────────────────────────────────────
 
 // ADR-042. `OtpChallenge` is GONE. SMS-OTP was the officer login track (ADR-012); it
@@ -707,26 +897,26 @@ model SyncLog {
 // ─── Notifications (in-app inbox + real push via ADR-048) ─────────────────────
 
 model Notification {
-  id            Int              @id @default(autoincrement())
-  userId        Int              @map("user_id")
-  type          NotificationType
+  id                   Int              @id @default(autoincrement())
+  userId               Int              @map("user_id")
+  type                 NotificationType
   // Server-templated Hindi copy (src/lib/notification-copy.ts), written once at
   // creation — never re-derived client-side.
-  title         String
-  body          String
+  title                String
+  body                 String
   cadreId              Int?             @map("cadre_id")
   cadreChangeId        Int?             @map("cadre_change_id")
   cadreCreateRequestId Int?             @map("cadre_create_request_id")
   // Extra render-time facts that aren't relations (tier label, thana names, reject
   // reason) — also what rides along in the SNS/FCM push payload's `data` field.
-  data          Json?
-  readAt        DateTime?        @map("read_at")
-  deletedAt     DateTime?        @map("deleted_at")
-  createdAt     DateTime         @default(now()) @map("created_at")
+  data                 Json?
+  readAt               DateTime?        @map("read_at")
+  deletedAt            DateTime?        @map("deleted_at")
+  createdAt            DateTime         @default(now()) @map("created_at")
 
-  user              User                @relation(fields: [userId], references: [id])
-  cadre             Cadre?              @relation(fields: [cadreId], references: [id])
-  cadreChange       CadreChangeRequest? @relation(fields: [cadreChangeId], references: [id])
+  user               User                @relation(fields: [userId], references: [id])
+  cadre              Cadre?              @relation(fields: [cadreId], references: [id])
+  cadreChange        CadreChangeRequest? @relation(fields: [cadreChangeId], references: [id])
   cadreCreateRequest CadreCreateRequest? @relation(fields: [cadreCreateRequestId], references: [id])
 
   // The unread-count/list query: WHERE userId = ? AND readAt IS NULL ORDER BY createdAt DESC.
