@@ -155,18 +155,25 @@ export interface CadreProformaBService {
 }
 
 export function makeCadreProformaBService({ prisma, storage, mediaUrlTtlSeconds }: CadreProformaBDeps): CadreProformaBService {
-  // This task: ADR-064 scopes both paper proformas to "SP Bijapur's surrendered-cadre
-  // master file" — a jail-register or thana-level cadre has no AB/B paperwork to
-  // digitise. The mobile entry point already hides itself for non-surrendered
-  // cadres; this is the backstop for a direct API call.
+  // ADR-064 scopes both paper proformas to "SP Bijapur's surrendered-cadre master
+  // file" — a jail-register or thana-level cadre has no AB/B paperwork to digitise,
+  // and neither does a cadre who surrendered in another district/state
+  // (surrenderOrigin='other', the OD- serial prefix in the register): SP Bijapur's
+  // own master file only ever covered home-district surrenders. `category` alone
+  // under-scoped this — it let every surrendered cadre through regardless of
+  // origin. The mobile entry point already hides itself for both; this is the
+  // backstop for a direct API call.
   async function assertCadreInScope(cadreId: number, actor: Actor): Promise<void> {
     const cadre = await prisma.cadre.findFirst({
       where: { id: cadreId, deletedAt: null, ...cadreScopeWhere(actor.scope) },
-      select: { id: true, category: true },
+      select: { id: true, category: true, surrenderOrigin: true },
     });
     if (cadre === null) throw notFound('Cadre not found');
-    if (cadre.category !== 'surrendered') {
-      throw badRequest('Proforma is only available for surrendered cadres', 'CADRE_NOT_SURRENDERED');
+    if (cadre.category !== 'surrendered' || cadre.surrenderOrigin !== 'district') {
+      throw badRequest(
+        'Proforma is only available for home-district surrendered cadres',
+        'CADRE_NOT_SURRENDERED',
+      );
     }
   }
 
