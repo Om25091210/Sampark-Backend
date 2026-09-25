@@ -24,6 +24,10 @@ export const listCadresQuery = z.object({
   // thana reads "बीजापुर / गंगालूर", so an equality match on "बीजापुर" would miss it.
   thana: multi(z.string().trim().min(1).max(100).transform(nfc)),
   designation: multi(z.string().trim().min(1).max(200)),
+  // ADR-065. Same facet-filter shape as designation above — distinct live values
+  // from GET /cadres/facets, only present on the ~1,478 rows the register's "Post"
+  // column was backfilled onto.
+  post: multi(z.string().trim().min(1).max(200)),
   // ADR-019. Splits the surrendered cadres into the dashboard's two tiles:
   // `district` = surrendered in Bijapur, `other` = another district or state.
   // Only meaningful alongside category=surrendered; non-surrendered cadres have
@@ -316,6 +320,28 @@ export const fieldCorrectionBody = z.object({
     .max(MAX_IMPORT_BATCH),
 });
 
+// ADR-065. Bulk thana correction + post backfill by serialNumber, for the reconciled
+// "Updated Info of Jila Bijapur" register (थाना was wrong on the original ADR-038
+// import; `post` is a NEW, ADDITIONAL fact from the register's own "Post" column —
+// deliberately NOT written onto `designation`, which is untouched by this route).
+// `post` also becomes findable through `GET /cadres/facets` (mirrors the existing
+// designation facet, ADR-033), so it needs no new UI concept to be filterable.
+// Same UNCONDITIONAL-overwrite, super_admin-only, direct-write, bypass-the-ladder,
+// audited contract as fieldCorrectionRow above — the current thana value is
+// known-bad, not merely absent, so this does not skip a row that already has one.
+export const thanaPostCorrectionRow = z.object({
+  serialNumber: z.string().trim().min(1, 'serialNumber is required'),
+  thana: z.string().trim().min(1, 'thana is required'),
+  post: z.string().trim().min(1, 'post is required'),
+});
+
+export const thanaPostCorrectionBody = z.object({
+  corrections: z
+    .array(z.unknown())
+    .min(1, 'corrections must be a non-empty array')
+    .max(MAX_IMPORT_BATCH),
+});
+
 export type ListCadresQuery = z.infer<typeof listCadresQuery>;
 export type TransferBody = z.infer<typeof transferBody>;
 export type ThanaTransferBody = z.infer<typeof thanaTransferBody>;
@@ -325,6 +351,8 @@ export type OtherOriginTypeBackfillRow = z.infer<typeof otherOriginTypeBackfillR
 export type OtherOriginTypeBackfillBody = z.infer<typeof otherOriginTypeBackfillBody>;
 export type FieldCorrectionRow = z.infer<typeof fieldCorrectionRow>;
 export type FieldCorrectionBody = z.infer<typeof fieldCorrectionBody>;
+export type ThanaPostCorrectionRow = z.infer<typeof thanaPostCorrectionRow>;
+export type ThanaPostCorrectionBody = z.infer<typeof thanaPostCorrectionBody>;
 
 // What the service actually receives: the route resolves the `me` sentinel to the
 // caller's id, so the service never has to know who is asking.

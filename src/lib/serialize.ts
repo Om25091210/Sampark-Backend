@@ -66,6 +66,10 @@ export interface WireCadre {
   // from currentAddress (full free-text address). Absent when null.
   residingVillage?: string;
   designation: string;
+  // ADR-065. The register's "Post" column — an ADDITIONAL fact alongside a thana
+  // correction, deliberately separate from `designation` above. Absent when null
+  // (every cadre except the ~1,478 corrected rows).
+  post?: string;
   category: Cadre['category'];
   // ADR-046. The register's priority GRADE (A/B/C/jail/death), distinct from
   // `category`. Drives the per-category reporting cadence. Absent when null.
@@ -245,6 +249,7 @@ export function toWireCadre(
     permanentAddress: c.permanentAddress ?? undefined,
     residingVillage: c.residingVillage ?? undefined,
     designation: c.designation,
+    post: c.post ?? undefined,
     category: c.category,
     priorityCategory: c.priorityCategory ?? undefined,
     permanentStatus: c.permanentStatus ?? undefined,

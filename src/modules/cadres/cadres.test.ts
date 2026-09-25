@@ -1794,6 +1794,111 @@ describe('cadres field correction', () => {
   });
 });
 
+// ── Bulk thana correction + post backfill (ADR-065) ─────────────────────────────
+describe('cadres thana/post correction', () => {
+  const url = '/api/v1/cadres/thana-post-correction';
+  const TD_TOKEN = 'TDFIXTURE';
+  const created: number[] = [];
+
+  interface TdResp {
+    results: Array<{ serialNumber: string | null; status: string; cadreId?: number; error?: string }>;
+  }
+
+  const makeTarget = async (suffix: string): Promise<{ id: number; serial: string }> => {
+    const serial = `${TD_TOKEN}-${suffix}`;
+    const c = await prisma.cadre.create({
+      data: {
+        name: 'Fixture Name', phone: '+910000000802', thana: 'बेदरे',
+        currentAddress: 'Td fixture', designation: 'PM', category: 'surrendered',
+        alertLevel: 'normal', aliases: [], serialNumber: serial,
+      },
+    });
+    created.push(c.id);
+    return { id: c.id, serial };
+  };
+
+  afterAll(async () => {
+    await prisma.auditLog.deleteMany({ where: { entityType: 'cadre', entityId: { in: created.map(String) } } });
+    await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('rejects an unauthenticated call with 401', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'POST', url, payload: { corrections: [] } });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('rejects an admin JWT with 403 (correction is super_admin-tier)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(adminToken),
+      payload: { corrections: [{ serialNumber: 'x', thana: 'y', post: 'z' }] },
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('overwrites thana and sets post directly, bypasses the ladder, audits the super_admin, leaves designation untouched', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('set');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { corrections: [{ serialNumber: serial, thana: 'गंगालूर', post: 'ACM' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as TdResp).results[0]).toMatchObject({ serialNumber: serial, status: 'updated', cadreId: id });
+
+    const row = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(row.thana).toBe('गंगालूर');
+    expect(row.post).toBe('ACM');
+    expect(row.designation).toBe('PM'); // untouched — post is additive, not a designation rewrite
+    expect(await prisma.cadreChangeRequest.count({ where: { cadreId: id } })).toBe(0);
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'cadre', entityId: String(id), action: 'cadre.thana_post_correction' },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit!.actorId).toBe(superAdminId);
+    await app.close();
+  });
+
+  it('overwrites a value that was already set — no skip condition', async () => {
+    const app = await makeApp();
+    const { id, serial } = await makeTarget('already');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: { corrections: [{ serialNumber: serial, thana: 'भैरमगढ़', post: 'DVCM' }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as TdResp).results[0]).toMatchObject({ status: 'updated', cadreId: id });
+    const row = await prisma.cadre.findUniqueOrThrow({ where: { id } });
+    expect(row.thana).toBe('भैरमगढ़');
+    expect(row.post).toBe('DVCM');
+    await app.close();
+  });
+
+  it('reports an unmatched serial as not_found without failing the batch', async () => {
+    const app = await makeApp();
+    const { serial } = await makeTarget('mixed');
+    const res = await app.inject({
+      method: 'POST', url, headers: auth(superAdminToken),
+      payload: {
+        corrections: [
+          { serialNumber: `${TD_TOKEN}-NOSUCH`, thana: 'x', post: 'y' },
+          { serialNumber: serial, thana: 'फरसेगढ़', post: 'PPCM' },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as TdResp).results;
+    expect(results[0]).toMatchObject({ status: 'not_found' });
+    expect(results[0]!.cadreId).toBeUndefined();
+    expect(results[1]).toMatchObject({ serialNumber: serial, status: 'updated' });
+    await app.close();
+  });
+});
+
 // ── Per-category recency (ADR-046) ────────────────────────────────────────────
 // The recency tiers scale by each cadre's OWN cadence: a grade-A cadre 35 days dark is
 // overdue1m, but a grade-C cadre at the same 35 days is still current. jail/death never

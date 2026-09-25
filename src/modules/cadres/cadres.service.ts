@@ -23,11 +23,13 @@ import {
   categoryBackfillRow,
   otherOriginTypeBackfillRow,
   fieldCorrectionRow,
+  thanaPostCorrectionRow,
   importCadreRow,
   type AvatarBackfillRow,
   type CategoryBackfillRow,
   type OtherOriginTypeBackfillRow,
   type FieldCorrectionRow,
+  type ThanaPostCorrectionRow,
   type ImportCadreRow,
   type ResolvedListCadresQuery,
 } from './cadres.schema.js';
@@ -56,6 +58,9 @@ export interface Paginated<T> {
 export interface CadreFacets {
   thanas: string[];
   designations: string[];
+  // ADR-065. Distinct `post` values — only present on the ~1,478 rows the
+  // reconciled register backfilled it onto.
+  posts: string[];
 }
 
 // ADR-038. Per-row outcome of the bulk historical import. Keyed by serialNumber so the
@@ -140,6 +145,19 @@ export interface FieldCorrectionResult {
   results: FieldCorrectionRowResult[];
 }
 
+// ADR-065. Same shape as FieldCorrectionRowResult/Result — unconditional
+// overwrite, so only updated / not_found / error, no "skipped" status.
+export interface ThanaPostCorrectionRowResult {
+  serialNumber: string | null;
+  status: 'updated' | 'not_found' | 'error';
+  cadreId?: number;
+  error?: string;
+}
+
+export interface ThanaPostCorrectionResult {
+  results: ThanaPostCorrectionRowResult[];
+}
+
 export interface CadresService {
   // ADR-044. `scope` is the caller's row-level authorisation, resolved per request in the
   // auth plugin. It is a REQUIRED parameter, not an optional one: an optional scope is a
@@ -192,6 +210,11 @@ export interface CadresService {
   // दीगर-राज्य English-composite name-parse fix. super_admin-only, non-nullable
   // actorId, no scope — same posture as the other bulk-write routes.
   correctFields(rows: unknown[], actorId: number): Promise<FieldCorrectionResult>;
+  // ADR-065. Bulk thana correction + post backfill by serialNumber, from the
+  // reconciled register. `post` is a NEW, additive column — this does NOT touch
+  // `designation`. Same super_admin-only, non-nullable actorId, no-scope,
+  // unconditional-overwrite contract as correctFields.
+  correctThanaPost(rows: unknown[], actorId: number): Promise<ThanaPostCorrectionResult>;
 }
 
 // Echoes whatever serialNumber a raw (possibly invalid) row carried, so a row that
@@ -395,6 +418,10 @@ export function makeCadresService({
           OR: query.designation.map((d) => ({ designation: { contains: d, mode: 'insensitive' as const } })),
         });
       }
+      // ADR-065. Same substring-OR shape as thana/designation above.
+      if (query.post !== undefined) {
+        and.push({ OR: query.post.map((p) => ({ post: { contains: p, mode: 'insensitive' as const } })) });
+      }
       // ADR-041/046: reporting-recency tier — the shared per-category where-builder, the
       // same one /stats/dashboard's tiles use, so the tile count matches the list length.
       if (query.recency !== undefined) and.push(recencyTierWhere(query.recency));
@@ -469,7 +496,7 @@ export function makeCadresService({
       const visible: Prisma.CadreWhereInput = { deletedAt: null, ...cadreScopeWhere(scope) };
       // Same `all`-sentinel handling as list(): narrows only when a real category is given.
       if (category !== undefined && category !== 'all') visible.category = category;
-      const [thanas, designations] = await prisma.$transaction([
+      const [thanas, designations, posts] = await prisma.$transaction([
         prisma.cadre.findMany({
           where: visible,
           distinct: ['thana'],
@@ -482,12 +509,21 @@ export function makeCadresService({
           select: { designation: true },
           orderBy: { designation: 'asc' },
         }),
+        // ADR-065. `post` is nullable — excluded here rather than filtered after,
+        // so `distinct` doesn't waste one of its rows on a single null.
+        prisma.cadre.findMany({
+          where: { ...visible, post: { not: null } },
+          distinct: ['post'],
+          select: { post: true },
+          orderBy: { post: 'asc' },
+        }),
       ]);
-      // Both columns are non-nullable, but a blank string is still not an option
-      // worth offering.
+      // thana/designation are non-nullable, but a blank string is still not an
+      // option worth offering.
       return {
         thanas: thanas.map((r) => r.thana).filter((t) => t !== ''),
         designations: designations.map((r) => r.designation).filter((d) => d !== ''),
+        posts: posts.map((r) => r.post!).filter((p) => p !== ''),
       };
     },
 
@@ -1160,6 +1196,77 @@ export function makeCadresService({
             status: 'error',
             cadreId: match.id,
             error: 'internal error correcting fields',
+          };
+        }
+      }
+
+      return { results };
+    },
+
+    async correctThanaPost(rows, actorId) {
+      // Same validate-resolve-update shape as correctFields, unconditional
+      // overwrite — the pre-ADR-065 thana is known-wrong (not merely absent).
+      // `post` is a NEW column (nullable, previously always null on every row),
+      // so "overwrite" here is really "set for the first time" — still
+      // unconditional (no skip-if-already-set check) so a re-run with a
+      // corrected input file is safe to just run again.
+      const results: ThanaPostCorrectionRowResult[] = new Array(rows.length);
+      const valid: { index: number; row: ThanaPostCorrectionRow }[] = [];
+      rows.forEach((raw, index) => {
+        const parsed = thanaPostCorrectionRow.safeParse(raw);
+        if (!parsed.success) {
+          results[index] = {
+            serialNumber: rawSerial(raw),
+            status: 'error',
+            error: formatIssues(parsed.error),
+          };
+        } else {
+          valid.push({ index, row: parsed.data });
+        }
+      });
+
+      const serials = valid.map((v) => v.row.serialNumber);
+      const existing =
+        serials.length > 0
+          ? await prisma.cadre.findMany({
+              where: { serialNumber: { in: serials }, deletedAt: null },
+              select: { id: true, serialNumber: true, thana: true, post: true },
+            })
+          : [];
+      const bySerial = new Map<string, (typeof existing)[number]>();
+      for (const e of existing) {
+        if (e.serialNumber !== null) bySerial.set(e.serialNumber, e);
+      }
+
+      for (const { index, row } of valid) {
+        const match = bySerial.get(row.serialNumber);
+        if (match === undefined) {
+          results[index] = { serialNumber: row.serialNumber, status: 'not_found' };
+          continue;
+        }
+        try {
+          await prisma.$transaction(async (tx) => {
+            await tx.cadre.update({
+              where: { id: match.id },
+              data: { thana: row.thana, post: row.post },
+            });
+            await writeAuditLog(tx, {
+              actorId,
+              action: 'cadre.thana_post_correction',
+              entityType: 'cadre',
+              entityId: String(match.id),
+              before: { thana: match.thana, post: match.post },
+              after: { serialNumber: row.serialNumber, thana: row.thana, post: row.post },
+            });
+          });
+          results[index] = { serialNumber: row.serialNumber, status: 'updated', cadreId: match.id };
+        } catch (err) {
+          log.error({ err, serialNumber: row.serialNumber }, 'cadre thana/post correction row failed');
+          results[index] = {
+            serialNumber: row.serialNumber,
+            status: 'error',
+            cadreId: match.id,
+            error: 'internal error correcting thana/post',
           };
         }
       }

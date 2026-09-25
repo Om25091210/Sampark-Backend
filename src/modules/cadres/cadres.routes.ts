@@ -7,6 +7,7 @@ import {
   categoryBackfillBody,
   otherOriginTypeBackfillBody,
   fieldCorrectionBody,
+  thanaPostCorrectionBody,
   facetsQuery,
   importCadresBody,
   listCadresQuery,
@@ -257,6 +258,44 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
     async (request) => {
       const { corrections } = fieldCorrectionBody.parse(request.body);
       return service.correctFields(corrections, request.authUser!.sub);
+    },
+  );
+
+  // ADR-065. Bulk thana correction + post backfill by serialNumber, for the reconciled
+  // "Updated Info of Jila Bijapur" register — the original ADR-038 import's थाना is
+  // wrong on these rows, and `post` is a NEW additive column from the register's own
+  // "Post" column (NOT written onto `designation`, which this route never touches).
+  // Same super_admin-only, direct-write, bypass-the-ladder, unconditional-overwrite
+  // contract as field-correction. Registered before `/cadres/:id` alongside the
+  // other static segments.
+  app.post(
+    '/cadres/thana-post-correction',
+    {
+      preHandler: [app.authenticate, app.requireRole('super_admin')],
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Bulk UNCONDITIONAL thana correction + post backfill by serialNumber (super_admin)',
+        description:
+          'ADR-065. Overwrites thana and sets the (new, additive) post column on EXISTING cadres ' +
+          `matched by \`serialNumber\`. Body is an OBJECT with a \`corrections\` array (max ` +
+          `${MAX_IMPORT_BATCH} rows). Like field-correction, this does NOT skip a row that ` +
+          'already has a value — it always overwrites. Bypasses the ADR-026 change-request ' +
+          'ladder and writes directly. Returns a per-row result array in input order.',
+        security: bearerAuth,
+        body: zodToJson(thanaPostCorrectionBody),
+        response: {
+          200: jsonResponse('Per-row thana/post correction results', {
+            results: [
+              { serialNumber: '1', status: 'updated', cadreId: 1 },
+              { serialNumber: '9999', status: 'not_found' },
+            ],
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const { corrections } = thanaPostCorrectionBody.parse(request.body);
+      return service.correctThanaPost(corrections, request.authUser!.sub);
     },
   );
 

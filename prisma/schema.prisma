@@ -268,6 +268,16 @@ model Cadre {
   // (cadre-changes.policy.ts).
   residingVillage    String?           @map("residing_village")
   designation        String
+  // ADR-065. The "Post" column from the reconciled "Updated Info of Jila Bijapur"
+  // register — an ADDITIONAL fact supplied alongside a thana correction for the
+  // same serialNumber, deliberately NOT a rewrite of `designation` above (the
+  // department's own framing: Post is new information to record, not a relabel
+  // of the existing rank text). Nullable: only the ~1,478 corrected rows get it;
+  // every other cadre predates it. Free text, never an enum, for the same reason
+  // `caste`/`designation` are — the next Post value the register spells must not
+  // be rejected. Also exposed as a `GET /cadres/facets` dimension (mirrors
+  // `designation`, ADR-033) so it is filterable without a new UI concept.
+  post               String?
   category           CadreCategory
   // ADR-046. Priority GRADE from the register's कैटेगरी column — separate from
   // `category` above. Drives the per-category reporting cadence (cadenceDaysFor).
