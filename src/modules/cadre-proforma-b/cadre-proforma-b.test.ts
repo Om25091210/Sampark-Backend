@@ -82,6 +82,7 @@ beforeAll(async () => {
       name: CADRE_NAME, phone: '+910000000901', thana: 'बीजापुर', currentAddress: 'फिक्स्चर पता',
       permanentAddress: 'मूल पता', designation: 'Fixture', category: 'surrendered', alertLevel: 'normal',
       aliases: ['उपनाम1'], surrenderDate: new Date('2024-01-15'), surrenderLocation: 'थाना बीजापुर',
+      surrenderOrigin: 'district',
     },
   });
   cadreId = cadre.id;

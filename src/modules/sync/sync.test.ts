@@ -147,6 +147,7 @@ beforeAll(async () => {
       name: CADRE_IN_SCOPE, phone: '+910000000010', thana: 'भैरमगढ़',
       currentAddress: 'Test address', designation: 'Test', category: 'surrendered',
       alertLevel: 'normal', aliases: [], assignedOfficerId: officerId,
+      surrenderOrigin: 'district', // ADR-064 Proforma A/B sync tests reuse this fixture.
     },
   });
   const outOfScope = await prisma.cadre.create({

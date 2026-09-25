@@ -60,6 +60,7 @@ beforeAll(async () => {
     data: {
       name: CADRE_NAME, phone: '+910000000900', thana: 'बीजापुर', currentAddress: 'फिक्स्चर पता',
       designation: 'Fixture', category: 'surrendered', alertLevel: 'normal', aliases: [],
+      surrenderOrigin: 'district',
     },
   });
   cadreId = cadre.id;
