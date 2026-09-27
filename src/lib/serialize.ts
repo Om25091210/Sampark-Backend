@@ -1,4 +1,4 @@
-import type { Cadre, Report, User } from '@prisma/client';
+import type { Cadre, CadreCase, Report, User } from '@prisma/client';
 
 // Wire shape for a user (camelCase entity, per the client contract). `role`
 // serializes verbatim (lowercase enum). `completionPercent` is deferred to
@@ -155,6 +155,63 @@ export interface WireCadre {
   lastEditedBy?: { id: number; name: string };
   createdAt: string;
   updatedAt: string;
+  // This task (जेल/जमानत master profile). Only ever populated on `GET /cadres/:id`
+  // (the caller passes them in, same convention as `edit` above) — never on the
+  // paginated list, so a page of cadres is not N+1'd into a page of case queries.
+  // Absent (not `[]`) on the list response; always an array (possibly empty) on
+  // the detail response.
+  cases?: WireCadreCase[];
+}
+
+// Wire shape for one criminal case row under a जेल/जमानत profile (ADR: this task).
+// Dates serialize to `YYYY-MM-DD` (calendar dates, no time component — same
+// convention as Cadre.dateOfBirth). Optional fields are omitted when null.
+export interface WireCadreCase {
+  id: number;
+  cadreId: number;
+  crimeNumber?: string;
+  sections?: string;
+  crimeThana?: string;
+  crimeDescription?: string;
+  arrestDate?: string;
+  bailGranted: boolean;
+  bailDate?: string;
+  inJail: boolean;
+  jailName?: string;
+  underInvestigation: boolean;
+  underTrial: boolean;
+  challanNumber?: string;
+  courtName?: string;
+  caseStatus?: string;
+  publicHarmOccurred: boolean;
+  uapaApplied: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toWireCadreCase(c: CadreCase): WireCadreCase {
+  return {
+    id: c.id,
+    cadreId: c.cadreId,
+    crimeNumber: c.crimeNumber ?? undefined,
+    sections: c.sections ?? undefined,
+    crimeThana: c.crimeThana ?? undefined,
+    crimeDescription: c.crimeDescription ?? undefined,
+    arrestDate: c.arrestDate?.toISOString().slice(0, 10),
+    bailGranted: c.bailGranted,
+    bailDate: c.bailDate?.toISOString().slice(0, 10),
+    inJail: c.inJail,
+    jailName: c.jailName ?? undefined,
+    underInvestigation: c.underInvestigation,
+    underTrial: c.underTrial,
+    challanNumber: c.challanNumber ?? undefined,
+    courtName: c.courtName ?? undefined,
+    caseStatus: c.caseStatus ?? undefined,
+    publicHarmOccurred: c.publicHarmOccurred,
+    uapaApplied: c.uapaApplied,
+    createdAt: c.createdAt.toISOString(),
+    updatedAt: c.updatedAt.toISOString(),
+  };
 }
 
 // ADR-022/046. The BASELINE reporting cadence, in days. Once "no per-category rules";
@@ -230,6 +287,7 @@ export function toWireCadre(
   c: Cadre & { lastEditedBy?: { id: number; name: string } | null },
   lastReportedAt?: Date | null,
   edit?: CadreEditContext,
+  cases?: CadreCase[],
 ): WireCadre {
   // ADR-046. Cadence is the cadre's OWN per-category cadence, not the global constant.
   // `null` (jail/death) means no reporting is due, so there is no next check-in to emit.
@@ -302,6 +360,7 @@ export function toWireCadre(
     lastEditedBy: edit?.lastEditedBy ?? c.lastEditedBy ?? undefined,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
+    cases: cases?.map(toWireCadreCase),
   };
 }
 

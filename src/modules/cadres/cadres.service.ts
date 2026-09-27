@@ -533,17 +533,25 @@ export function makeCadresService({
       // letting anyone enumerate the register's size and id space by probing.
       const cadre = await prisma.cadre.findFirst({
         where: { id, deletedAt: null, ...cadreScopeWhere(scope) },
-        include: LATEST_REPORT,
+        // This task (जेल/जमानत master profile). `cases` is loaded only on the
+        // single-cadre read, never on `list` (LATEST_REPORT alone, unchanged
+        // above) — a page of cadres must not become a page of case queries.
+        include: { ...LATEST_REPORT, cases: { where: { deletedAt: null }, orderBy: { id: 'asc' } } },
       });
       if (cadre === null) throw notFound('Cadre not found');
       const [pending, avatars] = await Promise.all([
         pendingFieldsForIds([cadre.id]),
         avatarUrlsForRows([cadre]),
       ]);
-      return toWireCadre(cadre, cadre.reports[0]?.reportedAt ?? null, {
-        pendingFields: pending.get(cadre.id) ?? [],
-        ...avatars.get(cadre.id),
-      });
+      return toWireCadre(
+        cadre,
+        cadre.reports[0]?.reportedAt ?? null,
+        {
+          pendingFields: pending.get(cadre.id) ?? [],
+          ...avatars.get(cadre.id),
+        },
+        cadre.cases,
+      );
     },
 
     async transfer(cadreId, toOfficerId, actorId, scope) {

@@ -20,6 +20,7 @@ import { authRoutes } from './modules/auth/auth.routes.js';
 import { cadresRoutes } from './modules/cadres/cadres.routes.js';
 import { cadreChangesRoutes } from './modules/cadre-changes/cadre-changes.routes.js';
 import { cadreCreateRequestsRoutes } from './modules/cadre-create-requests/cadre-create-requests.routes.js';
+import { cadreCasesRoutes } from './modules/cadre-cases/cadre-cases.routes.js';
 import { cadreProformaARoutes } from './modules/cadre-proforma-a/cadre-proforma-a.routes.js';
 import { cadreProformaBRoutes } from './modules/cadre-proforma-b/cadre-proforma-b.routes.js';
 import { officersRoutes } from './modules/officers/officers.routes.js';
@@ -129,6 +130,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
           { name: 'Cadres', description: 'Cadre records' },
           { name: 'Cadre changes', description: 'Two-level approval ladder for editing a cadre (ADR-026)' },
           { name: 'Cadre create requests', description: 'Two-level approval ladder for creating a new cadre' },
+          { name: 'Cadre Cases', description: 'जेल/जमानत profile — criminal cases per cadre (direct write, officer+)' },
           { name: 'Reports', description: 'Field reports filed against a cadre' },
           { name: 'Reports Media', description: 'Report photo upload + PDF export' },
           { name: 'Stats', description: 'Dashboard summary counts' },
@@ -159,6 +161,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
       await api.register(cadresRoutes);
       await api.register(cadreChangesRoutes); // ADR-026
       await api.register(cadreCreateRequestsRoutes); // Cadre creation ladder
+      await api.register(cadreCasesRoutes); // जेल/जमानत profile — criminal cases (this task)
       await api.register(cadreProformaARoutes); // ADR-064: AB Proforma ladder
       await api.register(cadreProformaBRoutes); // ADR-064: B Proforma ladder
       await api.register(officersRoutes);

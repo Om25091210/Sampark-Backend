@@ -403,6 +403,12 @@ model Cadre {
   proformaA              CadreProformaA?
   proformaBs             CadreProformaB[]
   proformaChangeRequests ProformaChangeRequest[]
+  // This task (जेल/जमानत master profile). One cadre (category='jail') may carry
+  // several criminal cases — the JailBailDoshmukt register has the same person
+  // on multiple rows, one per अपराध क्रमांक. Not folded onto the Cadre row itself
+  // (unlike every other cadre fact) because it is genuinely repeatable, not a
+  // single fact of record.
+  cases                  CadreCase[]
 
   @@index([category])
   @@index([alertLevel])
@@ -416,6 +422,66 @@ model Cadre {
   // This task. The दीगर जिला/राज्य tabs drill one level further into that filter.
   @@index([category, surrenderOrigin, otherOriginType])
   @@map("cadres")
+}
+
+// ─── Cadre criminal cases (जेल/जमानत master profile) ───────────────────────────
+//
+// A jail/bail profile (Cadre.category = 'jail') is one PERSON who may be named in
+// several criminal cases — the source register (JailBailDoshmukt) repeats the same
+// person across multiple rows, one per अपराध क्रमांक. Every field below is
+// case-specific (crime number, sections, bail, custody, court, case outcome); the
+// person-level facts (name/phone/father/mother/spouse/addresses/residence thana)
+// stay on the Cadre row itself — they already exist there for every category.
+//
+// Write policy (this task): DIRECT for officer+ (create/update), like
+// alertTag/aliases — not routed through CadreChangeRequest's approval ladder. That
+// engine diffs Cadre's own scalar columns only; teaching it to approve rows of a
+// child table is real new plumbing, deferred until this proves it needs it. Delete
+// is admin+, mirroring the stricter posture reserved for destructive actions
+// elsewhere in this policy (cadre delete itself is super_admin-only).
+model CadreCase {
+  id      Int @id @default(autoincrement())
+  cadreId Int @map("cadre_id")
+
+  crimeNumber      String?   @map("crime_number") // अपराध क्रमांक
+  sections         String? // धारा
+  crimeThana       String?   @map("crime_thana") // थाना ( जहां अपराध दर्ज है )
+  crimeDescription String?   @map("crime_description") // अपराध विवरण
+  arrestDate       DateTime? @map("arrest_date") @db.Date // गिरफ्तारी दिनांक
+
+  // जमानत — bailDate only meaningful when bailGranted = true.
+  bailGranted Boolean   @default(false) @map("bail_granted")
+  bailDate    DateTime? @map("bail_date") @db.Date
+
+  // जेल निरूद्ध — jailName only meaningful when inJail = true.
+  inJail   Boolean @default(false) @map("in_jail")
+  jailName String? @map("jail_name")
+
+  underInvestigation Boolean @default(false) @map("under_investigation") // प्रकरण विवेचनाधीन
+  underTrial         Boolean @default(false) @map("under_trial") // प्रकरण विचाराधीन
+
+  // Only meaningful when underTrial = true (per the register's own conditional).
+  challanNumber String? @map("challan_number")
+  courtName     String? @map("court_name")
+
+  // Free text, never an enum — दोषमुक्त / दंडित / खात्मा are all attested in the
+  // source register alongside the client's दोषमुक्त/दंडित/NA spec, and the next
+  // spelling a case outcome is recorded with must not be rejected (same reasoning
+  // as Cadre.caste). Only meaningful when both underInvestigation and underTrial
+  // are false, per the register's own conditional — not enforced at the DB level.
+  caseStatus String? @map("case_status")
+
+  publicHarmOccurred Boolean @default(false) @map("public_harm_occurred") // जनहानि हुई
+  uapaApplied        Boolean @default(false) @map("uapa_applied") // यूएपीए लगा है
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  cadre Cadre @relation(fields: [cadreId], references: [id])
+
+  @@index([cadreId])
+  @@map("cadre_cases")
 }
 
 // ─── Reports (field reporting against a cadre) ─────────────────────────────────
