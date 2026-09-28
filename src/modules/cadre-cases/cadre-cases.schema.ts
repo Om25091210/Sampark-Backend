@@ -22,9 +22,16 @@ const dateOnly = z
 
 export const caseBodyShape = z.object({
   crime_number: z.string().trim().max(100).nullable().optional(),
-  sections: z.string().trim().max(500).nullable().optional(),
+  // This task (जेल/जमानत bulk import). 500 turned out too low against the real
+  // register -- 3 of 6,816 source rows carry a धारा listing up to 938 chars
+  // (a multi-count charge sheet citing many sections at once). Raised with
+  // headroom, not to the exact observed max.
+  sections: z.string().trim().max(1500).nullable().optional(),
   crime_thana: z.string().trim().max(200).nullable().optional(),
-  crime_description: z.string().trim().max(5000).nullable().optional(),
+  // This task. Same story as `sections` -- 32 of 6,816 rows exceeded 5000 (a
+  // shared multi-defendant incident narrative ran to 7,849 chars). Raised with
+  // headroom over the observed max, same reasoning as `sections` above.
+  crime_description: z.string().trim().max(10000).nullable().optional(),
   arrest_date: dateOnly.nullable().optional(),
   bail_granted: z.boolean().optional(),
   bail_date: dateOnly.nullable().optional(),
