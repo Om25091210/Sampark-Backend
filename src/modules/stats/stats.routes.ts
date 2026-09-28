@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { makeStatsService } from './stats.service.js';
-import { hierarchyQuery } from './stats.schema.js';
+import { dashboardQuery, hierarchyQuery } from './stats.schema.js';
 import { bearerAuth, jsonResponse, zodToJson } from '../../lib/openapi.js';
 
 const EXAMPLE_DASHBOARD_STATS = {
@@ -82,12 +82,18 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
           'Home-dashboard snapshot: total cadres, active (critical) alerts, reports in the ' +
           'last 7 days, cadres overdue on the 30-day reporting cadence, and per-category counts ' +
           '(surrendered split by origin per ADR-019) — all scoped to the caller (their own thana ' +
-          'for an officer, sub-division for an admin, everything for super_admin).',
+          'for an officer, sub-division for an admin, everything for super_admin). Optional ' +
+          '`category`/`surrenderOrigin`/`otherOriginType` (same vocabulary as GET /cadres) narrow ' +
+          'the same snapshot to one category-section screen instead of the whole caller scope.',
         security: bearerAuth,
+        querystring: zodToJson(dashboardQuery),
         response: { 200: jsonResponse('Dashboard stats', EXAMPLE_DASHBOARD_STATS) },
       },
     },
-    async (request) => service.dashboard(request.scope!),
+    async (request) => {
+      const filter = dashboardQuery.parse(request.query);
+      return service.dashboard(request.scope!, filter);
+    },
   );
 
   // ADR-031. The caller's OWN numbers. No role gate beyond authentication: unlike

@@ -516,6 +516,76 @@ describe('stats', () => {
     await app.close();
   });
 
+  // ── ?category scoping (this task) ───────────────────────────────────────────
+  // The mobile category-section screens (cadres/[category].tsx) show the same
+  // reportingRecency summary bar the home dashboard shows for "सभी कैडर", but
+  // scoped to one tile — these assert the WHOLE snapshot narrows, not just one field.
+
+  it('?category=surrendered zeroes the other two categories, and totalCadres shrinks to match', async () => {
+    const app = await makeApp();
+    const s = (
+      await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard?category=surrendered', headers: auth(hqToken) })
+    ).json() as Stats;
+    expect(s.byCategory.thana).toBe(0);
+    expect(s.byCategory.jail).toBe(0);
+    expect(s.totalCadres).toBe(s.byCategory.surrendered.total);
+    expect(s.byCategory.surrendered.total).toBeGreaterThanOrEqual(2); // this file's ALERT + OTHER
+    await app.close();
+  });
+
+  it('?category=surrendered&surrenderOrigin=district narrows to exactly that dashboard tile\'s rows', async () => {
+    const app = await makeApp();
+    const s = (
+      await app.inject({
+        method: 'GET',
+        url: '/api/v1/stats/dashboard?category=surrendered&surrenderOrigin=district',
+        headers: auth(hqToken),
+      })
+    ).json() as Stats;
+    expect(s.byCategory.surrendered.other).toBe(0);
+    expect(s.byCategory.thana).toBe(0);
+    expect(s.byCategory.jail).toBe(0);
+    expect(s.totalCadres).toBe(s.byCategory.surrendered.district);
+    expect(s.byCategory.surrendered.district).toBeGreaterThanOrEqual(1); // this file's ALERT cadre
+    await app.close();
+  });
+
+  it('reportingRecency still partitions the narrowed total under a category filter', async () => {
+    const app = await makeApp();
+    const s = (
+      await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard?category=thana', headers: auth(hqToken) })
+    ).json() as Stats;
+    const r = s.reportingRecency;
+    expect(r.current + r.overdue1m + r.overdue2m + r.overdue3m).toBe(s.totalCadres);
+    expect(s.byCategory.surrendered.total).toBe(0);
+    expect(s.reportingRecency.overdue1m).toBeGreaterThanOrEqual(1); // THANA fixture, 40-day report
+    await app.close();
+  });
+
+  it('an officer\'s category-scoped read is still bounded to their own thana (ADR-044 unchanged)', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/stats/dashboard?category=thana', headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as Stats;
+    expect(s.byCategory.thana).toBeGreaterThanOrEqual(1); // this file's THANA fixture, at स्टैट
+    await app.close();
+  });
+
+  it('category=all is the unscoped sentinel, same as omitting it — still partitions to totalCadres', async () => {
+    // A single read (never two, per ADR-018 — parallel test files mutate the shared
+    // table between requests): the invariant that matters is that the sentinel
+    // does NOT narrow anything, which the partition equation already proves.
+    const app = await makeApp();
+    const s = (
+      await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard?category=all', headers: auth(hqToken) })
+    ).json() as Stats;
+    expect(s.totalCadres).toBe(s.byCategory.surrendered.total + s.byCategory.thana + s.byCategory.jail);
+    expect(s.byCategory.thana).toBeGreaterThanOrEqual(1); // this file's THANA fixture still visible
+    await app.close();
+  });
+
   // ── /stats/hierarchy (ADR-055) ──────────────────────────────────────────────
 
   it('GET /stats/hierarchy without a token → 401', async () => {

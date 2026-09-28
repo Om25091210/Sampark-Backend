@@ -11,6 +11,7 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import { REPORTING_CADENCE_DAYS } from '../../lib/serialize.js';
 import { recencyTierWhere, pendingReportingWhere } from '../../lib/recency.js';
 import type {
+  DashboardQuery,
   DashboardStats,
   HierarchyRow,
   HierarchyStats,
@@ -27,7 +28,10 @@ export interface StatsService {
   // ADR-044. Every count is scoped. An unscoped total is a leak in its own right: it tells
   // a thana officer exactly how many cadres exist district-wide, which is the number the
   // scoping was introduced to withhold.
-  dashboard(scope: CadreScope): Promise<DashboardStats>;
+  // This task. `filter` narrows the SAME snapshot to one category (+ surrenderOrigin/
+  // otherOriginType) on top of the role scope above — the caller-wide behaviour when
+  // omitted/'all' is unchanged.
+  dashboard(scope: CadreScope, filter?: DashboardQuery): Promise<DashboardStats>;
   /** ADR-031. The caller's own numbers. Aggregated in SQL, never over one page. */
   forOfficer(officerId: number, scope: CadreScope): Promise<OfficerStats>;
   /** ADR-055. The rolled-up view: an SDOP's own officers, or HQ's own SDOPs, or
@@ -97,17 +101,33 @@ const SOLE_OFFICER_BY_THANA_CTE = Prisma.sql`
 
 export function makeStatsService({ prisma }: StatsDeps): StatsService {
   return {
-    async dashboard(scope) {
+    async dashboard(scope, filter) {
       const now = Date.now();
       const weekAgo = new Date(now - 7 * DAY_MS);
+
+      // This task. The category-section narrowing (on top of the role scope below) —
+      // same fields `GET /cadres` filters on, so every count in the response ends up
+      // describing the same slice of cadres a category screen's list shows.
+      const categoryWhere: Prisma.CadreWhereInput =
+        filter?.category !== undefined && filter.category !== 'all'
+          ? {
+              category: filter.category,
+              ...(filter.surrenderOrigin !== undefined && { surrenderOrigin: filter.surrenderOrigin }),
+              ...(filter.otherOriginType !== undefined && { otherOriginType: filter.otherOriginType }),
+            }
+          : {};
 
       // ADR-044. Two predicates, because `Cadre` and `Report` scope differently: a cadre
       // is scoped on its OWN thana, a report through its cadre relation. They were one
       // object before scoping and the compiler caught the conflation.
-      const live = { deletedAt: null, ...cadreScopeWhere(scope) };
+      const live = { deletedAt: null, ...cadreScopeWhere(scope), ...categoryWhere };
+      const reportCadreWhere: Prisma.CadreWhereInput = {
+        ...(scope.kind === 'all' ? {} : { thana: { in: [...scope.thanas] } }),
+        ...categoryWhere,
+      };
       const liveReports: Prisma.ReportWhereInput = {
         deletedAt: null,
-        ...(scope.kind === 'all' ? {} : { cadre: { thana: { in: [...scope.thanas] } } }),
+        ...(Object.keys(reportCadreWhere).length > 0 ? { cadre: reportCadreWhere } : {}),
       };
 
       // One transaction so every count reflects the same snapshot — a cadre created
@@ -132,18 +152,26 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         rcOverdue2m,
         rcOverdue3m,
       ] = await prisma.$transaction([
-        prisma.cadre.count({ where: { ...live, category: 'surrendered' } }),
-        prisma.cadre.count({ where: { ...live, category: 'surrendered', surrenderOrigin: 'district' } }),
-        prisma.cadre.count({ where: { ...live, category: 'surrendered', surrenderOrigin: 'other' } }),
+        // This task. `AND: [live, ...]`, NOT `{ ...live, ... }` — a spread would let
+        // this query's own literal `category`/`surrenderOrigin` silently CLOBBER
+        // whatever `filter` put on `live` (same top-level key, last one wins), which
+        // broke exactly the case this task added: querying `thana`'s count while
+        // `live` was scoped to category='surrendered' returned the WHOLE thana
+        // count, not 0. `AND` keeps both conditions — genuinely contradictory ones
+        // (e.g. live's category='surrendered' + this query's category='thana')
+        // correctly count 0 rows instead of one silently overriding the other.
+        prisma.cadre.count({ where: { AND: [live, { category: 'surrendered' }] } }),
+        prisma.cadre.count({ where: { AND: [live, { category: 'surrendered', surrenderOrigin: 'district' }] } }),
+        prisma.cadre.count({ where: { AND: [live, { category: 'surrendered', surrenderOrigin: 'other' }] } }),
         // This task. The दीगर जिला/राज्य tabs — sub-split of the 'other' bucket above.
         prisma.cadre.count({
-          where: { ...live, category: 'surrendered', surrenderOrigin: 'other', otherOriginType: 'other_district' },
+          where: { AND: [live, { category: 'surrendered', surrenderOrigin: 'other', otherOriginType: 'other_district' }] },
         }),
         prisma.cadre.count({
-          where: { ...live, category: 'surrendered', surrenderOrigin: 'other', otherOriginType: 'other_state' },
+          where: { AND: [live, { category: 'surrendered', surrenderOrigin: 'other', otherOriginType: 'other_state' }] },
         }),
-        prisma.cadre.count({ where: { ...live, category: 'thana' } }),
-        prisma.cadre.count({ where: { ...live, category: 'jail' } }),
+        prisma.cadre.count({ where: { AND: [live, { category: 'thana' }] } }),
+        prisma.cadre.count({ where: { AND: [live, { category: 'jail' }] } }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'critical' } }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'warning' } }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'normal' } }),

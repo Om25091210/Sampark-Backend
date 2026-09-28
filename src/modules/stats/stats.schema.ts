@@ -57,6 +57,19 @@ export const dashboardStatsResponse = z.object({
 
 export type DashboardStats = z.infer<typeof dashboardStatsResponse>;
 
+// This task. Scopes the snapshot to one category-section screen (the mobile
+// cadres/[category] list, opened from one of the four dashboard grid tiles) —
+// same category/surrenderOrigin/otherOriginType vocabulary `GET /cadres` already
+// filters on, so a tile's count on that screen equals the length of the list
+// under it. Undefined/'all' keeps the original caller-wide snapshot.
+export const dashboardQuery = z.object({
+  category: z.enum(['surrendered', 'jail', 'thana', 'all']).optional(),
+  surrenderOrigin: z.enum(['district', 'other']).optional(),
+  otherOriginType: z.enum(['other_district', 'other_state']).optional(),
+});
+
+export type DashboardQuery = z.infer<typeof dashboardQuery>;
+
 // ─── Officer stats (ADR-031) ──────────────────────────────────────────────────
 //
 // The caller's OWN numbers. `/stats/dashboard` is org-wide and admin+ (ADR-030);
