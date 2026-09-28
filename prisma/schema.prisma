@@ -534,6 +534,13 @@ model Report {
 
   @@index([cadreId])
   @@index([reportedById])
+  // This task (जेल/जमानत performance follow-up). Matches LATEST_REPORT's exact
+  // access pattern (cadres.service.ts) -- WHERE cadre_id = ? AND deleted_at IS
+  // NULL ORDER BY reported_at DESC, id DESC LIMIT 1 -- run once per cadre on
+  // every cadre list page AND on every /sync/pull. The lone `[cadreId]` index
+  // above still requires a sort per cadre without this; a composite index lets
+  // Postgres walk it back-to-front on the sort columns directly.
+  @@index([cadreId, deletedAt, reportedAt, id])
   @@map("reports")
 }
 
