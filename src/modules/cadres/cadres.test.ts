@@ -690,6 +690,183 @@ describe('cadres', () => {
     await app.close();
   });
 
+  // ── This task: recency-filtered order is "most recently reported first" ────────
+  // (reportSortKey), NOT registration order (id asc, every other view's order).
+  //
+  // These fixtures file through the REAL API (POST .../reports), to exercise
+  // reports.service's reportSortKey side effect rather than assuming it. Same as
+  // reports.test.ts's validBody(), that proposes a background phone change
+  // (ADR-052) whenever current_phone differs from the cadre's own — best-effort,
+  // but the pending CadreChangeRequest row it leaves has a REAL FK to Cadre, so
+  // it must be purged before `prisma.cadre.delete` below or the delete 500s.
+  async function purgeChangeRequests(ids: number[]): Promise<void> {
+    const rows = await prisma.cadreChangeRequest.findMany({ where: { cadreId: { in: ids } }, select: { id: true } });
+    const reqIds = rows.map((r) => String(r.id));
+    if (reqIds.length > 0) {
+      await prisma.auditLog.deleteMany({ where: { entityType: 'cadre_change_request', entityId: { in: reqIds } } });
+    }
+    await prisma.cadreChangeRequest.deleteMany({ where: { cadreId: { in: ids } } });
+  }
+
+  it('recency=current orders the most-recently-reported cadre first, opposite of id order', async () => {
+    const app = await makeApp();
+    const TOKEN = 'REPORDER';
+    // A (lower id, created first) gets the OLDER report; B (higher id) gets the
+    // NEWER one. id-ascending would read A, B — proving the response is B, A
+    // shows the order genuinely comes from the report date, not the id.
+    const a = await prisma.cadre.create({
+      data: {
+        name: `${TOKEN} A`, phone: '+910000000801', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    const b = await prisma.cadre.create({
+      data: {
+        name: `${TOKEN} B`, phone: '+910000000802', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    try {
+      const file = (cadreIdArg: number, selectedDate: string) =>
+        app.inject({
+          method: 'POST', url: `/api/v1/cadres/${cadreIdArg}/reports`, headers: auth(superAdminToken),
+          payload: {
+            reporting_place: 'village', specific_location: 'x', person_status: 'alive',
+            current_phone: '+910', current_activity: 'x', front_photo_key: 'reports/x.jpg',
+            selected_date: selectedDate,
+          },
+        });
+      await file(a.id, new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()); // 10d ago
+      await file(b.id, new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString());  // 1d ago
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/cadres?search=${encodeURIComponent(TOKEN)}&recency=current&pageSize=50`,
+        headers: auth(superAdminToken),
+      });
+      const ids = (res.json() as ListBody).data.map((r) => r.id);
+      expect(ids.indexOf(b.id)).toBeLessThan(ids.indexOf(a.id));
+    } finally {
+      await prisma.report.deleteMany({ where: { cadreId: { in: [a.id, b.id] } } });
+      await purgeChangeRequests([a.id, b.id]);
+      await prisma.cadre.deleteMany({ where: { id: { in: [a.id, b.id] } } });
+      await app.close();
+    }
+  });
+
+  it('without a recency filter, order is unaffected (still id asc)', async () => {
+    const app = await makeApp();
+    const TOKEN = 'REPORDERDEFAULT';
+    const a = await prisma.cadre.create({
+      data: {
+        name: `${TOKEN} A`, phone: '+910000000803', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    const b = await prisma.cadre.create({
+      data: {
+        name: `${TOKEN} B`, phone: '+910000000804', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    try {
+      // B reported far more recently, but with no ?recency filter the list stays
+      // in registration order — this new sort is scoped to the drill-down only.
+      await app.inject({
+        method: 'POST', url: `/api/v1/cadres/${b.id}/reports`, headers: auth(superAdminToken),
+        payload: {
+          reporting_place: 'village', specific_location: 'x', person_status: 'alive',
+          current_phone: '+910', current_activity: 'x', front_photo_key: 'reports/x.jpg',
+        },
+      });
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/cadres?search=${encodeURIComponent(TOKEN)}&pageSize=50`,
+        headers: auth(superAdminToken),
+      });
+      const ids = (res.json() as ListBody).data.map((r) => r.id);
+      expect(ids.indexOf(a.id)).toBeLessThan(ids.indexOf(b.id));
+    } finally {
+      await prisma.report.deleteMany({ where: { cadreId: { in: [a.id, b.id] } } });
+      await purgeChangeRequests([a.id, b.id]);
+      await prisma.cadre.deleteMany({ where: { id: { in: [a.id, b.id] } } });
+      await app.close();
+    }
+  });
+
+  it('reportSortKey uses GREATEST — a backdated report filed after a newer one does not move it backwards', async () => {
+    const app = await makeApp();
+    const c = await prisma.cadre.create({
+      data: {
+        name: 'REPSORTKEY GREATEST', phone: '+910000000805', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    try {
+      const recent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      const older = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+      const file = (selectedDate: Date) =>
+        app.inject({
+          method: 'POST', url: `/api/v1/cadres/${c.id}/reports`, headers: auth(superAdminToken),
+          payload: {
+            reporting_place: 'village', specific_location: 'x', person_status: 'alive',
+            current_phone: '+910', current_activity: 'x', front_photo_key: 'reports/x.jpg',
+            selected_date: selectedDate.toISOString(),
+          },
+        });
+      await file(recent);
+      await file(older); // filed second, but dated EARLIER — must not overwrite
+
+      const after = await prisma.cadre.findUnique({ where: { id: c.id }, select: { reportSortKey: true } });
+      expect(after?.reportSortKey?.toISOString()).toBe(recent.toISOString());
+    } finally {
+      await prisma.report.deleteMany({ where: { cadreId: c.id } });
+      await purgeChangeRequests([c.id]);
+      await prisma.cadre.delete({ where: { id: c.id } });
+      await app.close();
+    }
+  });
+
+  it('deleting the most recent report falls reportSortKey back to the next-newest survivor, then to null', async () => {
+    const app = await makeApp();
+    const c = await prisma.cadre.create({
+      data: {
+        name: 'REPSORTKEY DELETE', phone: '+910000000806', thana: 'x', currentAddress: 'x',
+        designation: 'x', category: 'thana', alertLevel: 'normal', aliases: [],
+      },
+    });
+    try {
+      const older = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
+      const newer = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000);
+      const file = (selectedDate: Date) =>
+        app.inject({
+          method: 'POST', url: `/api/v1/cadres/${c.id}/reports`, headers: auth(superAdminToken),
+          payload: {
+            reporting_place: 'village', specific_location: 'x', person_status: 'alive',
+            current_phone: '+910', current_activity: 'x', front_photo_key: 'reports/x.jpg',
+            selected_date: selectedDate.toISOString(),
+          },
+        });
+      await file(older);
+      const newerRes = await file(newer);
+      const newerId = (newerRes.json() as { id: number }).id;
+
+      const afterCreate = await prisma.cadre.findUnique({ where: { id: c.id }, select: { reportSortKey: true } });
+      expect(afterCreate?.reportSortKey?.toISOString()).toBe(newer.toISOString());
+
+      await app.inject({
+        method: 'DELETE', url: `/api/v1/cadres/${c.id}/reports/${newerId}`, headers: auth(superAdminToken),
+      });
+      const afterDelete = await prisma.cadre.findUnique({ where: { id: c.id }, select: { reportSortKey: true } });
+      expect(afterDelete?.reportSortKey?.toISOString()).toBe(older.toISOString());
+    } finally {
+      await prisma.report.deleteMany({ where: { cadreId: c.id } });
+      await purgeChangeRequests([c.id]);
+      await prisma.cadre.delete({ where: { id: c.id } });
+      await app.close();
+    }
+  });
+
   // ── लंबित रिपोर्टिंग tile drill-down: the flat 30-day rule, distinct from recency tiers ──
 
   it('pendingReporting=true matches a cadre with no report in the last 30 days, excludes one reported recently', async () => {

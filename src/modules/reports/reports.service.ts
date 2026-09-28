@@ -298,6 +298,17 @@ export function makeReportsService({
         // Create + audit + outbox commit atomically.
         const report = await prisma.$transaction(async (tx) => {
           const created = await tx.report.create({ data, ...withCadre });
+          // This task. Keeps Cadre.reportSortKey (the recency-tier drill-down's
+          // sort key — see cadres.service's list()) in sync. Raw SQL GREATEST,
+          // not a JS read-compare-write: Postgres's GREATEST ignores NULLs (so
+          // the cadre's first-ever report still sets it) and this is atomic
+          // against a concurrent report landing in the same window — a
+          // read-then-write from the `cadre` fetched before this transaction
+          // started could otherwise lose a race and write a stale, smaller date.
+          await tx.$executeRaw`
+            UPDATE cadres SET report_sort_key = GREATEST(report_sort_key, ${created.reportedAt})
+            WHERE id = ${cadreId}
+          `;
           await writeAuditLog(tx, {
             actorId: reporterId,
             action: 'report.create',
@@ -439,6 +450,19 @@ export function makeReportsService({
 
       await prisma.$transaction(async (tx) => {
         await tx.report.update({ where: { id: reportId }, data: { deletedAt: new Date() } });
+        // This task. Unlike create()'s GREATEST (which only ever needs to grow),
+        // a delete can SHRINK reportSortKey — deleting the cadre's most recent
+        // report must fall back to whatever's now the newest survivor (or NULL,
+        // if none). Recomputed from scratch rather than guessed, and safe to run
+        // in the same transaction as the update above: the just-deleted row's
+        // deletedAt is already visible to this statement (same tx, read-your-
+        // writes), so it's correctly excluded from the MAX.
+        await tx.$executeRaw`
+          UPDATE cadres SET report_sort_key = (
+            SELECT MAX(reported_at) FROM reports WHERE cadre_id = ${cadreId} AND deleted_at IS NULL
+          )
+          WHERE id = ${cadreId}
+        `;
         // Hash-chained audit trail (ADR-008) is how "who deleted what and when" is
         // recorded — this codebase's soft-delete columns are deletedAt-only, with
         // actor attribution living in the audit log rather than a deletedBy column

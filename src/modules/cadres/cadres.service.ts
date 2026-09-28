@@ -454,7 +454,22 @@ export function makeCadresService({
           // ADR-022: the latest non-deleted report's date, for nextReportingDueAt.
           // `take: 1` over the desc order is one lateral join, not an N+1.
           include: LATEST_REPORT,
-          orderBy: { id: 'asc' },
+          // This task. A recency-tier drill-down (?recency=...) orders by MOST
+          // RECENTLY REPORTED first — "what's being reported latest" is the whole
+          // point of opening one of those tiles — via the cached, indexed
+          // `reportSortKey` (kept in sync by reports.service's create()/remove();
+          // deliberately NOT named `lastReportedAt` — that name is already the
+          // WIRE field toWireCadre computes per-row, see schema.prisma's comment
+          // on the column). `nulls: 'last'` is explicit, not the default: Postgres
+          // defaults DESC to NULLS FIRST, which would float never-reported jail/
+          // death/permanent-status cadres (the only way this is null within
+          // `current` — recencyTierWhere puts them there with no cadence at all)
+          // to the TOP, exactly backwards from "most recently reported first".
+          // Every other view keeps the original stable `id asc` (register order).
+          orderBy:
+            query.recency !== undefined
+              ? [{ reportSortKey: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }]
+              : { id: 'asc' },
           skip: (query.page - 1) * query.pageSize,
           take: query.pageSize,
         }),

@@ -388,6 +388,20 @@ model Cadre {
   // 'overdue3m') is owned by application code (RecencyTier), not a DB-level concept.
   // Lets the worker notify once per tier ENTRY instead of re-firing every scan.
   lastEscalationTier String?           @map("last_escalation_tier")
+  // This task. Cached MAX(reports.reportedAt) for this cadre — lets a recency-
+  // tier drill-down (GET /cadres?recency=...) order "most recently reported
+  // first" with a plain indexed ORDER BY, instead of a per-row lateral join or
+  // an in-memory sort that only works within one fetched page. Kept in sync by
+  // reports.service's create() (SQL GREATEST — correct even for a backdated or
+  // concurrent report) and remove() (recomputed from what remains, on a
+  // soft-delete). Deliberately NOT named `lastReportedAt` — that name is
+  // already the WIRE field toWireCadre() computes per-row from the LATEST_REPORT
+  // lateral join (ADR-023, serialize.ts). Same underlying fact, two different
+  // jobs (one is a display value with an "absent if never reported" contract,
+  // this one is a sort key); a shared name would invite someone to read this
+  // column directly in place of the intentional explicit-parameter pattern
+  // ADR-023 set up. Internal/sort-only — never serialized on the wire.
+  reportSortKey      DateTime?         @map("report_sort_key")
   deletedAt          DateTime?         @map("deleted_at")
   createdAt          DateTime          @default(now()) @map("created_at")
   updatedAt          DateTime          @updatedAt @map("updated_at")
@@ -421,6 +435,8 @@ model Cadre {
   @@index([category, surrenderOrigin])
   // This task. The दीगर जिला/राज्य tabs drill one level further into that filter.
   @@index([category, surrenderOrigin, otherOriginType])
+  // This task. The recency-tier drill-down's new "most recently reported first" order.
+  @@index([reportSortKey])
   @@map("cadres")
 }
 
