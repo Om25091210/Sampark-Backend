@@ -451,7 +451,12 @@ describe('reports', () => {
   // ── ADR-049: jail/death cadres cannot be reported ──────────────────────────
 
   describe('reportability (ADR-049)', () => {
-    it('create against a jail-custody cadre (category) → 400 CADRE_NOT_REPORTABLE', async () => {
+    // This task (जेल/जमानत master profile). category='jail' used to block
+    // reporting outright (ADR-049's original reasoning: known location, nothing
+    // to check in on) — it no longer does, since an accused on bail or under
+    // investigation needs exactly the periodic check-ins reporting exists for.
+    // Only the more specific priorityCategory/permanentStatus signals still block.
+    it('create against a category=jail cadre → 201, reportable (जेल/जमानत profiles need check-ins)', async () => {
       const jail = await prisma.cadre.create({
         data: {
           name: 'TEST CADRE JAIL', phone: '+910000000002', thana: 'बीजापुर सदर',
@@ -464,8 +469,13 @@ describe('reports', () => {
         method: 'POST', url: `/api/v1/cadres/${jail.id}/reports`,
         headers: auth(officerToken), payload: { ...validBody(), cadre_id: jail.id },
       });
-      expect(res.statusCode).toBe(400);
-      expect((res.json() as { error: { code: string } }).error.code).toBe('CADRE_NOT_REPORTABLE');
+      expect(res.statusCode).toBe(201);
+      await prisma.report.deleteMany({ where: { cadreId: jail.id } });
+      // ADR-052: validBody()'s current_phone differs from this cadre's own phone,
+      // so the create also proposed a phone change in the background — same
+      // cleanup purgeReports() does for the main fixture cadre, needed here too
+      // or the FK'd CadreChangeRequest row blocks the cadre delete below.
+      await prisma.cadreChangeRequest.deleteMany({ where: { cadreId: jail.id } });
       await prisma.cadre.delete({ where: { id: jail.id } });
       await app.close();
     });

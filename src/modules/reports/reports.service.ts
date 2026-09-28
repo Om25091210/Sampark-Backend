@@ -244,17 +244,24 @@ export function makeReportsService({
 
       const cadre = await assertCadre(cadreId, scope);
 
-      // ADR-049. A cadre in jail custody (Cadre.category) or graded jail/death on
-      // the register (Cadre.priorityCategory) cannot be field-reported — there is
-      // no reporting due for either (see ADR-046 §3). Checked here, not just in
-      // the mobile UI, per the project's API-enforced-authorization rule.
+      // ADR-049. A cadre graded jail/death on the register (Cadre.priorityCategory)
+      // cannot be field-reported — there is no reporting due for either (see
+      // ADR-046 §3). Checked here, not just in the mobile UI, per the project's
+      // API-enforced-authorization rule.
+      //
+      // This task (जेल/जमानत master profile). `Cadre.category === 'jail'` was
+      // ALSO in this condition originally (ADR-049's own reasoning: a cadre in
+      // jail custody has no reporting due, since their location is already
+      // known). That no longer holds for this profile TYPE — an accused on bail
+      // or under investigation needs exactly the periodic check-ins reporting
+      // exists for — so `category` no longer blocks filing on its own; only the
+      // more specific priorityCategory/permanentStatus signals still do.
       //
       // This task (item 7). Same rule extended to any permanentStatus mark
       // (फौत/शासकीय नौकरी/GS/अन्य जिले में निवासरत): "no attendance/reporting
       // required going forward" means filing a NEW report is exactly the act
       // being exempted, not just the overdue count.
       if (
-        cadre.category === 'jail' ||
         cadre.priorityCategory === 'jail' ||
         cadre.priorityCategory === 'death' ||
         cadre.permanentStatus !== null
