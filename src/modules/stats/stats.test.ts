@@ -441,7 +441,9 @@ describe('stats', () => {
     // Exact invariants — true no matter what other test files have in the table.
     const app = await makeApp();
     const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard', headers: auth(hqToken) })).json() as Stats;
-    expect(s.totalCadres).toBe(s.byCategory.surrendered.total + s.byCategory.thana + s.byCategory.jail);
+    // जेल/जमानत is its own register: it has a count of its own (the 4th home card) but is
+    // NOT part of the caller-wide total.
+    expect(s.totalCadres).toBe(s.byCategory.surrendered.total + s.byCategory.thana);
     // district + other ≤ total: a surrendered cadre may have a NULL origin (ADR-019),
     // so the two tiles need not sum to the surrendered total.
     expect(s.byCategory.surrendered.district + s.byCategory.surrendered.other)
@@ -581,9 +583,48 @@ describe('stats', () => {
     const s = (
       await app.inject({ method: 'GET', url: '/api/v1/stats/dashboard?category=all', headers: auth(hqToken) })
     ).json() as Stats;
-    expect(s.totalCadres).toBe(s.byCategory.surrendered.total + s.byCategory.thana + s.byCategory.jail);
+    expect(s.totalCadres).toBe(s.byCategory.surrendered.total + s.byCategory.thana);
     expect(s.byCategory.thana).toBeGreaterThanOrEqual(1); // this file's THANA fixture still visible
     await app.close();
+  });
+
+  // ── जेल/जमानत is a separate register ─────────────────────────────────────────
+  // Scoped to this file's officer (thana 'स्टैट') so the before/after is exact even
+  // with other test files writing to the shared table.
+
+  it('a jail cadre is counted on the jail card only — not in the total, tiers, or officer workload', async () => {
+    const app = await makeApp();
+    const jail = await prisma.cadre.create({
+      data: {
+        name: `${TOKEN}-JAIL`, phone: '+910000000302', thana: 'स्टैट', currentAddress: 'Stats fixture',
+        designation: 'Fixture', aliases: [], category: 'jail', alertLevel: 'normal', assignedOfficerId: officerId,
+      },
+    });
+    try {
+      const dash = async (q = '') =>
+        (await app.inject({ method: 'GET', url: `/api/v1/stats/dashboard${q}`, headers: auth(officerToken) })).json() as Stats;
+      const all = await dash();
+      expect(all.byCategory.jail).toBe(1);
+      expect(all.totalCadres).toBe(all.byCategory.surrendered.total + all.byCategory.thana);
+      const r = all.reportingRecency;
+      expect(r.current + r.overdue1m + r.overdue2m + r.overdue3m).toBe(all.totalCadres);
+
+      // The jail screen's own summary is the jail register.
+      const jailOnly = await dash('?category=jail');
+      expect(jailOnly.totalCadres).toBe(1);
+      expect(jailOnly.byCategory.jail).toBe(1);
+      expect(jailOnly.byCategory.surrendered.total + jailOnly.byCategory.thana).toBe(0);
+
+      // A Maoist category screen never shows a jail count.
+      expect((await dash('?category=thana')).byCategory.jail).toBe(0);
+
+      const me = (await app.inject({ method: 'GET', url: '/api/v1/stats/me', headers: auth(officerToken) })).json() as OfficerStats;
+      expect(me.cadresByCategory.jail).toBe(1);
+      expect(me.assignedCadres).toBe(me.cadresByCategory.surrendered + me.cadresByCategory.thana);
+    } finally {
+      await prisma.cadre.delete({ where: { id: jail.id } });
+      await app.close();
+    }
   });
 
   // ── /stats/hierarchy (ADR-055) ──────────────────────────────────────────────

@@ -61,6 +61,9 @@ export interface CadreFacets {
   // ADR-065. Distinct `post` values — only present on the ~1,478 rows the
   // reconciled register backfilled it onto.
   posts: string[];
+  // Distinct थाना (जहां अपराध दर्ज है) across the jail register's live criminal cases.
+  // Empty outside category='jail' — no other register carries cases.
+  crimeThanas: string[];
 }
 
 // ADR-038. Per-row outcome of the bulk historical import. Keyed by serialNumber so the
@@ -425,6 +428,42 @@ export function makeCadresService({
       // ADR-041/046: reporting-recency tier — the shared per-category where-builder, the
       // same one /stats/dashboard's tiles use, so the tile count matches the list length.
       if (query.recency !== undefined) and.push(recencyTierWhere(query.recency));
+      if (query.excludeJail === true) and.push({ category: { not: 'jail' } });
+
+      // Jail-screen filters — see listCadresQuery. `cases` only counts live rows.
+      const liveCase: Prisma.CadreCaseWhereInput = { deletedAt: null };
+      if (query.firSearch !== undefined) {
+        and.push({ cases: { some: { ...liveCase, crimeNumber: { contains: query.firSearch, mode: 'insensitive' } } } });
+      }
+      if (query.hasFir === 'yes') {
+        and.push({ cases: { some: { ...liveCase, crimeNumber: { not: null }, NOT: { crimeNumber: '' } } } });
+      } else if (query.hasFir === 'no') {
+        and.push({ cases: { none: { ...liveCase, crimeNumber: { not: null }, NOT: { crimeNumber: '' } } } });
+      }
+      if (query.crimeThana !== undefined) {
+        and.push({
+          cases: {
+            some: {
+              ...liveCase,
+              OR: query.crimeThana.map((t) => ({ crimeThana: { contains: t, mode: 'insensitive' as const } })),
+            },
+          },
+        });
+      }
+      if (query.caseStage !== undefined) {
+        const stageWhere: Record<string, Prisma.CadreCaseWhereInput> = {
+          in_jail: { inJail: true },
+          on_bail: { bailGranted: true },
+          under_investigation: { underInvestigation: true },
+          under_trial: { underTrial: true },
+          // The register's own conditional: an outcome only applies once neither
+          // investigation nor trial is pending.
+          concluded: { underInvestigation: false, underTrial: false },
+        };
+        and.push({ cases: { some: { ...liveCase, OR: query.caseStage.map((s) => stageWhere[s]!) } } });
+      }
+      if (query.uapaApplied === true) and.push({ cases: { some: { ...liveCase, uapaApplied: true } } });
+      if (query.publicHarm === true) and.push({ cases: { some: { ...liveCase, publicHarmOccurred: true } } });
       // Drill-down for the dashboard's "लंबित रिपोर्टिंग" tile — see pendingReportingWhere.
       if (query.pendingReporting === true) and.push(pendingReportingWhere());
       if (and.length > 0) where.AND = and;
@@ -533,9 +572,19 @@ export function makeCadresService({
           orderBy: { post: 'asc' },
         }),
       ]);
+      const crimeThanaRows =
+        category === 'jail'
+          ? await prisma.cadreCase.findMany({
+              where: { deletedAt: null, crimeThana: { not: null }, cadre: visible },
+              distinct: ['crimeThana'],
+              select: { crimeThana: true },
+              orderBy: { crimeThana: 'asc' },
+            })
+          : [];
       // thana/designation are non-nullable, but a blank string is still not an
       // option worth offering.
       return {
+        crimeThanas: crimeThanaRows.map((r) => r.crimeThana!).filter((t) => t.trim() !== ''),
         thanas: thanas.map((r) => r.thana).filter((t) => t !== ''),
         designations: designations.map((r) => r.designation).filter((d) => d !== ''),
         posts: posts.map((r) => r.post!).filter((p) => p !== ''),

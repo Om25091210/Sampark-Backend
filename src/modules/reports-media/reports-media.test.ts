@@ -50,6 +50,11 @@ function multipartFile(
 
 // Minimal JPEG-ish payload; mimetype comes from the multipart header, not sniffing.
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+// A real, decodable 1x1 PNG — the PDF export sniffs magic bytes and pdfmake actually decodes it.
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
 
 beforeAll(async () => {
   const officer = await prisma.user.upsert({
@@ -231,10 +236,106 @@ describe('reports-media — PDF export', () => {
     await app.close();
   });
 
+  it('embeds a report’s photos in the PDF; an unreadable one is skipped, not fatal', async () => {
+    const { app, storage } = await makeApp();
+    const photoKey = `reports/cadre-${cadreId}/${randomUUID()}.png`;
+    await storage.put(photoKey, TINY_PNG, 'image/png');
+    await prisma.report.create({
+      data: {
+        cadreId, reportingPlace: 'village', specificLocation: 'गाँव चौक', personStatus: 'alive',
+        currentPhone: '+919812345678', currentActivity: 'खेती', reportedById: officerId,
+        photoKeys: [photoKey, `reports/cadre-${cadreId}/missing.jpg`],
+      },
+    });
+    const withPhoto = await app.inject({
+      method: 'GET', url: `/api/v1/cadres/${cadreId}/reports/export`, headers: auth(adminToken),
+    });
+    expect(withPhoto.statusCode).toBe(200);
+    const pdf = [...storage.objects.entries()].find(([k]) => k.startsWith('exports/'))![1].body;
+    // pdfmake writes an /Image XObject only for an embedded picture.
+    expect(pdf.toString('latin1')).toContain('/Subtype /Image');
+    await app.close();
+  });
+
   it('exports an unknown cadre → 404', async () => {
     const { app } = await makeApp();
     const res = await app.inject({
       method: 'GET', url: '/api/v1/cadres/99999999/reports/export', headers: auth(adminToken),
+    });
+    expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+});
+
+describe('reports-media — master profile PDF export', () => {
+  const JAIL_NAME = 'TEST JAIL PROFILE EXPORT';
+  let jailCadreId = 0;
+
+  beforeAll(async () => {
+    await prisma.cadreCase.deleteMany({ where: { cadre: { name: JAIL_NAME } } });
+    await prisma.cadre.deleteMany({ where: { name: JAIL_NAME } });
+    const jail = await prisma.cadre.create({
+      data: {
+        name: JAIL_NAME, phone: '+910000000003', thana: 'बीजापुर', currentAddress: 'Test address',
+        designation: 'Test', category: 'jail', alertLevel: 'normal', aliases: [],
+        cases: { create: [{ crimeNumber: '12/2024', sections: '307 IPC', inJail: true, jailName: 'जगदलपुर जेल', uapaApplied: true }] },
+      },
+    });
+    jailCadreId = jail.id;
+  });
+
+  afterAll(async () => {
+    await prisma.cadreCase.deleteMany({ where: { cadreId: jailCadreId } });
+    await prisma.cadre.deleteMany({ where: { id: jailCadreId } });
+  });
+
+  it('rejects an unauthenticated export → 401', async () => {
+    const { app } = await makeApp();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/cadres/${cadreId}/profile/export` });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('forbids export for officers (admin+ only) → 403', async () => {
+    const { app } = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/cadres/${cadreId}/profile/export`, headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('exports a profile PDF with the cadre’s photo (admin) → 200 { download_url }', async () => {
+    const { app, storage } = await makeApp();
+    const avatarKey = `cadres/cadre-${cadreId}/avatar-${randomUUID()}.png`;
+    await storage.put(avatarKey, TINY_PNG, 'image/png');
+    await prisma.cadre.update({ where: { id: cadreId }, data: { avatarKey } });
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/cadres/${cadreId}/profile/export`, headers: auth(adminToken),
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { download_url: string }).download_url).toContain(`exports/cadre-${cadreId}/profile-`);
+    const pdf = [...storage.objects.entries()].find(([k]) => k.startsWith('exports/'))![1];
+    expect(pdf.contentType).toBe('application/pdf');
+    expect(pdf.body.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+    expect(pdf.body.toString('latin1')).toContain('/Subtype /Image');
+    await prisma.cadre.update({ where: { id: cadreId }, data: { avatarKey: null } });
+    await app.close();
+  });
+
+  it('exports a jail-register profile with its criminal cases → 200', async () => {
+    const { app } = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/cadres/${jailCadreId}/profile/export`, headers: auth(adminToken),
+    });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('exports an unknown cadre → 404', async () => {
+    const { app } = await makeApp();
+    const res = await app.inject({
+      method: 'GET', url: '/api/v1/cadres/99999999/profile/export', headers: auth(adminToken),
     });
     expect(res.statusCode).toBe(404);
     await app.close();

@@ -108,6 +108,10 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       // This task. The category-section narrowing (on top of the role scope below) —
       // same fields `GET /cadres` filters on, so every count in the response ends up
       // describing the same slice of cadres a category screen's list shows.
+      // जेल/जमानत is a SEPARATE register (criminal-case accused, not Maoist cadre): the
+      // caller-wide summary ('all' / no category) excludes it entirely, and only the
+      // jail card's own count and a category='jail' drill-in see those cadres.
+      const categoryScoped = filter?.category !== undefined && filter.category !== 'all';
       const categoryWhere: Prisma.CadreWhereInput =
         filter?.category !== undefined && filter.category !== 'all'
           ? {
@@ -115,7 +119,7 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
               ...(filter.surrenderOrigin !== undefined && { surrenderOrigin: filter.surrenderOrigin }),
               ...(filter.otherOriginType !== undefined && { otherOriginType: filter.otherOriginType }),
             }
-          : {};
+          : { category: { not: 'jail' } };
 
       // ADR-044. Two predicates, because `Cadre` and `Report` scope differently: a cadre
       // is scoped on its OWN thana, a report through its cadre relation. They were one
@@ -171,7 +175,14 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
           where: { AND: [live, { category: 'surrendered', surrenderOrigin: 'other', otherOriginType: 'other_state' }] },
         }),
         prisma.cadre.count({ where: { AND: [live, { category: 'thana' }] } }),
-        prisma.cadre.count({ where: { AND: [live, { category: 'jail' }] } }),
+        // Scope only, NOT `live`: on the caller-wide summary `live` excludes jail (above),
+        // and the home screen's 4th card still needs the jail count. Under a category
+        // filter the two are the same query, since categoryWhere never widens past it.
+        prisma.cadre.count({
+          where: categoryScoped
+            ? { AND: [live, { category: 'jail' }] }
+            : { deletedAt: null, ...cadreScopeWhere(scope), category: 'jail' },
+        }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'critical' } }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'warning' } }),
         prisma.cadre.count({ where: { ...live, alertLevel: 'normal' } }),
@@ -193,8 +204,9 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       ]);
 
       return {
-        // The three categories partition every live cadre, so their sum is the total.
-        totalCadres: surrenderedTotal + thana + jail,
+        // The caller-wide total is the Maoist register only. Under category='jail' the
+        // other two are 0 (contradictory AND), so the jail screen's total is its own.
+        totalCadres: surrenderedTotal + thana + (filter?.category === 'jail' ? jail : 0),
         activeAlerts,
         reportsThisWeek,
         pendingReporting,
@@ -263,7 +275,15 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
       const firstKey = istMonthKey(now, MONTHS_SHOWN - 1);
       const windowStart = new Date(Date.parse(`${firstKey}-01T00:00:00.000Z`) - 330 * 60 * 1000);
 
-      const myReports = { deletedAt: null, reportedById: officerId, ...(scope.kind === 'all' ? {} : { cadre: { thana: { in: [...scope.thanas] } } }) };
+      // जेल/जमानत cadres are a separate register: they stay out of the officer's
+      // workload numbers and report totals (the per-category split below still counts
+      // them, which is what the jail card reads).
+      const mineMaoist: Prisma.CadreWhereInput = { ...mine, category: { not: 'jail' } };
+      const myReports = {
+        deletedAt: null,
+        reportedById: officerId,
+        cadre: { category: { not: 'jail' as const }, ...(scope.kind === 'all' ? {} : { thana: { in: [...scope.thanas] } }) },
+      };
 
       // Plain counts rather than groupBy — three categories and two places, each a
       // cheap indexed count. Same call the dashboard makes above, and for the same
@@ -281,11 +301,11 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         placeVillage,
         monthly,
       ] = await prisma.$transaction([
-        prisma.cadre.count({ where: mine }),
+        prisma.cadre.count({ where: mineMaoist }),
         // Same rule as the dashboard's `pendingReporting`, scoped to this officer:
         // no live report in the last 30 days. `none` covers never-reported.
         prisma.cadre.count({
-          where: { ...mine, reports: { none: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
+          where: { ...mineMaoist, reports: { none: { deletedAt: null, reportedAt: { gte: monthAgo } } } },
         }),
         prisma.report.count({ where: myReports }),
         prisma.cadreChangeRequest.count({ where: { submittedById: officerId, status: 'pending' } }),
@@ -303,8 +323,10 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
                  ) AS month,
                  count(*) AS reports
           FROM reports r
+          JOIN cadres c ON c.id = r.cadre_id
           WHERE r.reported_by_id = ${officerId}
             AND r.deleted_at IS NULL
+            AND c.category <> 'jail'
             AND r.reported_at >= ${windowStart}
           GROUP BY 1
           ORDER BY 1
@@ -354,6 +376,7 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
         FROM cadres c
         LEFT JOIN sole_officer_by_thana so ON so.thana = c.thana
         WHERE c.deleted_at IS NULL
+          AND c.category <> 'jail'
           AND c.assigned_officer_id IS NULL
           AND so.officer_id IS NULL
           ${scope.kind === 'all' ? Prisma.empty : Prisma.sql`AND c.thana IN (${Prisma.join(scope.thanas)})`}
@@ -407,6 +430,7 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
                  ) AS reported
           FROM cadres c
           WHERE c.deleted_at IS NULL
+            AND c.category <> 'jail'
             ${scope.kind === 'all' ? Prisma.empty : Prisma.sql`AND c.thana IN (${Prisma.join(scope.thanas)})`}
           GROUP BY c.thana
         `;
@@ -461,7 +485,8 @@ export function makeStatsService({ prisma }: StatsDeps): StatsService {
                ) AS overdue
         FROM cadres c
         LEFT JOIN sole_officer_by_thana so ON so.thana = c.thana AND c.assigned_officer_id IS NULL
-        WHERE c.deleted_at IS NULL AND COALESCE(c.assigned_officer_id, so.officer_id) IS NOT NULL
+        WHERE c.deleted_at IS NULL AND c.category <> 'jail'
+          AND COALESCE(c.assigned_officer_id, so.officer_id) IS NOT NULL
         GROUP BY COALESCE(c.assigned_officer_id, so.officer_id)
       `;
       const byOfficer = new Map(

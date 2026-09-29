@@ -117,4 +117,30 @@ export async function reportsMediaRoutes(app: FastifyInstance): Promise<void> {
       return service.exportReports(cadreId, request.scope!);
     },
   );
+
+  // GET /cadres/:cadreId/profile/export — master-profile Hindi PDF (photos, particulars,
+  // criminal cases) → S3 → { download_url }. Admin+, same gate as the reports export.
+  app.get(
+    '/cadres/:cadreId/profile/export',
+    {
+      preHandler: [app.authenticate, app.requireRole('admin', 'super_admin')],
+      schema: {
+        tags: ['Reports Media'],
+        summary: 'Export a cadre’s master profile as a Hindi PDF with photos (admin+)',
+        description: 'Generates a Devanagari PDF of the cadre’s profile and returns a download URL.',
+        security: bearerAuth,
+        params: zodToJson(mediaCadreParam),
+        response: {
+          200: jsonResponse('Generated — presigned download URL', {
+            download_url:
+              'https://sampark-media.s3.ap-south-1.amazonaws.com/exports/cadre-12/profile-….pdf?X-Amz-…',
+          }),
+        },
+      },
+    },
+    async (request) => {
+      const { cadreId } = mediaCadreParam.parse(request.params);
+      return service.exportProfile(cadreId, request.scope!);
+    },
+  );
 }

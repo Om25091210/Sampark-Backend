@@ -61,6 +61,25 @@ export const listCadresQuery = z.object({
   // z.coerce.boolean() would read "false" as truthy (any non-empty string), so
   // this checks the literal instead of coercing.
   pendingReporting: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
+  // जेल/जमानत is a separate register (criminal-case accused, not Maoist cadre). The
+  // mobile "सभी कैडर" / assigned / recency drill-downs send this so those lists match
+  // the jail-free summary; it is opt-in because report creation's cadre picker and the
+  // web still need to see jail cadres in an unfiltered list.
+  excludeJail: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
+  // Jail-screen master filter. All of these match against the cadre's live criminal
+  // cases (cadre_cases), so they only ever narrow to category='jail' cadres in practice.
+  //   firSearch  -> अपराध क्रमांक contains (case-insensitive)
+  //   hasFir     -> at least one case with a crime number / none at all
+  //   crimeThana -> थाना जहां अपराध दर्ज है, substring like thana/designation
+  //   caseStage  -> OR'd stages a person's cases can be in; a cadre matches when ANY
+  //                 one of its cases is in ANY selected stage
+  firSearch: z.string().trim().min(1).max(100).optional(),
+  hasFir: z.enum(['yes', 'no']).optional(),
+  crimeThana: multi(z.string().trim().min(1).max(100).transform(nfc)),
+  caseStage: multi(z.enum(['in_jail', 'on_bail', 'under_investigation', 'under_trial', 'concluded'])),
+  // AND'd flags (unlike caseStage) — "UAPA and जनहानि" is a narrowing, not a widening.
+  uapaApplied: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
+  publicHarm: z.enum(['true', 'false']).transform((v) => v === 'true').optional(),
   // ADR-018. Scopes the list to one officer's assigned cadres.
   //   assignedTo=me  -> the calling user (the officer's "मेरे कैडर" tile)
   //   assignedTo=<id> -> that officer (the admin roster view)
