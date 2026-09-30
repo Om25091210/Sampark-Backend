@@ -112,11 +112,16 @@ export function makeLayoutSafe(text: string): string {
     .join('');
 }
 
-function sanitizeDoc<T>(node: T): T {
-  if (typeof node === 'string') return makeLayoutSafe(node) as T;
-  if (Array.isArray(node)) return node.map(sanitizeDoc) as T;
+// Embedded photos are multi-megabyte base64 data URLs. They are NOT text: pushing them
+// through the font engine ran the process out of memory on any profile/report with a
+// photo. `images` (the document's picture dictionary) and any `data:` URL are passed
+// through untouched.
+function sanitizeDoc<T>(node: T, key?: string): T {
+  if (key === 'images') return node;
+  if (typeof node === 'string') return (node.startsWith('data:') ? node : makeLayoutSafe(node)) as T;
+  if (Array.isArray(node)) return node.map((n) => sanitizeDoc(n)) as T;
   if (node !== null && typeof node === 'object') {
-    return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, sanitizeDoc(v)])) as T;
+    return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, sanitizeDoc(v, k)])) as T;
   }
   return node; // numbers, booleans, and the footer function
 }

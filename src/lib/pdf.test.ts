@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
+import { deflateSync } from 'node:zlib';
 import { makeLayoutSafe, generateProfilePdf, generateReportsPdf } from './pdf.js';
 
 // fontkit throws on some Devanagari marks (see pdf.ts). These pin the behaviour that
@@ -69,4 +70,35 @@ describe('PDF generators never throw on unusual characters', () => {
       ).resolves.toBeInstanceOf(Buffer);
     }
   });
+});
+
+describe('PDF generation with real-sized photos', () => {
+  // Regression: sanitizeDoc used to lay out EVERY string in the document, including the
+  // multi-megabyte base64 data URLs of embedded photos, through the font engine. That
+  // hung the request (and blocked the event loop) for any profile/report that had a photo.
+  function noisePng(w: number, h: number): Buffer {
+    const raw = Buffer.alloc((w * 3 + 1) * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w * 3; x++) raw[y * (w * 3 + 1) + 1 + x] = (Math.random() * 256) | 0;
+    const crcT = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+    const crc = (b: Buffer) => { let c = ~0; for (const x of b) c = crcT[(c ^ x) & 255]! ^ (c >>> 8); return (~c) >>> 0; };
+    const chunk = (t: string, d: Buffer) => { const l = Buffer.alloc(4); l.writeUInt32BE(d.length); const td = Buffer.concat([Buffer.from(t), d]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([l, td, c]); };
+    const ih = Buffer.alloc(13); ih.writeUInt32BE(w, 0); ih.writeUInt32BE(h, 4); ih[8] = 8; ih[9] = 2;
+    return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ih), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+  }
+
+  it('a profile with three ~1.5 MB photos generates in seconds, not minutes', async () => {
+    const big = noisePng(700, 700);
+    expect(big.length).toBeGreaterThan(1_000_000);
+    const t0 = Date.now();
+    const pdf = await generateProfilePdf({
+      generatedAt: new Date(), photos: [big, big, big],
+      cadre: {
+        name: 'नाम', phone: '1', aliases: [], thana: 'बीजापुर', currentAddress: 'x', designation: 'x',
+        category: 'thana', hasAadhaar: true, hasBankAccount: false, hasAbProforma: false, hasAgreementLetter: false,
+      },
+      cases: [],
+    });
+    expect(pdf.length).toBeGreaterThan(big.length);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+  }, 60_000);
 });
