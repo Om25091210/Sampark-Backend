@@ -10,27 +10,27 @@ const FONT_BOLD = fileURLToPath(new URL('../assets/fonts/NotoSansDevanagari-Bold
 
 // Register the font once against the pdfmake singleton and restrict local file
 // access to exactly the two bundled TTFs (no arbitrary path reads). Only normal +
-// bold variants exist â€” do not style any text `italics`/`bolditalics`.
+// bold variants exist — do not style any text `italics`/`bolditalics`.
 pdfMake.setFonts({ NotoSansDevanagari: { normal: FONT_REGULAR, bold: FONT_BOLD } });
 pdfMake.setLocalAccessPolicy((path) => path === FONT_REGULAR || path === FONT_BOLD);
 // The document never references external resources; deny all external URL fetches.
 pdfMake.setUrlAccessPolicy(() => false);
 
 // Hindi labels for the enum values used in a report.
-const PLACE_LABEL: Record<'thana' | 'village', string> = { thana: 'à¤¥à¤¾à¤¨à¤¾', village: 'à¤—à¤¾à¤à¤µ' };
-const STATUS_LABEL: Record<'alive' | 'dead', string> = { alive: 'à¤œà¥€à¤µà¤¿à¤¤', dead: 'à¤®à¥ƒà¤¤' };
+const PLACE_LABEL: Record<'thana' | 'village', string> = { thana: 'थाना', village: 'गाँव' };
+const STATUS_LABEL: Record<'alive' | 'dead', string> = { alive: 'जीवित', dead: 'मृत' };
 
 export interface ReportExportRow {
   reportedAt: Date;
   reportingPlace: 'thana' | 'village';
-  // This task. Optional â€” a personStatus='dead' row has none of these three
-  // (see reports.schema.ts's checkDeathRequirements); rendered as 'â€”' below,
+  // This task. Optional — a personStatus='dead' row has none of these three
+  // (see reports.schema.ts's checkDeathRequirements); rendered as '—' below,
   // same convention the two already-optional fields below already use.
   specificLocation?: string;
   personStatus: 'alive' | 'dead';
   currentPhone?: string;
   currentActivity?: string;
-  // ADR-050. The other two fields of the three-field split. Optional â€” nullable
+  // ADR-050. The other two fields of the three-field split. Optional — nullable
   // on rows created before the split, and not every report fills them.
   surrenderNetworkDetails?: string;
   otherInformation?: string;
@@ -47,12 +47,12 @@ export interface ReportExportData {
   generatedAt: Date;
   reports: ReportExportRow[];
   // Photos that existed but were left out (unreadable, unsupported format, or over the
-  // export's size budget) â€” surfaced in the document so a short PDF is never mistaken
+  // export's size budget) — surfaced in the document so a short PDF is never mistaken
   // for a report that had no photos.
   photosOmitted?: number;
 }
 
-// dd/mm/yyyy in IST (Asia/Kolkata) â€” the report is read locally in Chhattisgarh.
+// dd/mm/yyyy in IST (Asia/Kolkata) — the report is read locally in Chhattisgarh.
 const dateFmt = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'Asia/Kolkata',
   day: '2-digit',
@@ -68,6 +68,23 @@ function formatDate(d: Date): string {
 // as JPEG or PNG, so the label here is only a fallback for an unexpected caller.
 function imageDataUrl(buf: Buffer): string {
   return `data:${sniffImageType(buf) ?? 'image/jpeg'};base64,${buf.toString('base64')}`;
+}
+
+// fontkit (pdfmake's font engine) throws "Cannot read properties of null (reading
+// 'xCoordinate')" while positioning the Devanagari Vedic accent marks U+0951-U+0954 after
+// a consonant (found by scanning the whole Devanagari block against the bundled Noto
+// font: only U+0951 crashes today, the neighbours are stripped as the same kind of mark).
+// They carry no meaning in a name/address/report, but one stray paste of them used to turn a
+// whole export into a 500, so every string is cleaned before pdfmake sees it.
+const FONT_CRASH_MARKS = /[॑-॔]/g;
+
+function sanitizeDoc<T>(node: T): T {
+  if (typeof node === 'string') return node.replace(FONT_CRASH_MARKS, '') as T;
+  if (Array.isArray(node)) return node.map(sanitizeDoc) as T;
+  if (node !== null && typeof node === 'object') {
+    return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, sanitizeDoc(v)])) as T;
+  }
+  return node; // numbers, booleans, and the footer function
 }
 
 const REPORT_COLUMNS = 10;
@@ -90,32 +107,32 @@ function photoLines(names: string[], fit: [number, number]): Content[] {
 // Builds a Hindi PDF of a cadre's reports and resolves to the raw PDF bytes.
 export async function generateReportsPdf(data: ReportExportData): Promise<Buffer> {
   const header: Content = [
-    { text: 'à¤¸à¤‚à¤ªà¤°à¥à¤• â€” à¤•à¥ˆà¤¡à¤° à¤°à¤¿à¤ªà¥‹à¤°à¥à¤Ÿ', style: 'title' },
+    { text: 'संपर्क — कैडर रिपोर्ट', style: 'title' },
     {
       style: 'meta',
       columns: [
-        { text: [{ text: 'à¤•à¥ˆà¤¡à¤° à¤•à¤¾ à¤¨à¤¾à¤®: ', bold: true }, data.cadreName] },
-        { text: [{ text: 'à¤¥à¤¾à¤¨à¤¾: ', bold: true }, data.cadreThana] },
+        { text: [{ text: 'कैडर का नाम: ', bold: true }, data.cadreName] },
+        { text: [{ text: 'थाना: ', bold: true }, data.cadreThana] },
       ],
     },
     {
       style: 'meta',
       columns: [
-        { text: [{ text: 'à¤«à¤¼à¥‹à¤¨: ', bold: true }, data.cadrePhone] },
-        { text: [{ text: 'à¤¨à¤¿à¤°à¥à¤¯à¤¾à¤¤ à¤¦à¤¿à¤¨à¤¾à¤‚à¤•: ', bold: true }, formatDate(data.generatedAt)] },
+        { text: [{ text: 'फ़ोन: ', bold: true }, data.cadrePhone] },
+        { text: [{ text: 'निर्यात दिनांक: ', bold: true }, formatDate(data.generatedAt)] },
       ],
     },
-    { text: `à¤•à¥à¤² à¤°à¤¿à¤ªà¥‹à¤°à¥à¤Ÿ: ${data.reports.length}`, style: 'meta', bold: true },
+    { text: `कुल रिपोर्ट: ${data.reports.length}`, style: 'meta', bold: true },
     ...(data.photosOmitted
-      ? [{ text: `à¤¨à¥‹à¤Ÿ: ${data.photosOmitted} à¤«à¤¼à¥‹à¤Ÿà¥‹ à¤‡à¤¸ à¤¦à¤¸à¥à¤¤à¤¾à¤µà¥‡à¤œà¤¼ à¤®à¥‡à¤‚ à¤¶à¤¾à¤®à¤¿à¤² à¤¨à¤¹à¥€à¤‚ à¤¹à¥‹ à¤¸à¤•à¥€à¤‚à¥¤`, style: 'meta' } as Content]
+      ? [{ text: `नोट: ${data.photosOmitted} फ़ोटो इस दस्तावेज़ में शामिल नहीं हो सकीं।`, style: 'meta' } as Content]
       : []),
   ];
 
-  // ADR-050. Three distinct description columns, not one blob â€” mirrors the
+  // ADR-050. Three distinct description columns, not one blob — mirrors the
   // mobile create-report form's three-field split.
   const tableHeader = [
-    'à¤•à¥à¤°à¤®', 'à¤¦à¤¿à¤¨à¤¾à¤‚à¤•', 'à¤¸à¥à¤¥à¤¾à¤¨', 'à¤µà¤¿à¤¶à¤¿à¤·à¥à¤Ÿ à¤¸à¥à¤¥à¤¾à¤¨', 'à¤¸à¥à¤¥à¤¿à¤¤à¤¿', 'à¤«à¤¼à¥‹à¤¨',
-    'à¤µà¤°à¥à¤¤à¤®à¤¾à¤¨ à¤—à¤¤à¤¿à¤µà¤¿à¤§à¤¿', 'à¤…à¤¨à¥à¤¯ à¤®à¤¾à¤“à¤µà¤¾à¤¦à¤¿à¤¯à¥‹à¤‚ à¤¸à¥‡ à¤¸à¤®à¥à¤ªà¤°à¥à¤• à¤µà¤¿à¤µà¤°à¤£', 'à¤…à¤¨à¥à¤¯ à¤œà¤¾à¤¨à¤•à¤¾à¤°à¥€', 'à¤°à¤¿à¤ªà¥‹à¤°à¥à¤Ÿà¤•à¤°à¥à¤¤à¤¾',
+    'क्रम', 'दिनांक', 'स्थान', 'विशिष्ट स्थान', 'स्थिति', 'फ़ोन',
+    'वर्तमान गतिविधि', 'अन्य माओवादियों से सम्पर्क विवरण', 'अन्य जानकारी', 'रिपोर्टकर्ता',
   ].map((text) => ({ text, style: 'th' }));
 
   // Each report is its own row; a report with photos gets a second row directly under
@@ -128,12 +145,12 @@ export async function generateReportsPdf(data: ReportExportData): Promise<Buffer
       { text: String(i + 1), style: 'td' },
       { text: formatDate(r.reportedAt), style: 'td' },
       { text: PLACE_LABEL[r.reportingPlace], style: 'td' },
-      { text: r.specificLocation || 'â€”', style: 'td' },
+      { text: r.specificLocation || '—', style: 'td' },
       { text: STATUS_LABEL[r.personStatus], style: 'td' },
-      { text: r.currentPhone || 'â€”', style: 'td' },
-      { text: r.currentActivity || 'â€”', style: 'td' },
-      { text: r.surrenderNetworkDetails || 'â€”', style: 'td' },
-      { text: r.otherInformation || 'â€”', style: 'td' },
+      { text: r.currentPhone || '—', style: 'td' },
+      { text: r.currentActivity || '—', style: 'td' },
+      { text: r.surrenderNetworkDetails || '—', style: 'td' },
+      { text: r.otherInformation || '—', style: 'td' },
       { text: r.reporterName, style: 'td' },
     ]);
     if (r.photos.length > 0) {
@@ -151,7 +168,7 @@ export async function generateReportsPdf(data: ReportExportData): Promise<Buffer
 
   const body: Content =
     data.reports.length === 0
-      ? { text: 'à¤‡à¤¸ à¤•à¥ˆà¤¡à¤° à¤•à¥‡ à¤²à¤¿à¤ à¤•à¥‹à¤ˆ à¤°à¤¿à¤ªà¥‹à¤°à¥à¤Ÿ à¤¦à¤°à¥à¤œ à¤¨à¤¹à¥€à¤‚ à¤¹à¥ˆà¥¤', style: 'meta', bold: true }
+      ? { text: 'इस कैडर के लिए कोई रिपोर्ट दर्ज नहीं है।', style: 'meta', bold: true }
       : {
           table: {
             headerRows: 1,
@@ -175,14 +192,14 @@ export async function generateReportsPdf(data: ReportExportData): Promise<Buffer
       td: { fontSize: 8, margin: [0, 2, 0, 2] },
     },
     footer: (currentPage: number, pageCount: number): Content => ({
-      text: `à¤ªà¥ƒà¤·à¥à¤  ${currentPage} / ${pageCount}`,
+      text: `पृष्ठ ${currentPage} / ${pageCount}`,
       alignment: 'center',
       fontSize: 8,
       margin: [0, 12, 0, 0],
     }),
   };
 
-  return pdfMake.createPdf(docDefinition).getBuffer();
+  return pdfMake.createPdf(sanitizeDoc(docDefinition)).getBuffer();
 }
 
 // ─── Master profile ───────────────────────────────────────────────────────────
@@ -421,5 +438,5 @@ export async function generateProfilePdf(data: ProfileExportData): Promise<Buffe
     }),
   };
 
-  return pdfMake.createPdf(docDefinition).getBuffer();
+  return pdfMake.createPdf(sanitizeDoc(docDefinition)).getBuffer();
 }

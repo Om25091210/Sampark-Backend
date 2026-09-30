@@ -341,3 +341,46 @@ describe('reports-media — master profile PDF export', () => {
     await app.close();
   });
 });
+
+describe('reports-media — PDF export survives text the font engine cannot lay out', () => {
+  // U+0951 (Devanagari stress sign udatta) after a consonant crashes fontkit's GPOS
+  // anchor positioning ("Cannot read properties of null (reading 'xCoordinate')"),
+  // which surfaced as a 500 on a real cadre's profile export.
+  const BAD = 'क\u0951ष';
+
+  it('reports export with the mark in an officer-typed field → 200', async () => {
+    const { app } = await makeApp();
+    await prisma.report.create({
+      data: {
+        cadreId, reportingPlace: 'village', specificLocation: BAD, personStatus: 'alive',
+        currentPhone: '+919812345678', currentActivity: BAD, otherInformation: BAD, reportedById: officerId,
+      },
+    });
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/cadres/${cadreId}/reports/export`, headers: auth(adminToken),
+    });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('profile export with the mark in name/address/designation → 200', async () => {
+    const { app } = await makeApp();
+    const before = await prisma.cadre.findUniqueOrThrow({ where: { id: cadreId } });
+    await prisma.cadre.update({
+      where: { id: cadreId },
+      data: { name: `${CADRE_NAME} ${BAD}`, currentAddress: BAD, designation: BAD, aliases: [BAD] },
+    });
+    try {
+      const res = await app.inject({
+        method: 'GET', url: `/api/v1/cadres/${cadreId}/profile/export`, headers: auth(adminToken),
+      });
+      expect(res.statusCode).toBe(200);
+    } finally {
+      await prisma.cadre.update({
+        where: { id: cadreId },
+        data: { name: before.name, currentAddress: before.currentAddress, designation: before.designation, aliases: before.aliases },
+      });
+      await app.close();
+    }
+  });
+});
