@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import pdfMake from 'pdfmake';
 import { sniffImageType } from './images.js';
@@ -70,23 +71,55 @@ function imageDataUrl(buf: Buffer): string {
   return `data:${sniffImageType(buf) ?? 'image/jpeg'};base64,${buf.toString('base64')}`;
 }
 
-// fontkit (pdfmake's font engine) throws "Cannot read properties of null (reading
-// 'xCoordinate')" while positioning the Devanagari Vedic accent marks U+0951-U+0954 after
-// a consonant (found by scanning the whole Devanagari block against the bundled Noto
-// font: only U+0951 crashes today, the neighbours are stripped as the same kind of mark).
-// They carry no meaning in a name/address/report, but one stray paste of them used to turn a
-// whole export into a 500, so every string is cleaned before pdfmake sees it.
-const FONT_CRASH_MARKS = /[॑-॔]/g;
+// pdfmake's font engine (fontkit) THROWS ("Cannot read properties of null (reading
+// 'xCoordinate')") when it positions certain Devanagari marks against a base glyph — a
+// bug in its GPOS anchor handling, hit in production by a single stray character in a
+// cadre's data (U+0951 first; a scan of the bundled Noto font finds U+1CD0, U+1CD2 and
+// U+A8E1 crash too, and it can depend on the surrounding characters). One bad character
+// used to turn a whole export into a 500 with no way to know which cadre or field.
+//
+// So instead of stripping a hard-coded list, each string is laid out against the real
+// fonts first; only a string that throws is repaired, by keeping every character whose
+// addition still lays out. Text that already works is never altered.
+const requireCjs = createRequire(import.meta.url);
+interface LayoutFont {
+  layout(text: string): unknown;
+}
+const fontkit = requireCjs('fontkit') as { openSync(path: string): LayoutFont };
+const LAYOUT_FONTS: LayoutFont[] = [FONT_REGULAR, FONT_BOLD].map((f) => fontkit.openSync(f));
+
+function lays(text: string): boolean {
+  try {
+    for (const font of LAYOUT_FONTS) font.layout(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// pdfmake lays text out word by word, so a word can crash on its own (no leading context)
+// even when the whole string lays out — check and repair each word, keep the whitespace.
+export function makeLayoutSafe(text: string): string {
+  if (text === '') return text;
+  return text
+    .split(/(\s+)/)
+    .map((part) => {
+      if (part === '' || /^\s+$/.test(part) || lays(part)) return part;
+      let kept = '';
+      for (const ch of part) if (lays(kept + ch)) kept += ch;
+      return kept;
+    })
+    .join('');
+}
 
 function sanitizeDoc<T>(node: T): T {
-  if (typeof node === 'string') return node.replace(FONT_CRASH_MARKS, '') as T;
+  if (typeof node === 'string') return makeLayoutSafe(node) as T;
   if (Array.isArray(node)) return node.map(sanitizeDoc) as T;
   if (node !== null && typeof node === 'object') {
     return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, sanitizeDoc(v)])) as T;
   }
   return node; // numbers, booleans, and the footer function
 }
-
 const REPORT_COLUMNS = 10;
 const PHOTOS_PER_LINE = 5;
 
