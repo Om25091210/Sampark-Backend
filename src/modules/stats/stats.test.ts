@@ -4,7 +4,14 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../app.js';
 import { testConfig } from '../../test/helpers.js';
 import { signAccessToken } from '../../lib/tokens.js';
-import type { HierarchyStats, OfficerStats } from './stats.schema.js';
+import type {
+  CadreProfileStats,
+  HierarchyStats,
+  OfficerStats,
+  RecencyByThanaStats,
+  ReportsDailyStats,
+  SurrendersStats,
+} from './stats.schema.js';
 
 const prisma = new PrismaClient();
 const config = testConfig();
@@ -776,6 +783,364 @@ describe('stats', () => {
       method: 'GET', url: '/api/v1/stats/hierarchy?by=thana', headers: auth(officerToken),
     });
     expect(res.statusCode).toBe(403);
+    await app.close();
+  });
+
+  // ── /stats/reports/daily (web stats page) ───────────────────────────────────
+  // Scoped to this file's officer (thana 'स्टैट', file-unique) so every number below is
+  // EXACT — nothing outside this file's setup can land in that thana's series.
+
+  const istDay = (ms: number): string => new Date(ms + 330 * 60 * 1000).toISOString().slice(0, 10);
+  const daily = async (app: FastifyInstance, token: string, qs = ''): Promise<{ status: number; body: ReportsDailyStats }> => {
+    const res = await app.inject({ method: 'GET', url: `/api/v1/stats/reports/daily${qs}`, headers: auth(token) });
+    return { status: res.statusCode, body: res.json() as ReportsDailyStats };
+  };
+  const dayOf = (s: ReportsDailyStats, key: string) => s.days.find((d) => d.date === key);
+
+  it('GET /stats/reports/daily without a token → 401', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/reports/daily' });
+    expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('defaults to the last 30 IST days, gap-filled, oldest first — and counts only in-window reports', async () => {
+    const app = await makeApp();
+    const { status, body } = await daily(app, officerToken);
+    expect(status).toBe(200);
+    expect(body.days).toHaveLength(30);
+    expect(body.to).toBe(istDay(Date.now()));
+    expect(body.days.map((d) => d.date)).toEqual([...body.days.map((d) => d.date)].sort());
+    // OTHER reported 2 days ago; THANA's report is 40 days old — outside the window.
+    expect(body.totals).toEqual({ reports: 1, uniqueCadres: 1 });
+    expect(dayOf(body, istDay(Date.now() - 2 * DAY_MS))).toEqual({
+      date: istDay(Date.now() - 2 * DAY_MS), reports: 1, uniqueCadres: 1,
+    });
+    // A day with no reports is a real 0, present in the series.
+    expect(dayOf(body, istDay(Date.now() - 5 * DAY_MS))).toMatchObject({ reports: 0, uniqueCadres: 0 });
+    await app.close();
+  });
+
+  it('a wider explicit range picks up the older report', async () => {
+    const app = await makeApp();
+    const { body } = await daily(app, officerToken, `?from=${istDay(Date.now() - 89 * DAY_MS)}&to=${istDay(Date.now())}`);
+    expect(body.days).toHaveLength(90);
+    expect(body.totals).toEqual({ reports: 2, uniqueCadres: 2 });
+    await app.close();
+  });
+
+  it('uniqueCadres counts a cadre once per day, and the range total is distinct — not the sum of the days', async () => {
+    const app = await makeApp();
+    // 12:00 IST on the IST day 10 days ago: three reports on one cadre + one on another.
+    const noon = new Date(Date.parse(`${istDay(Date.now() - 10 * DAY_MS)}T06:30:00.000Z`));
+    const mk = (cadreId: number) =>
+      prisma.report.create({
+        data: {
+          cadreId, reportedById: officerId, reportingPlace: 'thana', specificLocation: 'x',
+          personStatus: 'alive', currentPhone: '+910', currentActivity: 'y', reportedAt: noon,
+        },
+      });
+    const made = await Promise.all([mk(cadreIds[0]!), mk(cadreIds[0]!), mk(cadreIds[0]!), mk(cadreIds[1]!)]);
+    try {
+      const { body } = await daily(app, officerToken);
+      const key = istDay(noon.getTime());
+      expect(dayOf(body, key)).toEqual({ date: key, reports: 4, uniqueCadres: 2 });
+      // OTHER (cadreIds[1]) reported on this day AND 2 days ago; ALERT (cadreIds[0]) only here.
+      // Per-day uniques sum to 3, but only 2 different cadres reported in the range.
+      expect(body.days.reduce((s, d) => s + d.uniqueCadres, 0)).toBe(3);
+      expect(body.totals).toEqual({ reports: 5, uniqueCadres: 2 });
+    } finally {
+      await prisma.report.deleteMany({ where: { id: { in: made.map((r) => r.id) } } });
+      await app.close();
+    }
+  });
+
+  it('buckets by IST day: 00:30 IST on the 1st is that day, not the previous UTC one', async () => {
+    const app = await makeApp();
+    // 2026-06-30T19:00:00Z IS 2026-07-01 00:30 IST (same boundary /stats/me's months test uses).
+    const boundary = await prisma.report.create({
+      data: {
+        cadreId: cadreIds[0]!, reportedById: officerId, reportingPlace: 'thana',
+        specificLocation: 'सीमा', personStatus: 'alive', currentPhone: '+910',
+        currentActivity: 'boundary', reportedAt: new Date('2026-06-30T19:00:00.000Z'),
+      },
+    });
+    try {
+      const { body } = await daily(app, officerToken, '?from=2026-06-30&to=2026-07-01');
+      expect(dayOf(body, '2026-07-01')).toMatchObject({ reports: 1, uniqueCadres: 1 });
+      expect(dayOf(body, '2026-06-30')).toMatchObject({ reports: 0, uniqueCadres: 0 });
+    } finally {
+      await prisma.report.delete({ where: { id: boundary.id } });
+      await app.close();
+    }
+  });
+
+  it('a jail cadre\'s report is not counted — जेल/जमानत is a separate register', async () => {
+    const app = await makeApp();
+    const jail = await prisma.cadre.create({
+      data: {
+        name: `${TOKEN}-DAILY-JAIL`, phone: '+910000000302', thana: 'स्टैट', currentAddress: 'Stats fixture',
+        designation: 'Fixture', aliases: [], category: 'jail', alertLevel: 'normal', assignedOfficerId: officerId,
+      },
+    });
+    const rep = await prisma.report.create({
+      data: {
+        cadreId: jail.id, reportedById: officerId, reportingPlace: 'thana', specificLocation: 'x',
+        personStatus: 'alive', currentPhone: '+910', currentActivity: 'y', reportedAt: new Date(Date.now() - DAY_MS),
+      },
+    });
+    try {
+      const { body } = await daily(app, officerToken);
+      expect(body.totals).toEqual({ reports: 1, uniqueCadres: 1 }); // still just OTHER's
+    } finally {
+      await prisma.report.delete({ where: { id: rep.id } });
+      await prisma.cadre.delete({ where: { id: jail.id } });
+      await app.close();
+    }
+  });
+
+  it('thana filter narrows within scope; an officer cannot widen to another thana', async () => {
+    const app = await makeApp();
+    const hq = await daily(app, hqToken, `?thana=${encodeURIComponent('स्टैट')}`);
+    expect(hq.body.totals).toEqual({ reports: 1, uniqueCadres: 1 });
+
+    // Same officer, asking for a real thana that is NOT theirs → empty, never that thana's data.
+    const other = await daily(app, officerToken, `?thana=${encodeURIComponent(SDOP_THANA)}`);
+    expect(other.status).toBe(200);
+    expect(other.body.days).toHaveLength(30);
+    expect(other.body.totals).toEqual({ reports: 0, uniqueCadres: 0 });
+
+    // A sub-division that does not contain the officer's thana likewise intersects to nothing.
+    const sd = await daily(app, officerToken, `?subDivision=${encodeURIComponent(SDOP_SUB_DIVISION)}`);
+    expect(sd.body.totals).toEqual({ reports: 0, uniqueCadres: 0 });
+    await app.close();
+  });
+
+  // ── /stats/hierarchy?by=officer (web stats page, Phase 2) ───────────────────
+
+  it('?by=officer gives HQ the per-officer rows an SDOP gets by default', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/hierarchy?by=officer', headers: auth(hqToken) });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as Extract<HierarchyStats, { level: 'officers' }>;
+    expect(s.level).toBe('officers'); // not 'admins' — HQ's default
+    const row = s.rows.find((r) => r.name === sdopOfficerName);
+    expect(row).toBeDefined();
+    expect(row!.thana).toBe(SDOP_THANA);
+    expect(row!.assignedCadres).toBe(2);
+    expect(row!.reportingCompletion).toBe(50);
+    expect(s.totalAssigned).toBe(s.rows.reduce((sum, r) => sum + r.assignedCadres, 0));
+
+    // Unchanged for everyone else: officers still refused, junk values still rejected.
+    expect((await app.inject({ method: 'GET', url: '/api/v1/stats/hierarchy?by=officer', headers: auth(officerToken) })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/stats/hierarchy?by=bogus', headers: auth(hqToken) })).statusCode).toBe(400);
+    await app.close();
+  });
+
+  // ── /stats/recency-by-thana ─────────────────────────────────────────────────
+
+  it('GET /stats/recency-by-thana without a token → 401', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/stats/recency-by-thana' })).statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('recency-by-thana: an officer gets exactly their thana, with the fixture tiers', async () => {
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/stats/recency-by-thana', headers: auth(officerToken) });
+    expect(res.statusCode).toBe(200);
+    const s = res.json() as RecencyByThanaStats;
+    expect(s.rows).toHaveLength(1);
+    // OTHER reported 2d ago, THANA 40d ago, ALERT never — same tiers the dashboard test pins.
+    expect(s.rows[0]).toMatchObject({ thana: 'स्टैट', current: 1, overdue1m: 1, overdue2m: 0, overdue3m: 1, total: 3 });
+    await app.close();
+  });
+
+  it('recency-by-thana: HQ gets all 22 canonical thanas, each partitioned by its four tiers', async () => {
+    const app = await makeApp();
+    const s = (await app.inject({ method: 'GET', url: '/api/v1/stats/recency-by-thana', headers: auth(hqToken) })).json() as RecencyByThanaStats;
+    expect(s.rows).toHaveLength(22);
+    for (const r of s.rows) expect(r.current + r.overdue1m + r.overdue2m + r.overdue3m).toBe(r.total);
+    const row = s.rows.find((r) => r.thana === SDOP_THANA);
+    expect(row?.subDivision).toBe(SDOP_SUB_DIVISION);
+    expect(row!.total).toBeGreaterThanOrEqual(2);
+    await app.close();
+  });
+
+  // ── /stats/cadre-profile ────────────────────────────────────────────────────
+
+  const profile = async (app: FastifyInstance, token: string, qs = ''): Promise<CadreProfileStats> =>
+    (await app.inject({ method: 'GET', url: `/api/v1/stats/cadre-profile${qs}`, headers: auth(token) })).json() as CadreProfileStats;
+  const profileBase = {
+    phone: '+910000000303', thana: 'स्टैट', currentAddress: 'Stats fixture',
+    designation: 'Fixture', aliases: [] as string[], alertLevel: 'normal' as const,
+  };
+  const dobAgo = (years: number, extraDays = 40): Date =>
+    new Date(`${istDay(Date.now() - (years * 365.25 + extraDays) * DAY_MS)}T00:00:00.000Z`);
+
+  it('GET /stats/cadre-profile without a token → 401', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/stats/cadre-profile' })).statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('cadre-profile: blank fields are counted as unknown and coverage says so — nothing reads as complete', async () => {
+    const app = await makeApp();
+    const p = await profile(app, officerToken);
+    // This file's three thana-'स्टैट' fixtures set none of the optional fields.
+    expect(p.total).toBe(3);
+    expect(p.gender).toEqual({ male: 0, female: 0, unknown: 3 });
+    expect(p.age.noDob).toBe(3);
+    expect(p.age.bands.reduce((s, b) => s + b.male + b.female + b.unknownGender, 0)).toBe(0);
+    expect(p.designation).toEqual({ rows: [{ label: 'Fixture', count: 3 }], other: 0, unknown: 0 });
+    expect(p.caste).toEqual({ rows: [], other: 0, unknown: 3 });
+    expect(p.grade).toEqual({ A: 0, B: 0, C: 0, jail: 0, death: 0, unset: 3 });
+    expect(p.rankClass).toEqual({ DVCM: 0, ACM: 0, PM: 0, unset: 3 });
+    expect(p.permanentStatus.none).toBe(3);
+    expect(Object.values(p.coverage)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    await app.close();
+  });
+
+  it('cadre-profile: distributions, age bands and coverage reflect real rows; jail is excluded; category narrows', async () => {
+    const app = await makeApp();
+    const made = await prisma.cadre.createManyAndReturn({
+      data: [
+        // 45 y, male, caste (trimmed to match the next), grade A, ACM
+        { ...profileBase, name: `${TOKEN}-PROF-1`, category: 'surrendered', gender: 'male', dateOfBirth: dobAgo(45), caste: 'गोंड', district: 'बीजापुर', post: 'PM', priorityCategory: 'A', filter: 'ACM' },
+        // 25 y, female, same caste spelled with padding
+        { ...profileBase, name: `${TOKEN}-PROF-2`, category: 'surrendered', gender: 'female', dateOfBirth: dobAgo(25), caste: '  गोंड ' },
+        // DOB in the future: a data error — joins noDob, never "<20"
+        { ...profileBase, name: `${TOKEN}-PROF-3`, category: 'surrendered', gender: 'male', dateOfBirth: new Date(`${istDay(Date.now() + 400 * DAY_MS)}T00:00:00.000Z`) },
+        // A jail-register cadre must not touch any number
+        { ...profileBase, name: `${TOKEN}-PROF-JAIL`, category: 'jail', gender: 'female', dateOfBirth: dobAgo(33), caste: 'जेल' },
+      ],
+    });
+    try {
+      const p = await profile(app, officerToken);
+      expect(p.total).toBe(6); // 3 baseline + 3 non-jail extras
+      expect(p.gender).toEqual({ male: 2, female: 1, unknown: 3 });
+      expect(p.age.bands.find((b) => b.band === '40-49')).toMatchObject({ male: 1, female: 0, unknownGender: 0 });
+      expect(p.age.bands.find((b) => b.band === '20-29')).toMatchObject({ male: 0, female: 1, unknownGender: 0 });
+      expect(p.age.bands.find((b) => b.band === '30-39')).toMatchObject({ male: 0, female: 0, unknownGender: 0 }); // the jail row's age
+      expect(p.age.noDob).toBe(3 + 1); // baseline + the future DOB
+      expect(p.caste).toEqual({ rows: [{ label: 'गोंड', count: 2 }], other: 0, unknown: 4 }); // trimmed values merge
+      expect(p.district.rows).toEqual([{ label: 'बीजापुर', count: 1 }]);
+      expect(p.grade.A).toBe(1);
+      expect(p.rankClass).toMatchObject({ ACM: 1, unset: 5 });
+      expect(p.coverage).toMatchObject({ dateOfBirth: 3, gender: 3, caste: 2, district: 1, post: 1, rankClass: 1, grade: 1 });
+
+      expect((await profile(app, officerToken, '?category=thana')).total).toBe(1); // only the THANA fixture
+      expect((await profile(app, officerToken, '?category=surrendered')).total).toBe(5);
+      expect((await profile(app, hqToken, `?thana=${encodeURIComponent('स्टैट')}`)).total).toBe(6);
+      // Another thana's data never leaks through the filter.
+      expect((await profile(app, officerToken, `?thana=${encodeURIComponent(SDOP_THANA)}`)).total).toBe(0);
+    } finally {
+      await prisma.cadre.deleteMany({ where: { id: { in: made.map((c) => c.id) } } });
+      await app.close();
+    }
+  });
+
+  it('cadre-profile: a long tail folds into `other` after the top 10', async () => {
+    const app = await makeApp();
+    const made = await prisma.cadre.createManyAndReturn({
+      data: Array.from({ length: 11 }, (_, i) => ({
+        ...profileBase, name: `${TOKEN}-PROF-D${i}`, category: 'thana' as const, designation: `D${String(i + 1).padStart(2, '0')}`,
+      })),
+    });
+    try {
+      const p = await profile(app, officerToken);
+      // 'Fixture' (3) leads; ties among the 11 singles break alphabetically, so D01–D09
+      // take the other nine slots and D10, D11 fold into `other`.
+      expect(p.designation.rows).toHaveLength(10);
+      expect(p.designation.rows[0]).toEqual({ label: 'Fixture', count: 3 });
+      expect(p.designation.rows[9]).toEqual({ label: 'D09', count: 1 });
+      expect(p.designation.other).toBe(2);
+    } finally {
+      await prisma.cadre.deleteMany({ where: { id: { in: made.map((c) => c.id) } } });
+      await app.close();
+    }
+  });
+
+  // ── /stats/surrenders ───────────────────────────────────────────────────────
+
+  const surrenders = async (app: FastifyInstance, token: string, qs = ''): Promise<SurrendersStats> =>
+    (await app.inject({ method: 'GET', url: `/api/v1/stats/surrenders${qs}`, headers: auth(token) })).json() as SurrendersStats;
+
+  it('GET /stats/surrenders without a token → 401', async () => {
+    const app = await makeApp();
+    expect((await app.inject({ method: 'GET', url: '/api/v1/stats/surrenders' })).statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('surrenders: undated surrendered cadres form the last, year-null group — total is never silently short', async () => {
+    const app = await makeApp();
+    const s = await surrenders(app, officerToken);
+    // ALERT (district) + OTHER (other/other_state), neither with a date or year. The THANA
+    // fixture is a different register and is not part of this chart.
+    expect(s.total).toBe(2);
+    expect(s.years).toHaveLength(1);
+    expect(s.years[0]).toMatchObject({
+      year: null, total: 2, district: 1, otherDistrict: 0, otherState: 1, unclassified: 0,
+      active: 2, activeRecent: 1, // OTHER reported 2 days ago; ALERT never
+      deceased: 0, untraceable: 0, otherExempt: 0,
+    });
+    await app.close();
+  });
+
+  it('surrenders: year comes from the date or the free-text year; cohort and splits are exact', async () => {
+    const app = await makeApp();
+    const made = await prisma.cadre.createManyAndReturn({
+      data: [
+        // 2019 by DATE — district, DVCM
+        { ...profileBase, name: `${TOKEN}-SURR-1`, category: 'surrendered', surrenderDate: new Date('2019-03-10T00:00:00.000Z'), surrenderOrigin: 'district', filter: 'DVCM' },
+        // 2019 by free-text "2019-20" — other district, PM
+        { ...profileBase, name: `${TOKEN}-SURR-2`, category: 'surrendered', surrenderYear: '2019-20', surrenderOrigin: 'other', otherOriginType: 'other_district', filter: 'PM' },
+        // 2021 — deceased (exempt), no origin classified, ACM
+        { ...profileBase, name: `${TOKEN}-SURR-3`, category: 'surrendered', surrenderYear: '2021', permanentStatus: 'deceased', filter: 'ACM' },
+        // other origin but sub-type not classified yet → unclassified, still in the year
+        { ...profileBase, name: `${TOKEN}-SURR-4`, category: 'surrendered', surrenderYear: '2021', surrenderOrigin: 'other' },
+        // Not in this chart: jail register
+        { ...profileBase, name: `${TOKEN}-SURR-JAIL`, category: 'jail', surrenderYear: '2019' },
+      ],
+    });
+    try {
+      const s = await surrenders(app, officerToken);
+      expect(s.years.map((y) => y.year)).toEqual(['2019', '2021', null]); // ascending, null last
+      expect(s.total).toBe(2 + 4);
+      expect(s.total).toBe(s.years.reduce((sum, y) => sum + y.total, 0));
+
+      const y2019 = s.years[0]!;
+      expect(y2019).toMatchObject({
+        total: 2, district: 1, otherDistrict: 1, otherState: 0, unclassified: 0,
+        DVCM: 1, ACM: 0, PM: 1, otherRank: 0,
+        active: 2, activeRecent: 0, deceased: 0, untraceable: 0, otherExempt: 0,
+      });
+      const y2021 = s.years[1]!;
+      expect(y2021).toMatchObject({
+        total: 2, district: 0, unclassified: 2, ACM: 1, otherRank: 1,
+        active: 1, deceased: 1, untraceable: 0, otherExempt: 0,
+      });
+
+      // Region filters narrow within scope and never past it.
+      expect((await surrenders(app, hqToken, `?thana=${encodeURIComponent('स्टैट')}`)).total).toBe(6);
+      expect((await surrenders(app, officerToken, `?thana=${encodeURIComponent(SDOP_THANA)}`)).total).toBe(0);
+    } finally {
+      await prisma.cadre.deleteMany({ where: { id: { in: made.map((c) => c.id) } } });
+      await app.close();
+    }
+  });
+
+  it('rejects a malformed or oversized range with 400', async () => {
+    const app = await makeApp();
+    for (const qs of [
+      '?from=2026-09-10&to=2026-09-01', // from after to
+      '?from=2026-09-01', // only one bound
+      '?from=2026-02-31&to=2026-03-05', // not a real date
+      '?from=2025-01-01&to=2026-09-01', // > 366 days
+      '?from=abc&to=def',
+    ]) {
+      expect((await daily(app, officerToken, qs)).status).toBe(400);
+    }
     await app.close();
   });
 });

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { nfc } from '../../lib/text.js';
 
 // Dashboard summary counts (ADR-020). Response is a camelCase entity, per the
 // query/entity casing rule. There is no request body or query — it is a single
@@ -187,8 +188,234 @@ export type HierarchyStats = z.infer<typeof hierarchyStatsResponse>;
 
 // `?by=thana` opts into the thana-level breakdown; omitted keeps the original
 // officer/admin behaviour.
+//
+// `?by=officer` (web stats page) opts an HQ caller into the per-OFFICER rows an SDOP
+// already gets by default — HQ's default is one row per SDOP, which cannot show how
+// individual officers compare. Same row shape and rule as the SDOP's own view.
 export const hierarchyQuery = z.object({
-  by: z.enum(['thana']).optional(),
+  by: z.enum(['thana', 'officer']).optional(),
 });
 
 export type HierarchyQuery = z.infer<typeof hierarchyQuery>;
+
+// ─── Daily reporting series (web stats page) ───────────────────────────────────
+//
+// One row per IST calendar day in [from, to], gaps filled with 0 — a day nobody
+// reported is a real 0, not a hole for the chart to guess at. Two measures per day:
+//   - reports:       every live report filed that day.
+//   - uniqueCadres:  how many DIFFERENT cadres those reports covered (a cadre reported
+//                    three times in a day counts once).
+// `totals.uniqueCadres` is the distinct count over the WHOLE range, deliberately NOT the
+// sum of the daily figures: a cadre reported on five different days is one cadre, and
+// summing would count them five times.
+const MAX_DAILY_SPAN_DAYS = 366;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// `YYYY-MM-DD`, an IST calendar day. The round-trip check rejects a day that only looks
+// valid ("2026-02-31") — Date.parse would otherwise roll it into March silently.
+const istDay = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
+  .refine((v) => {
+    const t = Date.parse(`${v}T00:00:00.000Z`);
+    return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === v;
+  }, 'not a real calendar date');
+
+// Narrow WITHIN the caller's scope, never beyond it — an officer asking for another
+// thana gets an empty result, not that thana's numbers (ADR-044). Shared by every
+// stats query below that accepts a region filter.
+const thanaFilter = z.string().trim().min(1).max(100).transform(nfc).optional();
+const subDivisionFilter = z.string().trim().min(1).max(100).transform(nfc).optional();
+
+export const reportsDailyQuery = z
+  .object({
+    // Both or neither: omitted means "the last 30 IST days, today included".
+    from: istDay.optional(),
+    to: istDay.optional(),
+    thana: thanaFilter,
+    subDivision: subDivisionFilter,
+  })
+  .refine((q) => (q.from === undefined) === (q.to === undefined), {
+    message: 'from and to must be given together',
+  })
+  .refine((q) => q.from === undefined || q.to === undefined || q.from <= q.to, {
+    message: 'from must not be after to',
+  })
+  .refine(
+    (q) =>
+      q.from === undefined ||
+      q.to === undefined ||
+      (Date.parse(`${q.to}T00:00:00.000Z`) - Date.parse(`${q.from}T00:00:00.000Z`)) / DAY_MS + 1 <=
+        MAX_DAILY_SPAN_DAYS,
+    { message: `range must not exceed ${MAX_DAILY_SPAN_DAYS} days` },
+  );
+
+export type ReportsDailyQuery = z.infer<typeof reportsDailyQuery>;
+
+export const reportsDailyResponse = z.object({
+  from: z.string(),
+  to: z.string(),
+  days: z.array(
+    z.object({
+      date: z.string(),
+      reports: z.number().int(),
+      uniqueCadres: z.number().int(),
+    }),
+  ),
+  totals: z.object({
+    reports: z.number().int(),
+    uniqueCadres: z.number().int(),
+  }),
+});
+
+export type ReportsDailyStats = z.infer<typeof reportsDailyResponse>;
+
+// ─── Recency by thana (web stats page) ─────────────────────────────────────────
+//
+// The four ADR-041/046 recency tiers per thana. Built from the SAME `recencyTierWhere`
+// the dashboard and `GET /cadres?recency` use, so a thana's tier count always equals the
+// length of the list it would drill into. Every thana in scope gets a row, even at 0.
+export const recencyByThanaRow = z.object({
+  thana: z.string(),
+  subDivision: z.string().nullable(),
+  current: z.number().int(),
+  overdue1m: z.number().int(),
+  overdue2m: z.number().int(),
+  overdue3m: z.number().int(),
+  total: z.number().int(),
+});
+
+export const recencyByThanaResponse = z.object({ rows: z.array(recencyByThanaRow) });
+
+export type RecencyByThanaRow = z.infer<typeof recencyByThanaRow>;
+export type RecencyByThanaStats = z.infer<typeof recencyByThanaResponse>;
+
+// ─── Cadre profile (web stats page) ────────────────────────────────────────────
+//
+// Who is on the register. Maoist register only (जेल/जमानत is a separate register, as on
+// the dashboard). Every distribution carries its own `unknown` bucket and `coverage`
+// says how many rows actually have each field: gender, caste, DOB and district are all
+// nullable, and a chart that silently drops the blanks would read as complete when it is
+// not. `category` narrows to one register; region filters narrow within the caller's scope.
+export const cadreProfileQuery = z.object({
+  category: z.enum(['surrendered', 'thana']).optional(),
+  thana: thanaFilter,
+  subDivision: subDivisionFilter,
+});
+
+export type CadreProfileQuery = z.infer<typeof cadreProfileQuery>;
+
+// Top-N of an open-ended free-text field (caste, rank, district): the biggest values,
+// then everything else folded into `other` (a long tail is not a chart), then the blanks.
+const distribution = z.object({
+  rows: z.array(z.object({ label: z.string(), count: z.number().int() })),
+  other: z.number().int(),
+  unknown: z.number().int(),
+});
+
+export type ProfileDistribution = z.infer<typeof distribution>;
+
+export const cadreProfileResponse = z.object({
+  total: z.number().int(),
+  gender: z.object({ male: z.number().int(), female: z.number().int(), unknown: z.number().int() }),
+  // Age is DERIVED from dateOfBirth (ADR-036) — never stored. `noDob` rows cannot be placed
+  // in any band and are counted apart rather than guessed.
+  age: z.object({
+    bands: z.array(
+      z.object({
+        band: z.string(),
+        male: z.number().int(),
+        female: z.number().int(),
+        unknownGender: z.number().int(),
+      }),
+    ),
+    noDob: z.number().int(),
+  }),
+  caste: distribution,
+  designation: distribution,
+  post: distribution,
+  district: distribution,
+  // The register's priority grade (ADR-046) — `unset` is a cadre with no grade recorded yet.
+  grade: z.object({
+    A: z.number().int(),
+    B: z.number().int(),
+    C: z.number().int(),
+    jail: z.number().int(),
+    death: z.number().int(),
+    unset: z.number().int(),
+  }),
+  // DVCM / ACM / PM rank class.
+  rankClass: z.object({
+    DVCM: z.number().int(),
+    ACM: z.number().int(),
+    PM: z.number().int(),
+    unset: z.number().int(),
+  }),
+  // Permanent marks that exempt a cadre from reporting; `none` = no mark.
+  permanentStatus: z.object({
+    deceased: z.number().int(),
+    government_job: z.number().int(),
+    gs: z.number().int(),
+    living_elsewhere: z.number().int(),
+    untraceable: z.number().int(),
+    none: z.number().int(),
+  }),
+  // Rows with each field filled — the fill-rate table.
+  coverage: z.object({
+    dateOfBirth: z.number().int(),
+    gender: z.number().int(),
+    caste: z.number().int(),
+    district: z.number().int(),
+    post: z.number().int(),
+    rankClass: z.number().int(),
+    grade: z.number().int(),
+    photo: z.number().int(),
+  }),
+});
+
+export type CadreProfileStats = z.infer<typeof cadreProfileResponse>;
+
+// ─── Surrender trend (web stats page) ──────────────────────────────────────────
+//
+// The surrendered register (category = surrendered) grouped by surrender YEAR. The year
+// comes from `surrenderDate` when there is one, else the 4 digits found in the free-text
+// `surrenderYear` — older register rows carry only a year. A row with neither lands in the
+// `year: null` group, returned last, so the total is never silently short.
+//
+// Per year: the origin split (ADR-019), the DVCM/ACM/PM split, and a reporting cohort —
+// of the cadres who surrendered that year, how many are active (no permanent mark), how
+// many of those reported in the last 30 days (the flat rule /stats/me and the hierarchy
+// use), and how many are exempt (deceased / untraceable / another permanent mark).
+export const surrendersQuery = z.object({
+  thana: thanaFilter,
+  subDivision: subDivisionFilter,
+});
+
+export type SurrendersQuery = z.infer<typeof surrendersQuery>;
+
+export const surrenderYearRow = z.object({
+  year: z.string().nullable(),
+  total: z.number().int(),
+  district: z.number().int(),
+  otherDistrict: z.number().int(),
+  otherState: z.number().int(),
+  // Surrendered but origin (or the district/state sub-type) not classified yet.
+  unclassified: z.number().int(),
+  DVCM: z.number().int(),
+  ACM: z.number().int(),
+  PM: z.number().int(),
+  otherRank: z.number().int(),
+  active: z.number().int(),
+  activeRecent: z.number().int(),
+  deceased: z.number().int(),
+  untraceable: z.number().int(),
+  otherExempt: z.number().int(),
+});
+
+export const surrendersResponse = z.object({
+  total: z.number().int(),
+  years: z.array(surrenderYearRow),
+});
+
+export type SurrenderYearRow = z.infer<typeof surrenderYearRow>;
+export type SurrendersStats = z.infer<typeof surrendersResponse>;

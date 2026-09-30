@@ -1,6 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { makeStatsService } from './stats.service.js';
-import { dashboardQuery, hierarchyQuery } from './stats.schema.js';
+import {
+  cadreProfileQuery,
+  dashboardQuery,
+  hierarchyQuery,
+  reportsDailyQuery,
+  surrendersQuery,
+} from './stats.schema.js';
 import { bearerAuth, jsonResponse, zodToJson } from '../../lib/openapi.js';
 
 const EXAMPLE_DASHBOARD_STATS = {
@@ -44,6 +50,17 @@ const EXAMPLE_OFFICER_STATS = {
   ],
   reportsByPlace: { thana: 9, village: 3 },
   cadresByCategory: { surrendered: 2, jail: 1, thana: 1 },
+};
+
+const EXAMPLE_REPORTS_DAILY = {
+  from: '2026-09-01',
+  to: '2026-09-03',
+  days: [
+    { date: '2026-09-01', reports: 14, uniqueCadres: 11 },
+    { date: '2026-09-02', reports: 0, uniqueCadres: 0 },
+    { date: '2026-09-03', reports: 9, uniqueCadres: 9 },
+  ],
+  totals: { reports: 23, uniqueCadres: 19 },
 };
 
 // Stats. Two endpoints, two different questions:
@@ -142,7 +159,8 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
           'and unassignedCadres, excluded from that ratio because a cadre nobody is assigned to is a ' +
           'staffing gap, not a specific officer\'s reporting lapse. `?by=thana` returns one row per ' +
           'thana in the caller\'s scope instead (HQ: all 22; admin: their own sub-division\'s), ' +
-          'counting every live cadre at that thana rather than just assigned ones.',
+          'counting every live cadre at that thana rather than just assigned ones. `?by=officer` ' +
+          'gives an HQ caller the per-officer rows an SDOP already gets by default.',
         security: bearerAuth,
         querystring: zodToJson(hierarchyQuery),
         response: { 200: jsonResponse('Hierarchy stats', EXAMPLE_HIERARCHY_STATS) },
@@ -152,5 +170,111 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
       const { by } = hierarchyQuery.parse(request.query);
       return service.hierarchy(request.scope!, { by });
     },
+  );
+
+  // Web stats page — the four endpoints below share /stats/dashboard's officer+ gate and
+  // scoping: every number is bounded by the caller's own scope (ADR-044), so an officer
+  // reads only their own thana and an SDOP only their sub-division.
+  app.get(
+    '/stats/recency-by-thana',
+    {
+      preHandler: [app.authenticate, app.requireRole('officer', 'admin', 'super_admin')],
+      schema: {
+        tags: ['Stats'],
+        summary: 'Reporting-recency tier counts per thana, scoped to the caller (officer+)',
+        description:
+          'One row per thana in the caller\'s scope (HQ: all 22), each with the four ADR-041/046 ' +
+          'recency tiers — built from the same clause as `GET /cadres?recency`, so a count equals ' +
+          'the list it drills into. The four sum to `total`. जेल/जमानत is excluded.',
+        security: bearerAuth,
+        response: {
+          200: jsonResponse('Recency by thana', {
+            rows: [{ thana: 'गंगालूर', subDivision: 'गंगालूर', current: 8, overdue1m: 2, overdue2m: 1, overdue3m: 3, total: 14 }],
+          }),
+        },
+      },
+    },
+    async (request) => service.recencyByThana(request.scope!),
+  );
+
+  app.get(
+    '/stats/cadre-profile',
+    {
+      preHandler: [app.authenticate, app.requireRole('officer', 'admin', 'super_admin')],
+      schema: {
+        tags: ['Stats'],
+        summary: 'Who is on the register: gender, age, caste, rank, grade, fill rates (officer+)',
+        description:
+          'Distributions over the Maoist register (जेल/जमानत excluded), scoped to the caller. Every ' +
+          'distribution carries an `unknown` bucket and `coverage` counts the rows with each field ' +
+          'filled — gender, caste, DOB and district are nullable and must not read as complete. ' +
+          'Age is derived from dateOfBirth. Open-ended text fields return their top 10 plus `other`. ' +
+          'Optional `category`, `thana`, `subDivision` narrow within the caller\'s scope.',
+        security: bearerAuth,
+        querystring: zodToJson(cadreProfileQuery),
+        response: {
+          200: jsonResponse('Cadre profile', {
+            total: 1790,
+            gender: { male: 1400, female: 300, unknown: 90 },
+            age: { bands: [{ band: '30-39', male: 500, female: 100, unknownGender: 20 }], noDob: 210 },
+            caste: { rows: [{ label: 'गोंड', count: 900 }], other: 120, unknown: 320 },
+            coverage: { dateOfBirth: 1580, gender: 1700, caste: 1470, district: 1200, post: 1478, rankClass: 900, grade: 1500, photo: 1100 },
+          }),
+        },
+      },
+    },
+    async (request) => service.cadreProfile(request.scope!, cadreProfileQuery.parse(request.query)),
+  );
+
+  app.get(
+    '/stats/surrenders',
+    {
+      preHandler: [app.authenticate, app.requireRole('officer', 'admin', 'super_admin')],
+      schema: {
+        tags: ['Stats'],
+        summary: 'Surrendered register by surrender year, with a reporting cohort (officer+)',
+        description:
+          'One row per surrender year (from surrenderDate, else the 4 digits of the free-text ' +
+          'surrenderYear; a row with neither is `year: null`, last). Each carries the origin split ' +
+          '(ADR-019), the DVCM/ACM/PM split, and a cohort: active (no permanent mark), how many of ' +
+          'those reported in the last 30 days, and how many are exempt (deceased / untraceable / ' +
+          'other). Scoped to the caller; optional `thana`/`subDivision` narrow within it.',
+        security: bearerAuth,
+        querystring: zodToJson(surrendersQuery),
+        response: {
+          200: jsonResponse('Surrender trend', {
+            total: 1790,
+            years: [
+              {
+                year: '2024', total: 210, district: 150, otherDistrict: 30, otherState: 20, unclassified: 10,
+                DVCM: 5, ACM: 40, PM: 150, otherRank: 15, active: 200, activeRecent: 160, deceased: 6, untraceable: 4, otherExempt: 0,
+              },
+            ],
+          }),
+        },
+      },
+    },
+    async (request) => service.surrenders(request.scope!, surrendersQuery.parse(request.query)),
+  );
+
+  app.get(
+    '/stats/reports/daily',
+    {
+      preHandler: [app.authenticate, app.requireRole('officer', 'admin', 'super_admin')],
+      schema: {
+        tags: ['Stats'],
+        summary: 'Reports and distinct cadres reported per IST day, scoped to the caller (officer+)',
+        description:
+          'One row per IST calendar day in [from, to] (default: the last 30 days), gaps filled with ' +
+          '0. `reports` counts every live report that day; `uniqueCadres` counts how many different ' +
+          'cadres they covered. `totals.uniqueCadres` is distinct over the whole range, not the sum ' +
+          'of the daily figures. Range is capped at 366 days. Optional `thana`/`subDivision` narrow ' +
+          'within the caller\'s scope, never beyond it. जेल/जमानत is excluded, as on the dashboard.',
+        security: bearerAuth,
+        querystring: zodToJson(reportsDailyQuery),
+        response: { 200: jsonResponse('Daily reporting series', EXAMPLE_REPORTS_DAILY) },
+      },
+    },
+    async (request) => service.reportsDaily(request.scope!, reportsDailyQuery.parse(request.query)),
   );
 }
