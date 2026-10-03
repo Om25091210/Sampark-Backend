@@ -12,6 +12,7 @@ import {
   signChallengeToken,
   verifyChallengeToken,
 } from '../../lib/tokens.js';
+import { REFRESH_REUSE_GRACE_MS, revokeAllRefreshTokens } from './refresh-tokens.js';
 
 export interface AuthDeps {
   prisma: PrismaClient;
@@ -249,15 +250,35 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
     async refresh(refreshToken) {
       const tokenHash = hashToken(refreshToken, config.jwtSecret);
       const stored = await prisma.refreshToken.findUnique({ where: { tokenHash } });
-      if (stored === null || stored.revokedAt !== null || stored.expiresAt <= new Date()) {
+      const now = new Date();
+      if (stored === null || stored.expiresAt <= now) {
+        throw unauthorized('Invalid or expired refresh token', 'INVALID_REFRESH');
+      }
+      // A revoked token is only acceptable if it was revoked by ROTATION and recently —
+      // the lost-response retry (see REFRESH_REUSE_GRACE_MS). Logout / reset /
+      // deactivation clear `rotatedAt`, so they are never inside this window.
+      const replayed = stored.revokedAt !== null;
+      if (
+        replayed &&
+        (stored.rotatedAt === null || now.getTime() - stored.rotatedAt.getTime() > REFRESH_REUSE_GRACE_MS)
+      ) {
         throw unauthorized('Invalid or expired refresh token', 'INVALID_REFRESH');
       }
       const user = await prisma.user.findUnique({ where: { id: stored.userId } });
       if (user === null || user.deletedAt !== null) {
         throw unauthorized('Invalid or expired refresh token', 'INVALID_REFRESH');
       }
-      // Rotate: revoke the used token, issue a fresh pair.
-      await prisma.refreshToken.update({ where: { id: stored.id }, data: { revokedAt: new Date() } });
+      if (replayed) {
+        // The window is measured from the original rotation and is NOT extended by a
+        // replay, so the timestamps stay as they were.
+        log.info({ userId: user.id }, 'refresh token replayed inside the reuse window');
+      } else {
+        // Rotate: revoke the used token, issue a fresh pair.
+        await prisma.refreshToken.update({
+          where: { id: stored.id },
+          data: { revokedAt: now, rotatedAt: now },
+        });
+      }
       const tokens = await issueTokens(user);
       return { access_token: tokens.access, refresh_token: tokens.refresh };
     },
@@ -269,10 +290,7 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
     },
 
     async logout(userId) {
-      await prisma.refreshToken.updateMany({
-        where: { userId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
+      await revokeAllRefreshTokens(prisma, userId);
     },
   };
 }

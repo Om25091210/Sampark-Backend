@@ -267,9 +267,61 @@ describe('auth (ADR-042 — email + password)', () => {
     const rotated = (r1.json() as { refresh_token: string }).refresh_token;
     expect(rotated).not.toBe(first);
 
-    // The consumed token is dead.
+    // Replayed right away — the lost-response retry. Accepted inside the reuse window
+    // and answered with a fresh pair, not the one already handed out.
     const r2 = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: first } });
-    expect(r2.statusCode).toBe(401);
+    expect(r2.statusCode).toBe(200);
+    expect((r2.json() as { refresh_token: string }).refresh_token).not.toBe(rotated);
+    await app.close();
+  });
+
+  it('a rotated token is dead once the reuse window has passed', async () => {
+    const app = await makeApp();
+    const { body } = await login(app, OFFICER_EMAIL);
+    const first = body.refresh_token!;
+    await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: first } });
+
+    // Age the rotation past the 10-minute window.
+    await prisma.refreshToken.updateMany({
+      where: { userId: officerId, rotatedAt: { not: null } },
+      data: { rotatedAt: new Date(Date.now() - 11 * 60_000) },
+    });
+    const late = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: first } });
+    expect(late.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('logout closes the reuse window: a rotated token cannot be replayed afterwards', async () => {
+    const app = await makeApp();
+    const { body } = await login(app, OFFICER_EMAIL);
+    const first = body.refresh_token!;
+    const r1 = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: first } });
+    const fresh = r1.json() as { access_token: string; refresh_token: string };
+
+    const out = await app.inject({
+      method: 'POST', url: '/api/v1/auth/logout',
+      headers: { authorization: `Bearer ${fresh.access_token}` }, payload: {},
+    });
+    expect(out.statusCode).toBe(204);
+
+    // Both the rotated-away token (inside its window) and its successor are dead.
+    for (const token of [first, fresh.refresh_token]) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: token } });
+      expect(res.statusCode).toBe(401);
+    }
+    await app.close();
+  });
+
+  it('a never-rotated, revoked token is not accepted', async () => {
+    const app = await makeApp();
+    const { body } = await login(app, OFFICER_EMAIL);
+    const out = await app.inject({
+      method: 'POST', url: '/api/v1/auth/logout',
+      headers: { authorization: `Bearer ${body.access_token}` }, payload: {},
+    });
+    expect(out.statusCode).toBe(204);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: body.refresh_token } });
+    expect(res.statusCode).toBe(401);
     await app.close();
   });
 

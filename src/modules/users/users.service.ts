@@ -5,6 +5,7 @@ import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { hashPassword } from '../../lib/password.js';
+import { revokeAllRefreshTokens } from '../auth/refresh-tokens.js';
 import { toWireUser, type WireUser } from '../../lib/serialize.js';
 import {
   importUserRow,
@@ -193,10 +194,7 @@ export function makeUsersService({ prisma, log }: UsersDeps): UsersService {
         await tx.user.update({ where: { id: userId }, data: { passwordHash } });
         // A password change must end the sessions the OLD password opened — otherwise a
         // reset prompted by a suspected compromise leaves the compromised session alive.
-        await tx.refreshToken.updateMany({
-          where: { userId, revokedAt: null },
-          data: { revokedAt: new Date() },
-        });
+        await revokeAllRefreshTokens(tx, userId);
         // SDR-002: clear any lockout. An admin resetting the password is the intended way
         // out of a locked account, so leaving the lock in place would defeat the remedy.
         await tx.loginAttempt.deleteMany({ where: { email: user.email ?? '' } });
@@ -230,10 +228,7 @@ export function makeUsersService({ prisma, log }: UsersDeps): UsersService {
         const u = await tx.user.update({ where: { id: userId }, data: { deletedAt: new Date() } });
         // A deactivated account must not keep a live session — otherwise "removed" means
         // "removed in 15 minutes, or 30 days if they hold a refresh token".
-        await tx.refreshToken.updateMany({
-          where: { userId, revokedAt: null },
-          data: { revokedAt: new Date() },
-        });
+        await revokeAllRefreshTokens(tx, userId);
         await writeAuditLog(tx, {
           actorId,
           action: 'user.deactivate',
