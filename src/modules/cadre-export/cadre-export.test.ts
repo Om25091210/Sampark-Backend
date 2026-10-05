@@ -89,6 +89,9 @@ describe('cadre export service (ADR-058) - called directly, mirroring outbox.wor
     await storage.put(`cadres/${TOKEN}/avatar.jpg`, imageBytes, 'image/jpeg');
 
     const sheetsSync = new MockSheetsSyncProvider();
+    // The sheet answers a row chunk with the cadres whose photo cell lacks this photo; only
+    // those go through the photo phase.
+    sheetsSync.response = { ok: true, photoNeeded: [cadre1Id] };
     const service = makeCadreExportService({ prisma, storage, sheetsSync, log: silentLog, chunkSize: 1 });
 
     await service.runExport(saId);
@@ -110,8 +113,19 @@ describe('cadre export service (ADR-058) - called directly, mirroring outbox.wor
     expect(row1!.cadreId).toBe(cadre1Id);
     expect(row1!.tab).toBe('Cadre-Unclassified'); // surrendered, no origin set on the fixture
     expect(row1!.assignedOfficerName).toBe(OFF_ID);
-    expect(row1!.avatarBase64).toBe(imageBytes.toString('base64'));
-    expect(row1!.avatarContentType).toBe('image/jpeg');
+    // Row chunks carry the photo KEY, never the bytes (200 photos in one call stalled the run).
+    expect(row1!.photoKey).toBe(`cadres/${TOKEN}/avatar.jpg`);
+    expect(row1!.avatarBase64).toBeUndefined();
+
+    // The bytes travel afterwards in their own small call, only for the cadre the sheet asked for.
+    const photoCalls = sheetsSync.calls.filter((c) => c.action === 'cadre.export.photos');
+    expect(photoCalls).toHaveLength(1);
+    const sent = (photoCalls[0]!.payload as { photos: Array<Record<string, unknown>> }).photos;
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.cadreId).toBe(cadre1Id);
+    expect(sent[0]!.tab).toBe('Cadre-Unclassified');
+    expect(sent[0]!.base64).toBe(imageBytes.toString('base64'));
+    expect(sent[0]!.contentType).toBe('image/jpeg');
 
     expect(row2).toBeDefined();
     expect(row2!.cadreId).toBe(cadre2Id);
@@ -199,6 +213,7 @@ describe('cadre export service (ADR-058) - called directly, mirroring outbox.wor
       throw new Error('S3 timeout');
     };
     const sheetsSync = new MockSheetsSyncProvider();
+    sheetsSync.response = { ok: true, photoNeeded: [cadre1Id] };
     const service = makeCadreExportService({ prisma, storage, sheetsSync, log: silentLog });
 
     await service.runExport(saId);
@@ -210,7 +225,73 @@ describe('cadre export service (ADR-058) - called directly, mirroring outbox.wor
     expect(row1).toBeDefined();
     expect(row1!.avatarBase64).toBeUndefined();
     const logRow = await prisma.syncLog.findFirst({ where: { eventType: 'cadre.export' }, orderBy: { id: 'desc' } });
+    expect(logRow!.status).toBe('success'); // a photo problem never fails the rows
+    expect((logRow!.detail as { photoErrors: number }).photoErrors).toBeGreaterThanOrEqual(1);
+    expect(sheetsSync.calls.some((c) => c.action === 'cadre.export.photos')).toBe(false); // nothing to send
+  });
+
+  it('photos the sheet could not reach before its time budget are retried, not dropped', async () => {
+    const storage = new MockStorageProvider();
+    await storage.put(`cadres/${TOKEN}/avatar.jpg`, Buffer.from('b'), 'image/jpeg');
+    const sheetsSync = new MockSheetsSyncProvider();
+    sheetsSync.response = { ok: true, photoNeeded: [cadre1Id] };
+    let photoCalls = 0;
+    sheetsSync.handlers['cadre.export.photos'] = () => {
+      photoCalls += 1;
+      // First call: the script ran out of budget and hands the photo back; second: done.
+      return photoCalls === 1 ? { ok: true, inserted: 0, errors: [], deferred: [cadre1Id] } : { ok: true, inserted: 1, errors: [], deferred: [] };
+    };
+    // Three deferrals in a row is "no progress"; one is just a slow call and must not trip the breaker.
+    const service = makeCadreExportService({ prisma, storage, sheetsSync, log: silentLog, chunkSize: 1 });
+    await service.runExport(saId);
+
+    expect(photoCalls).toBe(2);
+    const logRow = await prisma.syncLog.findFirst({ where: { eventType: 'cadre.export' }, orderBy: { id: 'desc' } });
     expect(logRow!.status).toBe('success');
+    const d = logRow!.detail as { photosTotal: number; photosDone: number };
+    expect(d.photosTotal).toBe(1);
+    expect(d.photosDone).toBe(1);
+  });
+
+  it('gives up on photos after repeated no-progress calls instead of looping forever, and says so', async () => {
+    const storage = new MockStorageProvider();
+    await storage.put(`cadres/${TOKEN}/avatar.jpg`, Buffer.from('b'), 'image/jpeg');
+    const sheetsSync = new MockSheetsSyncProvider();
+    sheetsSync.response = { ok: true, photoNeeded: [cadre1Id] };
+    let photoCalls = 0;
+    sheetsSync.handlers['cadre.export.photos'] = () => {
+      photoCalls += 1;
+      return { ok: true, inserted: 0, errors: [], deferred: [cadre1Id] }; // never reaches it
+    };
+    const service = makeCadreExportService({ prisma, storage, sheetsSync, log: silentLog, chunkSize: 1 });
+    await service.runExport(saId);
+
+    expect(photoCalls).toBe(3);
+    const logRow = await prisma.syncLog.findFirst({ where: { eventType: 'cadre.export' }, orderBy: { id: 'desc' } });
+    expect(logRow!.status).toBe('error');
+    expect(logRow!.error).toMatch(/photo sync stopped/);
+  });
+
+  it('a long run that keeps heartbeating is still "running"; a silent one expires', async () => {
+    const fortyMinAgo = new Date(Date.now() - 40 * 60 * 1000);
+    const live = await prisma.syncLog.create({
+      data: { eventType: 'cadre.export', status: 'running', createdAt: fortyMinAgo, detail: { phase: 'photos', heartbeatAt: new Date().toISOString() } },
+    });
+    const service = makeCadreExportService({
+      prisma,
+      storage: new MockStorageProvider(),
+      sheetsSync: new MockSheetsSyncProvider(),
+      log: silentLog,
+    });
+    await expect(service.begin(saId)).rejects.toMatchObject({ statusCode: 409, code: 'EXPORT_RUNNING' });
+    await prisma.syncLog.delete({ where: { id: live.id } });
+
+    const dead = await prisma.syncLog.create({
+      data: { eventType: 'cadre.export', status: 'running', createdAt: fortyMinAgo, detail: { phase: 'photos', heartbeatAt: fortyMinAgo.toISOString() } },
+    });
+    const handle = await service.begin(saId); // silent for 40 min -> presumed crashed -> allowed
+    await service.execute(handle);
+    await prisma.syncLog.delete({ where: { id: dead.id } });
   });
 
   it('rows the sheet kept because of unpushed edits are counted, and are not an error', async () => {

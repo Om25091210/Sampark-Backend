@@ -13,7 +13,12 @@ import type { AppConfig } from '../config/env.js';
 // never cached across calls. The shared-secret key IS static process config
 // (SYNC_API_KEY env var), same posture as IMPORT_API_KEY: rotating it needs a
 // redeploy either way, and that is an accepted, already-established trade-off.
-export type SheetsSyncAction = 'user.sync' | 'cadre.export' | 'cadre.export.finish' | 'cadre.preview';
+export type SheetsSyncAction =
+  | 'user.sync'
+  | 'cadre.export'
+  | 'cadre.export.finish'
+  | 'cadre.export.photos'
+  | 'cadre.preview';
 
 // Apps Script kills an execution at 6 minutes; waiting meaningfully longer than that
 // can only mean the call is hung. Without a bound, one hung chunk stalls the whole
@@ -48,10 +53,13 @@ export class MockSheetsSyncProvider implements SheetsSyncProvider {
   readonly name = 'mock';
   readonly calls: Array<{ action: SheetsSyncAction; payload: unknown }> = [];
   response: SheetsSyncResult = { ok: true };
+  /** Per-action override: wins over `response` for that action (e.g. a different reply for photos). */
+  handlers: Partial<Record<SheetsSyncAction, (payload: unknown) => SheetsSyncResult>> = {};
 
   async call(action: SheetsSyncAction, payload: unknown): Promise<SheetsSyncResult> {
     this.calls.push({ action, payload });
-    return this.response;
+    const handler = this.handlers[action];
+    return handler !== undefined ? handler(payload) : this.response;
   }
 }
 

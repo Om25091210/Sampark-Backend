@@ -7,17 +7,26 @@ import type { SheetsSyncProvider, SheetsSyncResult } from '../../lib/sheets-sync
 import { resolveMirrorTab, type MirrorTab } from './cadre-export.tabs.js';
 import type { SheetPreviewQuery } from './cadre-export.schema.js';
 
-// 25 meant ~294 HTTP round trips for a 7,349-row roster, each triggering a full
-// existing-serials rescan on the Apps Script side (B-Smart.gs's handleCadreExport_) --
-// the combination timed out 44 of those calls on the first full run. 200 cuts that
-// to ~37 calls; combined with that function's now-batched bulk-append write, each
-// call comfortably finishes well inside Apps Script's 6-minute execution cap even
-// when every row in the chunk carries a photo.
+// The text rows go in big, fast chunks: a chunk is ~200 short strings and the Apps Script
+// side writes them with one bulk setValues(). Photos are NOT in these chunks -- see
+// PHOTO_BATCH_SIZE. (When photos rode along, one chunk meant 200 downloads held in memory,
+// one enormous request body, and 200 Sheet.insertImage() calls inside a single 6-minute
+// Apps Script execution: the run stalled after the first chunk.)
 const DEFAULT_CHUNK_SIZE = 200;
 
-// A run that has been "running" longer than this is presumed crashed (the process
-// restarted mid-run -- the export is in-process, not durable), so it no longer blocks
-// a fresh run. Comfortably above a real full run (~37 chunks).
+// Photos are sent in their own small calls. Sheet.insertImage() is slow (seconds each), so
+// a call must stay well inside Apps Script's 6-minute cap; 10 also bounds server memory
+// (10 photos in flight, never 200) and keeps the script's lock window short.
+const PHOTO_BATCH_SIZE = 10;
+
+// Give up on the photo phase after this many photo calls IN A ROW that made no progress,
+// instead of hammering a broken sheet for the other ~700 batches. The rows are already in
+// the sheet by then; the next sync retries the photos.
+const PHOTO_CONSECUTIVE_FAILURE_LIMIT = 3;
+
+// A run counts as alive while it keeps writing a heartbeat (progress updates). One that has
+// been silent this long is presumed crashed (the export is in-process, not durable), so it
+// no longer blocks a fresh run.
 const RUN_STALE_AFTER_MS = 30 * 60 * 1000;
 
 // The sync_log row used to carry one outcome per cadre (7k+ JSON entries for a full
@@ -45,6 +54,12 @@ interface ExportErrorSample {
   error: string;
 }
 
+interface PhotoJob {
+  cadreId: number;
+  tab: MirrorTab;
+  avatarKey: string;
+}
+
 export interface CadreExportService {
   /**
    * Claims the single export slot: throws a 409 if a run is already in flight, else
@@ -53,12 +68,12 @@ export interface CadreExportService {
    */
   begin(actorId: number): Promise<ExportRunHandle>;
   /**
-   * Runs to completion in-process, chunked. ADR-058: this is a manual, super_admin-
-   * triggered BATCH, never a per-mutation stream -- so there is no durability
-   * requirement beyond "safe to click again", which upsert-by-cadreId on the Apps
-   * Script side already gives for free. If the process restarts mid-run, the run
-   * simply stops (its `running` row goes stale after RUN_STALE_AFTER_MS); a
-   * super_admin re-clicking the button re-syncs everything.
+   * Runs to completion in-process: text rows in chunks, then photos in small batches.
+   * ADR-058: this is a manual, super_admin-triggered BATCH, never a per-mutation stream --
+   * so there is no durability requirement beyond "safe to click again", which upsert-by-
+   * cadreId (and the sheet's per-photo marker) on the Apps Script side already gives for
+   * free. If the process restarts mid-run, the run simply stops (its `running` row goes
+   * stale after RUN_STALE_AFTER_MS without a heartbeat); re-clicking the button re-syncs.
    */
   execute(handle: ExportRunHandle): Promise<void>;
   /** begin() + execute() in one call -- used by tests and any caller that wants to await it. */
@@ -105,23 +120,15 @@ interface ExportableCadre {
 // (B-Smart-Push.gs) validates and sends back, so a round-tripped row stays stable.
 const toDateOnly = (d: Date | null): string | null => (d === null ? null : d.toISOString().slice(0, 10));
 
-// ADR-058 §5. Text fields follow the Cadre wire entity's field names. Images travel
-// as base64 bytes downloaded server-side (never a presigned URL, which would rot
-// past the mirror's browse window) -- Apps Script decodes them with Utilities.newBlob()
-// and embeds via Sheet.insertImage(), removing any image already anchored at that
-// cell first so a repeat sync replaces the photo instead of stacking a second one
-// on top (B-Smart.gs's handleCadreExport_). This only ever needs to REMOVE + RE-INSERT
-// a floating image, never read one's bytes back out -- the operation this file's own
-// photo-backfill code found unsupported is extracting bytes FROM an existing image,
-// a different problem this export never runs into (it always has fresh bytes from S3).
-async function buildRowPayload(
-  cadre: ExportableCadre,
-  tab: MirrorTab,
-  runStartedAt: string,
-  storage: StorageProvider,
-  log: FastifyBaseLogger,
-): Promise<Record<string, unknown>> {
-  const row: Record<string, unknown> = {
+// ADR-058 §5. Text fields follow the Cadre wire entity's field names. The row carries
+// `photoKey` (the S3 key) but never the bytes: the Apps Script side keeps a short marker of
+// the key it last embedded in the row's photo cell and answers with `photoNeeded` for the
+// rows whose marker differs, so an unchanged photo is never downloaded, sent or inserted
+// again. Bytes travel later, in their own small calls (the photo phase of execute()), as
+// base64 downloaded server-side -- never a presigned URL, which would rot past the mirror's
+// browse window.
+function buildRowPayload(cadre: ExportableCadre, tab: MirrorTab, runStartedAt: string): Record<string, unknown> {
+  return {
     // `cadreId` -- not `serialNumber` -- is the upsert key: serialNumber is nullable
     // (a cadre created in the app has none), and every null-serial row collapsing
     // onto the same '' key silently overwrote the others.
@@ -154,25 +161,12 @@ async function buildRowPayload(
     dateOfBirth: toDateOnly(cadre.dateOfBirth),
     aliases: cadre.aliases,
     assignedOfficerName: cadre.assignedOfficer?.name ?? null,
+    photoKey: cadre.avatarKey,
   };
-
-  if (cadre.avatarKey !== null) {
-    // A missing object (key set but the S3/mock object is gone) or a failed download
-    // is a per-row skip of the image only -- never a reason to drop the row, and
-    // never a reason to fail the other 199 rows in its chunk.
-    try {
-      const obj = await storage.getObject(cadre.avatarKey);
-      if (obj !== null) {
-        row.avatarBase64 = obj.body.toString('base64');
-        row.avatarContentType = obj.contentType;
-      }
-    } catch (err) {
-      log.warn({ err, cadreId: cadre.id }, 'cadre export: avatar download failed, exporting row without photo');
-    }
-  }
-
-  return row;
 }
+
+const numberIds = (v: unknown): number[] =>
+  Array.isArray(v) ? v.filter((x): x is number => typeof x === 'number') : [];
 
 export function makeCadreExportService(deps: CadreExportDeps): CadreExportService {
   const { prisma, storage, sheetsSync, log, chunkSize = DEFAULT_CHUNK_SIZE } = deps;
@@ -185,15 +179,22 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
       // see "nothing running" and both start a run, racing on the sheet's append row.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('cadre.export'))`;
 
-      const running = await tx.syncLog.findFirst({
-        where: {
-          eventType: 'cadre.export',
-          status: 'running',
-          createdAt: { gte: new Date(Date.now() - RUN_STALE_AFTER_MS) },
-        },
-        select: { id: true },
+      // Liveness = the newest of the heartbeat the run writes into `detail` and the row's
+      // own creation time. A long photo phase keeps heartbeating, so it is never mistaken
+      // for a crash; a run that died stops heartbeating and expires after RUN_STALE_AFTER_MS.
+      const candidates = await tx.syncLog.findMany({
+        where: { eventType: 'cadre.export', status: 'running' },
+        select: { createdAt: true, detail: true },
       });
-      if (running !== null) {
+      const cutoff = Date.now() - RUN_STALE_AFTER_MS;
+      const alive = candidates.some((r) => {
+        const hb =
+          typeof r.detail === 'object' && r.detail !== null && !Array.isArray(r.detail)
+            ? Date.parse(String((r.detail as Record<string, unknown>).heartbeatAt ?? ''))
+            : NaN;
+        return Math.max(r.createdAt.getTime(), Number.isNaN(hb) ? 0 : hb) >= cutoff;
+      });
+      if (alive) {
         throw conflict('A cadre sheet export is already running', 'EXPORT_RUNNING');
       }
 
@@ -216,21 +217,47 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
     const { runId, startedAt } = handle;
     const byTab: Record<string, number> = {};
     const errors: ExportErrorSample[] = [];
+    const photoQueue: PhotoJob[] = [];
     let total = 0;
     let errorCount = 0;
     let photoErrors = 0;
+    let photosTotal = 0;
+    let photosDone = 0;
     // Rows the sheet kept as-is because a human edited them and has not pushed yet. Not an
     // error (nothing is lost -- the edit is preserved), but surfaced so a "successful" run
     // never hides that those rows were not refreshed from AWS.
     let skippedEdited = 0;
     let finishError: string | undefined;
+    let photoPhaseError: string | undefined;
 
     const recordError = (sample: ExportErrorSample): void => {
       errorCount += 1;
       if (errors.length < ERROR_SAMPLE_LIMIT) errors.push(sample);
     };
 
+    // Progress + heartbeat while running. Best effort: a failed progress write must never
+    // fail the export. The page reads it to show where a long run is.
+    const writeProgress = async (phase: 'rows' | 'photos'): Promise<void> => {
+      try {
+        await prisma.syncLog.update({
+          where: { id: runId },
+          data: {
+            detail: {
+              phase,
+              rowsDone: total,
+              photosTotal,
+              photosDone,
+              heartbeatAt: new Date().toISOString(),
+            } as unknown as Prisma.InputJsonValue,
+          },
+        });
+      } catch (err) {
+        log.warn({ err }, 'cadre export: progress write failed');
+      }
+    };
+
     try {
+      // ── Phase 1: text rows ──
       let cursor: number | undefined;
       for (;;) {
         const cadres: ExportableCadre[] = await prisma.cadre.findMany({
@@ -279,16 +306,21 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
         cursor = cadres[cadres.length - 1]!.id;
         total += cadres.length;
 
-        const rows = await Promise.all(
-          cadres.map((c) => buildRowPayload(c, resolveMirrorTab(c), startedAt, storage, log)),
-        );
+        const rows = cadres.map((c) => buildRowPayload(c, resolveMirrorTab(c), startedAt));
 
         try {
           const result = await sheetsSync.call('cadre.export', { rows });
           if (result.ok) {
             for (const r of rows) byTab[r.tab as string] = (byTab[r.tab as string] ?? 0) + 1;
-            if (typeof result.photoErrors === 'number') photoErrors += result.photoErrors;
             if (typeof result.skippedEdited === 'number') skippedEdited += result.skippedEdited;
+            // The sheet names the rows whose photo cell does not already hold this photo's
+            // marker; only those go through the photo phase.
+            const needed = new Set(numberIds(result.photoNeeded));
+            for (const c of cadres) {
+              if (c.avatarKey !== null && needed.has(c.id)) {
+                photoQueue.push({ cadreId: c.id, tab: resolveMirrorTab(c), avatarKey: c.avatarKey });
+              }
+            }
             // The script reports rows it refused (e.g. a tab name outside its whitelist)
             // individually; those are errors even though the call itself succeeded.
             const rejected = Array.isArray(result.rejected) ? (result.rejected as Array<{ cadreId?: number; error?: string }>) : [];
@@ -308,6 +340,7 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
           log.warn({ err }, 'cadre export chunk failed');
         }
 
+        await writeProgress('rows');
         if (cadres.length < chunkSize) break;
       }
 
@@ -322,6 +355,77 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
           finishError = err instanceof Error ? err.message : String(err);
         }
       }
+
+      // ── Phase 2: photos, in small batches. The mirror is already complete and usable. ──
+      photosTotal = photoQueue.length;
+      let consecutiveFailures = 0;
+      if (photosTotal > 0) await writeProgress('photos');
+      while (photoQueue.length > 0) {
+        const batch = photoQueue.splice(0, PHOTO_BATCH_SIZE);
+
+        // A missing object (key set but the S3/mock object is gone) or a failed download
+        // costs only that photo, never the batch.
+        const loaded = await Promise.all(
+          batch.map(async (job) => {
+            try {
+              const obj = await storage.getObject(job.avatarKey);
+              if (obj === null) {
+                photoErrors += 1;
+                return null;
+              }
+              return {
+                cadreId: job.cadreId,
+                tab: job.tab,
+                photoKey: job.avatarKey,
+                base64: obj.body.toString('base64'),
+                contentType: obj.contentType,
+              };
+            } catch (err) {
+              photoErrors += 1;
+              log.warn({ err, cadreId: job.cadreId }, 'cadre export: avatar download failed, skipping that photo');
+              return null;
+            }
+          }),
+        );
+        const photos = loaded.filter((p): p is NonNullable<typeof p> => p !== null);
+        if (photos.length === 0) {
+          photosDone += batch.length;
+          continue;
+        }
+
+        let deferred: number[] = [];
+        let progressed = false;
+        try {
+          const res = await sheetsSync.call('cadre.export.photos', { photos });
+          if (res.ok) {
+            const photoIds = new Set(photos.map((p) => p.cadreId));
+            deferred = numberIds(res.deferred).filter((id) => photoIds.has(id));
+            const perPhotoErrors = Array.isArray(res.errors) ? res.errors.length : 0;
+            photoErrors += perPhotoErrors;
+            progressed = photos.length - deferred.length > 0;
+          } else {
+            photoErrors += photos.length;
+            log.warn({ error: res.error }, 'cadre export: photo batch rejected by sheet');
+          }
+        } catch (err) {
+          photoErrors += photos.length;
+          log.warn({ err }, 'cadre export: photo batch failed');
+        }
+
+        if (deferred.length > 0) {
+          // The script ran out of time budget partway: re-queue what it did not reach.
+          const retry = batch.filter((j) => deferred.includes(j.cadreId));
+          photoQueue.unshift(...retry);
+        }
+        photosDone += batch.length - deferred.length;
+
+        consecutiveFailures = progressed ? 0 : consecutiveFailures + 1;
+        if (consecutiveFailures >= PHOTO_CONSECUTIVE_FAILURE_LIMIT) {
+          photoPhaseError = `photo sync stopped after ${PHOTO_CONSECUTIVE_FAILURE_LIMIT} failed batches in a row (${photoQueue.length} photos not attempted); rows are in the sheet, run the sync again to retry the photos`;
+          break;
+        }
+        await writeProgress('photos');
+      }
     } catch (err) {
       // Anything unexpected (DB error mid-run): surface it as a failed run instead of
       // leaving the row `running` until it goes stale.
@@ -329,25 +433,32 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
       log.error({ err }, 'cadre export run crashed');
     }
 
-    const failed = errorCount > 0 || finishError !== undefined;
+    const failed = errorCount > 0 || finishError !== undefined || photoPhaseError !== undefined;
     const detail = {
       total,
       errors: errorCount,
       photoErrors,
+      photosTotal,
+      photosDone,
       skippedEdited,
       byTab,
       errorSamples: errors,
-      finishError: finishError ?? null,
+      finishError: finishError ?? photoPhaseError ?? null,
     };
     await prisma.syncLog.update({
       where: { id: runId },
       data: {
         status: failed ? 'error' : 'success',
-        error: failed ? (finishError ?? errors[0]?.error ?? 'export finished with errors').slice(0, 500) : null,
+        error: failed
+          ? (finishError ?? photoPhaseError ?? errors[0]?.error ?? 'export finished with errors').slice(0, 500)
+          : null,
         detail: detail as unknown as Prisma.InputJsonValue,
       },
     });
-    log.info({ rows: total, errors: errorCount, status: failed ? 'error' : 'success' }, 'cadre export run complete');
+    log.info(
+      { rows: total, errors: errorCount, photos: photosDone, photoErrors, status: failed ? 'error' : 'success' },
+      'cadre export run complete',
+    );
   }
 
   return {
