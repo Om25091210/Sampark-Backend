@@ -33,6 +33,9 @@ export interface WireSyncLogEntry {
   targetKey: string | null;
   status: string;
   error: string | null;
+  // cadre.export rows carry the run summary (counts, per-tab totals, a bounded error
+  // sample); user.* rows leave it null. Shown on the web Configuration page.
+  detail: unknown;
   createdAt: string;
 }
 
@@ -78,7 +81,7 @@ export function makeConfigService({ prisma }: ConfigDeps): ConfigService {
         // timestamp -- id desc breaks the tie deterministically, newest-inserted first.
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit,
-        select: { id: true, eventType: true, targetKey: true, status: true, error: true, createdAt: true },
+        select: { id: true, eventType: true, targetKey: true, status: true, error: true, detail: true, createdAt: true },
       });
       return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
     },

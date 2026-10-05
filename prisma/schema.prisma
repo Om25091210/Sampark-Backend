@@ -1067,7 +1067,7 @@ model SyncLog {
   // NOT a foreign key: the target may be deleted or the export spans many cadres, and
   // this log must stay readable even after the row it describes is gone.
   targetKey String?  @map("target_key")
-  status    String // 'success' | 'error'
+  status    String // 'success' | 'error' | 'running' (cadre.export only: in flight, see cadre-export.service.ts)
   error     String?
   detail    Json?
   createdAt DateTime @default(now()) @map("created_at")

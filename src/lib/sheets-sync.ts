@@ -13,7 +13,12 @@ import type { AppConfig } from '../config/env.js';
 // never cached across calls. The shared-secret key IS static process config
 // (SYNC_API_KEY env var), same posture as IMPORT_API_KEY: rotating it needs a
 // redeploy either way, and that is an accepted, already-established trade-off.
-export type SheetsSyncAction = 'user.sync' | 'cadre.export' | 'cadre.preview';
+export type SheetsSyncAction = 'user.sync' | 'cadre.export' | 'cadre.export.finish' | 'cadre.preview';
+
+// Apps Script kills an execution at 6 minutes; waiting meaningfully longer than that
+// can only mean the call is hung. Without a bound, one hung chunk stalls the whole
+// export run (and its `running` slot) indefinitely.
+const SYNC_FETCH_TIMEOUT_MS = 6 * 60 * 1000 + 15_000;
 
 export interface SheetsSyncResult {
   ok: boolean;
@@ -77,6 +82,7 @@ class HttpSheetsSyncProvider implements SheetsSyncProvider {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: this.apiKey, action, payload }),
+        signal: AbortSignal.timeout(SYNC_FETCH_TIMEOUT_MS),
       });
     } catch (err) {
       this.log.warn({ err, action }, 'sheets sync HTTP call failed');
