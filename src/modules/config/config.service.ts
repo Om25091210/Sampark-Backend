@@ -83,7 +83,14 @@ export function makeConfigService({ prisma }: ConfigDeps): ConfigService {
         take: limit,
         select: { id: true, eventType: true, targetKey: true, status: true, error: true, detail: true, createdAt: true },
       });
-      return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }));
+      // Exports before the per-category rewrite stored one outcome per cadre (7k+ entries)
+      // in `detail` as a bare array. The page cannot use that shape and it would bloat every
+      // poll of this endpoint, so it is withheld; current runs store a small summary object.
+      return rows.map((r) => ({
+        ...r,
+        detail: Array.isArray(r.detail) ? null : r.detail,
+        createdAt: r.createdAt.toISOString(),
+      }));
     },
   };
 }

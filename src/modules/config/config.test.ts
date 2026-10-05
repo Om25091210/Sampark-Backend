@@ -128,6 +128,23 @@ describe('GET /config/sync-log (ADR-059 §4)', () => {
     await app.close();
   });
 
+  it('withholds a legacy array detail (old per-cadre export log) but returns an object summary', async () => {
+    await prisma.syncLog.createMany({
+      data: [
+        { eventType: 'cadre.export', targetKey: TOKEN, status: 'success', detail: [{ cadreId: 1, status: 'synced' }] },
+        { eventType: 'cadre.export', targetKey: TOKEN, status: 'success', detail: { total: 3, errors: 0, byTab: {} } },
+      ],
+    });
+    const app = await makeApp();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/config/sync-log?limit=100', headers: auth(saToken) });
+    const mine = (res.json() as Array<{ targetKey: string | null; detail: unknown }>).filter((e) => e.targetKey === TOKEN);
+    expect(mine.some((e) => e.detail === null)).toBe(true);
+    expect(mine.some((e) => !Array.isArray(e.detail) && e.detail !== null)).toBe(true);
+    expect(mine.every((e) => !Array.isArray(e.detail))).toBe(true);
+    await prisma.syncLog.deleteMany({ where: { targetKey: TOKEN } });
+    await app.close();
+  });
+
   it('returns recent entries newest-first', async () => {
     // sync_log is shared across the whole suite (cadre-export/user-sync tests write
     // to it too), so this can't assume its 3 rows land in the top N overall -- a
