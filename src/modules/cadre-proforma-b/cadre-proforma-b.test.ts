@@ -181,6 +181,38 @@ describe('B Proforma (ADR-064 addendum)', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('lists "my requests" at pageSize=100, which is what my-changes.tsx asks for', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/proforma-b-changes?submittedBy=me&page=1&pageSize=100',
+      headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('accepts a create that omits untouched nullable fields (missing reads as null), but still requires the name', async () => {
+    const app = await makeApp();
+    const sparse = { fullNameWithAlias: 'राम', nativeAddress: ADDRESS, currentAddressDetails: ADDRESS, surrenderDate: null, handlerDetails: 'निरीक्षक XYZ' };
+    const ok = await app.inject({
+      method: 'POST',
+      url: `/api/v1/cadres/${cadreId}/proforma-b`,
+      headers: auth(superToken),
+      payload: { fields: sparse },
+    });
+    expect(ok.statusCode).toBe(201);
+    expect((ok.json() as WireRequest).status).toBe('applied');
+
+    const { fullNameWithAlias: _omitted, ...noName } = sparse;
+    const bad = await app.inject({
+      method: 'POST',
+      url: `/api/v1/cadres/${cadreId}/proforma-b`,
+      headers: auth(superToken),
+      payload: { fields: noName },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it('super_admin files immediately; the new-draft for the NEXT period carries forward its fields', async () => {
     const app = await makeApp();
     const create = await app.inject({

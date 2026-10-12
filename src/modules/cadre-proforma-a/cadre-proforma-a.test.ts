@@ -171,6 +171,40 @@ describe('AB Proforma (ADR-064)', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('lists "my requests" at pageSize=100, which is what my-changes.tsx asks for', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/proforma-a-changes?submittedBy=me&page=1&pageSize=100',
+      headers: auth(officerToken),
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('accepts a create that omits the fields the officer never touched (missing reads as null)', async () => {
+    const app = await makeApp();
+    const create = await app.inject({
+      method: 'POST',
+      url: `/api/v1/cadres/${cadreId}/proforma-a`,
+      headers: auth(superToken),
+      payload: {
+        fields: { party: 'टेस्ट पार्टी', childhoodFriends: [], sectionB: { reasonForJoining: 'विचारधारा' } },
+      },
+    });
+    expect(create.statusCode).toBe(201);
+    expect((create.json() as WireRequest).status).toBe('applied');
+
+    const got = await app.inject({
+      method: 'GET',
+      url: `/api/v1/cadres/${cadreId}/proforma-a`,
+      headers: auth(officerToken),
+    });
+    expect(got.statusCode).toBe(200);
+    const record = got.json() as { party: string; religion: string | null };
+    expect(record.party).toBe('टेस्ट पार्टी');
+    expect(record.religion).toBeNull();
+  });
+
   it('officer → admin → super_admin: create is NOT applied until the last rung signs, then GET returns it', async () => {
     const app = await makeApp();
     const create = await app.inject({

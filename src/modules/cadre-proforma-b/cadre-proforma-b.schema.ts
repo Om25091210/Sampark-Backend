@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { fillMissingNullable } from '../../lib/fill-nullable.js';
 
 // ─── B Proforma (ADR-064 addendum) ─────────────────────────────────────────────
 //
@@ -68,8 +69,11 @@ export type ProformaBFields = z.infer<typeof proformaBFieldsSchema>;
 export const proformaBFieldsPartial = proformaBFieldsSchema.partial();
 export type ProformaBFieldsPartial = z.infer<typeof proformaBFieldsPartial>;
 
+// Same reasoning as the AB create: a missing nullable key must read as null, not 400.
+export const proformaBFieldsCreateSchema = fillMissingNullable(proformaBFieldsSchema);
+
 export const submitProformaBCreateBody = z.object({
-  fields: proformaBFieldsSchema,
+  fields: proformaBFieldsCreateSchema,
   note: z.string().trim().max(1000).optional(),
   idempotency_key: z.string().uuid().optional(),
 });
@@ -101,7 +105,8 @@ export const listProformaBChangesQuery = z.object({
   cadreId: z.coerce.number().int().positive().optional(),
   awaitingMe: z.coerce.boolean().optional(),
   page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(50).default(15),
+  // 100, not the usual 50: my-changes.tsx asks for a whole page of "my requests" at once.
+  pageSize: z.coerce.number().int().min(1).max(100).default(15),
 });
 export type ListProformaBChangesQuery = z.infer<typeof listProformaBChangesQuery>;
 export type ResolvedListProformaBChangesQuery = Omit<ListProformaBChangesQuery, 'submittedBy'> & {

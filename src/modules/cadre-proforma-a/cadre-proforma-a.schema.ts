@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { fillMissingNullable } from '../../lib/fill-nullable.js';
 
 // ─── AB Proforma (ADR-064) ─────────────────────────────────────────────────────
 //
@@ -272,8 +273,12 @@ export type ProformaAFields = z.infer<typeof proformaAFieldsSchema>;
 export const proformaAFieldsPartial = proformaAFieldsSchema.partial();
 export type ProformaAFieldsPartial = z.infer<typeof proformaAFieldsPartial>;
 
+// `.nullable()` alone still rejects a MISSING key, and the app only sends the fields the
+// officer touched — so a create fills the rest with null here rather than 400ing.
+export const proformaAFieldsCreateSchema = fillMissingNullable(proformaAFieldsSchema);
+
 export const submitProformaACreateBody = z.object({
-  fields: proformaAFieldsSchema,
+  fields: proformaAFieldsCreateSchema,
   note: z.string().trim().max(1000).optional(),
   idempotency_key: z.string().uuid().optional(),
 });
@@ -305,7 +310,8 @@ export const listProformaChangesQuery = z.object({
   cadreId: z.coerce.number().int().positive().optional(),
   awaitingMe: z.coerce.boolean().optional(),
   page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(50).default(15),
+  // 100, not the usual 50: my-changes.tsx asks for a whole page of "my requests" at once.
+  pageSize: z.coerce.number().int().min(1).max(100).default(15),
 });
 export type ListProformaChangesQuery = z.infer<typeof listProformaChangesQuery>;
 export type ResolvedListProformaChangesQuery = Omit<ListProformaChangesQuery, 'submittedBy'> & {

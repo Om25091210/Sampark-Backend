@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { createReportBodyShape, checkDeathRequirements } from '../reports/reports.schema.js';
 import { changeableFieldsSchema } from '../cadre-changes/cadre-changes.schema.js';
-import { proformaAFieldsSchema, proformaAFieldsPartial } from '../cadre-proforma-a/cadre-proforma-a.schema.js';
-import { proformaBFieldsSchema, proformaBFieldsPartial } from '../cadre-proforma-b/cadre-proforma-b.schema.js';
+import { proformaAFieldsCreateSchema, proformaAFieldsPartial } from '../cadre-proforma-a/cadre-proforma-a.schema.js';
+import { proformaBFieldsCreateSchema, proformaBFieldsPartial } from '../cadre-proforma-b/cadre-proforma-b.schema.js';
 
 // ─── Pull (server → device) ────────────────────────────────────────────────────
 //
@@ -64,7 +64,7 @@ export const syncPushBody = z.object({
           kind: z.literal('create'),
           idempotency_key: z.string().uuid(),
           cadre_id: z.number().int().positive(),
-          fields: proformaAFieldsSchema,
+          fields: proformaAFieldsCreateSchema,
           note: z.string().trim().max(1000).optional(),
         }),
         z.object({
@@ -90,7 +90,7 @@ export const syncPushBody = z.object({
           kind: z.literal('create'),
           idempotency_key: z.string().uuid(),
           cadre_id: z.number().int().positive(),
-          fields: proformaBFieldsSchema,
+          fields: proformaBFieldsCreateSchema,
           note: z.string().trim().max(1000).optional(),
         }),
         z.object({
