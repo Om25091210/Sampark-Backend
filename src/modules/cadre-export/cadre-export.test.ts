@@ -147,6 +147,12 @@ describe('cadre export service (ADR-058) - called directly, mirroring outbox.wor
     const finishCall = sheetsSync.calls.find((c) => c.action === 'cadre.export.finish');
     expect(finishCall).toBeDefined();
     expect((finishCall!.payload as { runStartedAt: string }).runStartedAt).toBe(row1!.syncedAt);
+    // The interlock: the sheet removes stale rows only if it holds this many freshly stamped ones.
+    const sentRows = sheetsSync.calls
+      .filter((c) => c.action === 'cadre.export')
+      .reduce((n, c) => n + (c.payload as { rows: unknown[] }).rows.length, 0);
+    expect((finishCall!.payload as { expectedCount: number }).expectedCount).toBe(sentRows);
+    expect(sentRows).toBeGreaterThanOrEqual(2);
 
     const audit = await prisma.auditLog.findFirst({
       where: { entityType: 'cadre_export', action: 'cadre.export_triggered' },
@@ -309,6 +315,24 @@ describe('cadre export service (ADR-058) - called directly, mirroring outbox.wor
     expect(logRow!.status).toBe('success');
     // chunkSize 1 => one call per cadre in the shared table, each reporting 2.
     expect((logRow!.detail as { skippedEdited: number }).skippedEdited).toBeGreaterThanOrEqual(2);
+  });
+
+  it('records how many rows the sheet removed/flagged, and a refused prune is an error', async () => {
+    const sheetsSync = new MockSheetsSyncProvider();
+    sheetsSync.handlers['cadre.export.finish'] = () => ({ ok: true, removed: 4, flagged: 1 });
+    const service = makeCadreExportService({ prisma, storage: new MockStorageProvider(), sheetsSync, log: silentLog });
+    await service.runExport(saId);
+    let logRow = await prisma.syncLog.findFirst({ where: { eventType: 'cadre.export' }, orderBy: { id: 'desc' } });
+    expect(logRow!.status).toBe('success');
+    expect(logRow!.detail).toMatchObject({ removedRows: 4, flaggedRows: 1 });
+
+    // The sheet's safety stop (it did not find the whole roster stamped) must surface, not pass silently.
+    const refusing = new MockSheetsSyncProvider();
+    refusing.handlers['cadre.export.finish'] = () => ({ ok: false, error: 'safety stop: nothing was removed' });
+    await makeCadreExportService({ prisma, storage: new MockStorageProvider(), sheetsSync: refusing, log: silentLog }).runExport(saId);
+    logRow = await prisma.syncLog.findFirst({ where: { eventType: 'cadre.export' }, orderBy: { id: 'desc' } });
+    expect(logRow!.status).toBe('error');
+    expect(logRow!.error).toMatch(/safety stop/);
   });
 
   it('rows the sheet reports as rejected make the run an error', async () => {

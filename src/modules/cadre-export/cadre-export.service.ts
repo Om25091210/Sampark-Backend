@@ -228,6 +228,10 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
     // never hides that those rows were not refreshed from AWS.
     let skippedEdited = 0;
     let finishError: string | undefined;
+    // Rows the sheet dropped because the cadre is no longer in AWS under that tab (each is
+    // archived to the sheet's RemovedLog first), and edited rows it kept but flagged instead.
+    let removedRows = 0;
+    let flaggedRows = 0;
     let photoPhaseError: string | undefined;
 
     const recordError = (sample: ExportErrorSample): void => {
@@ -349,8 +353,17 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
       // a row missing its stamp may simply be in a chunk that failed, not deleted.
       if (errorCount === 0) {
         try {
-          const finish = await sheetsSync.call('cadre.export.finish', { runStartedAt: startedAt });
-          if (!finish.ok) finishError = finish.error ?? 'finish step failed';
+          // `expectedCount` is the sheet's safety interlock: it removes stale rows only if it
+          // finds at least this many rows stamped by this run. Never ask it to prune after
+          // writing nothing (an empty roster must not mean "delete everything").
+          if (total > 0) {
+            const finish = await sheetsSync.call('cadre.export.finish', { runStartedAt: startedAt, expectedCount: total });
+            if (!finish.ok) finishError = finish.error ?? 'finish step failed';
+            else {
+              if (typeof finish.removed === 'number') removedRows = finish.removed;
+              if (typeof finish.flagged === 'number') flaggedRows = finish.flagged;
+            }
+          }
         } catch (err) {
           finishError = err instanceof Error ? err.message : String(err);
         }
@@ -441,6 +454,8 @@ export function makeCadreExportService(deps: CadreExportDeps): CadreExportServic
       photosTotal,
       photosDone,
       skippedEdited,
+      removedRows,
+      flaggedRows,
       byTab,
       errorSamples: errors,
       finishError: finishError ?? photoPhaseError ?? null,
