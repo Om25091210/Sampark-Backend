@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { type CadreScope } from '../../lib/scope.js';
+import { fuzzyScores } from '../../lib/fuzzy-search.js';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { toWireUser, type WireUser } from '../../lib/serialize.js';
 import type { ListOfficersQuery } from './officers.schema.js';
@@ -40,7 +41,12 @@ export function makeOfficersService({ prisma }: OfficersDeps): OfficersService {
 
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search;
+        // ADR-071. Fuzzy hits (Devanagari <-> Latin thana / designation, spelling slips) are
+        // OR-ed with the original `contains` arms, so nothing the old search found can vanish.
+        // A phone number is not a spelling, so it only ever matches literally.
+        const fuzzy = await fuzzyScores(prisma, 'users', raw);
         where.OR = [
+          { id: { in: [...fuzzy.keys()] } },
           { name: { contains: raw, mode: 'insensitive' } },
           { phone: { contains: raw, mode: 'insensitive' } },
           { thana: { contains: raw, mode: 'insensitive' } },

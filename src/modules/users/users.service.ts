@@ -6,6 +6,7 @@ import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { hashPassword } from '../../lib/password.js';
 import { revokeAllRefreshTokens } from '../auth/refresh-tokens.js';
+import { fuzzyScores } from '../../lib/fuzzy-search.js';
 import { toWireUser, type WireUser } from '../../lib/serialize.js';
 import {
   importUserRow,
@@ -258,7 +259,10 @@ export function makeUsersService({ prisma, log }: UsersDeps): UsersService {
       if (query.thana !== undefined) where.thana = query.thana;
       if (query.subDivision !== undefined) where.subDivision = query.subDivision;
       if (query.search !== undefined && query.search !== '') {
-        where.name = { contains: query.search, mode: 'insensitive' };
+        // ADR-071. Fuzzy over name / thana / designation / sub-division, OR-ed with the original
+        // substring match on the institutional ID so nothing it found can vanish.
+        const fuzzy = await fuzzyScores(prisma, 'users', query.search);
+        where.OR = [{ id: { in: [...fuzzy.keys()] } }, { name: { contains: query.search, mode: 'insensitive' } }];
       }
 
       const [total, rows] = await prisma.$transaction([

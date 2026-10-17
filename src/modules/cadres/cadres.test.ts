@@ -14,8 +14,11 @@ const IMPORT_TOKEN = 'IMPFIXTURE';
 // SDR-007 machine key used by the import tests (>= 32 chars, like a real one).
 const IMPORT_KEY = 'import-test-key-that-is-32-plus-characters-long';
 // Unique, searchable name prefixes for this file's own fixtures — see beforeAll.
-const PAGE_TOKEN = 'PGNFIXTURE';
-const ORIGIN_TOKEN = 'ORGFIXTURE';
+// ADR-070: `search` is fuzzy now, so tokens that share a long tail (…FIXTURE) read as spelling
+// variants of each other and a total-count assertion would pick up the siblings. These two feed
+// whole-table `total` assertions, so they are deliberately unlike every other token here.
+const PAGE_TOKEN = 'PGNKWAT';
+const ORIGIN_TOKEN = 'ORGJUMBO';
 const ALERT_TOKEN = 'ALTFIXTURE';
 const FACET_TOKEN = 'FCTFIXTURE';
 // Design-Docs#8 avatar-backfill fixtures — own prefix, same cleanup discipline.

@@ -4,12 +4,16 @@
 // (per ADR / CLAUDE.md rule 10). All primary domain tables carry a soft-delete column.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  // ADR-070. Needed only so the two trigram GIN indexes on `cadres` are declared here and
+  // `migrate dev` does not propose dropping them as drift.
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pg_trgm]
 }
 
 // ─── Enums (lowercase wire values; CadreFilter keeps client acronyms) ──────────
@@ -208,6 +212,10 @@ model User {
   subDivision     String?   @map("sub_division")
   avatarUrl       String?   @map("avatar_url")
   badgeImageUrl   String?   @map("badge_image_url")
+  // ADR-071. Derived fuzzy-search keys (name, thana, designation, subDivision), kept by the
+  // `users_search_keys` trigger — same scheme and rules as Cadre.searchText (ADR-070).
+  searchText      String?   @map("search_text")
+  searchSkel      String?   @map("search_skel")
   deletedAt       DateTime? @map("deleted_at")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
@@ -241,6 +249,8 @@ model User {
 
   configUpdates ConfigEntry[] @relation("ConfigUpdatedBy") // ADR-059
 
+  @@index([searchText(ops: raw("gin_trgm_ops"))], type: Gin, map: "users_search_text_trgm_idx")
+  @@index([searchSkel(ops: raw("gin_trgm_ops"))], type: Gin, map: "users_search_skel_trgm_idx")
   @@map("users")
 }
 
@@ -402,6 +412,16 @@ model Cadre {
   // column directly in place of the intentional explicit-parameter pattern
   // ADR-023 set up. Internal/sort-only — never serialized on the wire.
   reportSortKey      DateTime?         @map("report_sort_key")
+  // ADR-070. Fuzzy-search keys. DERIVED columns, never written by the app: the
+  // `cadres_search_keys` trigger recomputes them from name/aliases/father/thana/… on every
+  // INSERT or UPDATE of those columns, so no write path (change-request apply, import, seed,
+  // a one-off SQL backfill) can leave them stale. Devanagari and Latin spellings fold to ONE
+  // phonetic alphabet (see sampark_search_key in the migration). `searchName` is name+aliases
+  // only (ranking boost); `searchText` is every searchable field; `searchSkel` is searchText
+  // with vowels removed (survives e/i, o/u slips). Internal — never serialized on the wire.
+  searchName         String?           @map("search_name")
+  searchText         String?           @map("search_text")
+  searchSkel         String?           @map("search_skel")
   deletedAt          DateTime?         @map("deleted_at")
   createdAt          DateTime          @default(now()) @map("created_at")
   updatedAt          DateTime          @updatedAt @map("updated_at")
@@ -437,6 +457,9 @@ model Cadre {
   @@index([category, surrenderOrigin, otherOriginType])
   // This task. The recency-tier drill-down's new "most recently reported first" order.
   @@index([reportSortKey])
+  // ADR-070. Trigram GIN indexes behind GET /cadres?search= (`<%` word-similarity operator).
+  @@index([searchText(ops: raw("gin_trgm_ops"))], type: Gin, map: "cadres_search_text_trgm_idx")
+  @@index([searchSkel(ops: raw("gin_trgm_ops"))], type: Gin, map: "cadres_search_skel_trgm_idx")
   @@map("cadres")
 }
 
@@ -541,6 +564,10 @@ model Report {
   syncedAt                DateTime?      @map("synced_at")
   // ADR-013: client-supplied UUID; unique + retained for the report's lifetime (no expiry).
   idempotencyKey          String?        @unique @map("idempotency_key")
+  // ADR-071. Derived fuzzy-search keys (specificLocation, currentActivity), kept by the
+  // `reports_search_keys` trigger. Internal — never serialized on the wire.
+  searchText              String?        @map("search_text")
+  searchSkel              String?        @map("search_skel")
   deletedAt               DateTime?      @map("deleted_at")
   createdAt               DateTime       @default(now()) @map("created_at")
   updatedAt               DateTime       @updatedAt @map("updated_at")
@@ -557,6 +584,8 @@ model Report {
   // above still requires a sort per cadre without this; a composite index lets
   // Postgres walk it back-to-front on the sort columns directly.
   @@index([cadreId, deletedAt, reportedAt, id])
+  @@index([searchText(ops: raw("gin_trgm_ops"))], type: Gin, map: "reports_search_text_trgm_idx")
+  @@index([searchSkel(ops: raw("gin_trgm_ops"))], type: Gin, map: "reports_search_skel_trgm_idx")
   @@map("reports")
 }
 

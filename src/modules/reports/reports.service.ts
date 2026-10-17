@@ -2,6 +2,8 @@ import type { FastifyBaseLogger } from 'fastify';
 import { cadreScopeWhere, type CadreScope } from '../../lib/scope.js';
 import { Prisma, type PrismaClient, type Role } from '@prisma/client';
 import { toWireReport, type WireReport } from '../../lib/serialize.js';
+import { fuzzyScores } from '../../lib/fuzzy-search.js';
+import { fuzzyCadreScores } from '../cadres/cadres-search.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, forbidden, notFound } from '../../lib/errors.js';
@@ -193,7 +195,17 @@ export function makeReportsService({
 
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search.trim();
+        // ADR-071. Fuzzy over the report's own words (place, activity) AND over the cadre it is
+        // about — "which of my reports were about Hidma" is what an officer actually types, and
+        // the old search could not answer it at all. OR-ed with the original `contains` arms,
+        // so nothing it found can vanish; a phone number only ever matches literally.
+        const [fuzzyReports, fuzzyCadres] = await Promise.all([
+          fuzzyScores(prisma, 'reports', raw),
+          fuzzyCadreScores(prisma, raw),
+        ]);
         where.OR = [
+          { id: { in: [...fuzzyReports.keys()] } },
+          { cadreId: { in: [...fuzzyCadres.keys()] } },
           { specificLocation: { contains: raw, mode: 'insensitive' } },
           { currentActivity: { contains: raw, mode: 'insensitive' } },
           { currentPhone: { contains: raw, mode: 'insensitive' } },

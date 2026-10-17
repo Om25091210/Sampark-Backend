@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
 import { toWireCadre, type WireCadre } from '../../lib/serialize.js';
 import { recencyTierWhere, pendingReportingWhere } from '../../lib/recency.js';
+import { findSimilarCadres, fuzzyCadreScores, type SimilarCadre, type SimilarCadreQuery } from './cadres-search.js';
 import { writeAuditLog } from '../../lib/audit.js';
 import { writeOutboxEvent } from '../../lib/outbox.js';
 import { badRequest, notFound } from '../../lib/errors.js';
@@ -170,6 +171,8 @@ export interface CadresService {
   // `category` scopes the distinct values to one dashboard tile's rows (undefined/'all'
   // = every category the caller can already see) — see the note on facetsQuery.
   facets(scope: CadreScope, category?: 'surrendered' | 'jail' | 'thana' | 'all'): Promise<CadreFacets>;
+  // ADR-071. Cadres that may be the same person as the one being typed into the create form.
+  similar(query: SimilarCadreQuery, scope: CadreScope): Promise<{ data: SimilarCadre[] }>;
   getById(id: number, scope: CadreScope): Promise<WireCadre>;
   transfer(cadreId: number, toOfficerId: number, actorId: number, scope: CadreScope): Promise<void>;
   // ADR-046. Move a cadre to another station. `scope` enforces ADR-044 on the SOURCE end —
@@ -296,6 +299,31 @@ export const LATEST_REPORT = {
   // ADR-027. The last editor's name, for "अंतिम बदलाव — <officer>".
   lastEditedBy: { select: { id: true, name: true } },
 } as const satisfies Prisma.CadreInclude;
+
+type CadreWithLatest = Prisma.CadreGetPayload<{ include: typeof LATEST_REPORT }>;
+
+/**
+ * ADR-070. One page of a text search, best match first. Prisma cannot ORDER BY a score computed
+ * in another query, so this takes the ids of every row that survives `where` (scope, facets and
+ * the search itself — capped upstream at the fuzzy ceiling plus literal hits), orders them by
+ * relevance (ties and literal-only hits by id, i.e. register order), pages the id list, then
+ * loads just that page and puts the rows back in ranked order. `total` is the full match count,
+ * so `hasMore` stays truthful.
+ */
+async function pageByRelevance(
+  prisma: PrismaClient,
+  where: Prisma.CadreWhereInput,
+  relevance: Map<number, number>,
+  page: number,
+  pageSize: number,
+): Promise<[number, CadreWithLatest[]]> {
+  const hits = await prisma.cadre.findMany({ where, select: { id: true } });
+  const ranked = hits.map((h) => h.id).sort((a, b) => (relevance.get(b) ?? 0) - (relevance.get(a) ?? 0) || a - b);
+  const pageIds = ranked.slice((page - 1) * pageSize, page * pageSize);
+  const found = await prisma.cadre.findMany({ where: { id: { in: pageIds } }, include: LATEST_REPORT });
+  const byId = new Map(found.map((r) => [r.id, r]));
+  return [ranked.length, pageIds.flatMap((id) => byId.get(id) ?? [])];
+}
 
 /**
  * ADR-029 / ADR-054. Signs each row's up-to-three avatar keys into fresh GET
@@ -468,6 +496,8 @@ export function makeCadresService({
       if (query.pendingReporting === true) and.push(pendingReportingWhere());
       if (and.length > 0) where.AND = and;
 
+      // ADR-070. Set only for a plain-text search; drives relevance ordering below.
+      let relevance: Map<number, number> | undefined;
       if (query.search !== undefined && query.search !== '') {
         const raw = query.search.trim();
         if (raw.startsWith('@')) {
@@ -475,7 +505,11 @@ export function makeCadresService({
           const term = raw.slice(1).trim();
           if (term !== '') where.aliases = { has: term };
         } else {
+          relevance = await fuzzyCadreScores(prisma, raw);
           where.OR = [
+            // Fuzzy hits (Devanagari <-> Latin, spelling slips). The literal `contains` arms
+            // below stay, so nothing the pre-ADR-070 search found can go missing.
+            { id: { in: [...relevance.keys()] } },
             { name: { contains: raw, mode: 'insensitive' } },
             { thana: { contains: raw, mode: 'insensitive' } },
             { designation: { contains: raw, mode: 'insensitive' } },
@@ -486,7 +520,13 @@ export function makeCadresService({
         }
       }
 
-      const [total, rows] = await prisma.$transaction([
+      // ADR-070. A text search lists best match first. A recency drill-down keeps its own
+      // "most recently reported" order, so it only takes the fuzzy filter, not the ranking.
+      const rankedPage =
+        relevance !== undefined && query.recency === undefined
+          ? await pageByRelevance(prisma, where, relevance, query.page, query.pageSize)
+          : undefined;
+      const [total, rows] = rankedPage ?? (await prisma.$transaction([
         prisma.cadre.count({ where }),
         prisma.cadre.findMany({
           where,
@@ -512,7 +552,7 @@ export function makeCadresService({
           skip: (query.page - 1) * query.pageSize,
           take: query.pageSize,
         }),
-      ]);
+      ]));
 
       const [pending, avatars] = await Promise.all([
         pendingFieldsForIds(rows.map((r) => r.id)),
@@ -531,6 +571,10 @@ export function makeCadresService({
         pageSize: query.pageSize,
         hasMore: query.page * query.pageSize < total,
       };
+    },
+
+    async similar(query, scope) {
+      return { data: await findSimilarCadres(prisma, query, scope) };
     },
 
     /**

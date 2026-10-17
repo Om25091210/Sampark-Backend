@@ -9,6 +9,7 @@ import {
   fieldCorrectionBody,
   thanaPostCorrectionBody,
   facetsQuery,
+  similarCadresQuery,
   importCadresBody,
   listCadresQuery,
   thanaTransferBody,
@@ -352,6 +353,35 @@ export async function cadresRoutes(app: FastifyInstance): Promise<void> {
       const { category } = facetsQuery.parse(request.query);
       return service.facets(request.scope!, category);
     },
+  );
+
+  app.get(
+    '/cadres/similar',
+    {
+      preHandler: app.authenticate,
+      schema: {
+        tags: ['Cadres'],
+        summary: 'Cadres that may be the same person (duplicate check for the create form)',
+        description:
+          'ADR-071. Fuzzy name match — Devanagari and Latin spellings, spelling slips — optionally ' +
+          'corroborated by `fatherName`, `thana` and `phone`. At most 5, most likely first; each says ' +
+          'why it matched. Read-only and non-blocking: creating the cadre is never refused. ' +
+          'Respects the caller\'s ADR-044 scope, exactly like the list.',
+        security: bearerAuth,
+        querystring: zodToJson(similarCadresQuery),
+        response: {
+          200: jsonResponse('Possible duplicates', {
+            data: [
+              {
+                id: 1802, name: 'हिड़मा पोडियाम', fatherName: 'मुका', thana: 'बीजापुर', serialNumber: 'NS-72',
+                designation: 'दस्ते का सदस्य', matchedFather: true, sameThana: true, samePhone: false,
+              },
+            ],
+          }),
+        },
+      },
+    },
+    async (request) => service.similar(similarCadresQuery.parse(request.query), request.scope!),
   );
 
   app.get(

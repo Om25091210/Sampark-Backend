@@ -15,6 +15,7 @@ import type { PushProvider } from '../../lib/push.js';
 import { writeNotification } from '../../lib/notifications.js';
 import { cadreCreateApprovedCopy, cadreCreateRejectedCopy } from '../../lib/notification-copy.js';
 import { nextCadreSerialNumber } from '../../lib/cadre-serial.js';
+import { findSimilarCadres } from '../cadres/cadres-search.js';
 import { EXT_BY_TYPE } from '../../lib/images.js';
 import {
   fireImmediateDispatch,
@@ -141,34 +142,34 @@ async function toWire(r: Row, sign: SignFn): Promise<WireCreateRequest> {
 }
 
 /**
- * Non-blocking duplicate-of-an-existing-person check. Matches on thana + case-
- * insensitive name + (phone OR dateOfBirth), against both real cadres and other
- * pending create requests. Same-name-different-person is legitimate — the approval
- * ladder is the human checkpoint that decides, so this only ever WARNS, never blocks
- * submission or approval, and is never persisted onto the request row (recomputed
- * live so it reflects whatever exists right now, not what existed at submission).
+ * Non-blocking duplicate-of-an-existing-person check, against both real cadres and other
+ * pending create requests. ADR-071: the name is a FUZZY match now (Devanagari <-> Latin
+ * spellings, spelling slips) — it used to require an identical name AND the same phone or
+ * date of birth, which almost no draft carries, so it never fired for the duplicates it
+ * exists to catch. A one-word name still needs father / thana / phone to corroborate it.
+ * Same-name-different-person is legitimate — the approval ladder is the human checkpoint
+ * that decides, so this only ever WARNS, never blocks submission or approval, and is never
+ * persisted onto the request row (recomputed live so it reflects whatever exists right now,
+ * not what existed at submission). Cadres are bounded by the caller's ADR-044 scope.
  */
 async function findDuplicateCandidates(
   draft: CreateCadreDraft,
   prisma: PrismaClient,
+  scope: CadreScope,
   excludeRequestId?: number,
 ): Promise<DuplicateWarning | undefined> {
   const dob = draft.dateOfBirth ? new Date(draft.dateOfBirth) : undefined;
 
-  const cadres = await prisma.cadre.findMany({
-    where: {
-      deletedAt: null,
-      thana: draft.thana,
-      name: { equals: draft.name, mode: 'insensitive' },
-      OR: [{ phone: draft.phone }, ...(dob !== undefined ? [{ dateOfBirth: dob }] : [])],
-    },
-    select: { id: true, name: true, serialNumber: true, thana: true },
-    take: 5,
-  });
+  const cadres = (
+    await findSimilarCadres(
+      prisma,
+      { name: draft.name, fatherName: draft.fatherName ?? undefined, thana: draft.thana, phone: draft.phone },
+      scope,
+    )
+  ).map((c) => ({ id: c.id, name: c.name, serialNumber: c.serialNumber ?? null, thana: c.thana }));
 
-  // Checked in JS against the JSON draft, not a JSONB query — a thana has a handful
-  // of pending create requests at most, same convention as cadre-changes' in-flight
-  // per-field lock check.
+  // Candidates are the handful of pending requests for this thana; each draft's name is
+  // scored in SQL with the same function the cadre search uses, so the two agree.
   const pending = await prisma.cadreCreateRequest.findMany({
     where: {
       status: 'pending',
@@ -177,17 +178,33 @@ async function findDuplicateCandidates(
     },
     include: { submittedBy: { select: { name: true } } },
   });
+  const drafts = pending.map((r) => ({
+    id: r.id,
+    draft: r.draft as unknown as CreateCadreDraft,
+    submittedBy: r.submittedBy.name,
+  }));
 
-  const createRequests = pending
-    .map((r) => ({ id: r.id, draft: r.draft as unknown as CreateCadreDraft, submittedBy: r.submittedBy.name }))
-    .filter(({ draft: d }) => {
-      const nameMatch = d.name.toLowerCase() === draft.name.toLowerCase();
-      const otherMatch =
-        d.phone === draft.phone ||
-        (dob !== undefined && !!d.dateOfBirth && new Date(d.dateOfBirth).getTime() === dob.getTime());
-      return nameMatch && otherMatch;
-    })
-    .map(({ id, draft: d, submittedBy }) => ({ id, name: d.name, submittedBy }));
+  let createRequests: DuplicateWarning['createRequests'] = [];
+  if (drafts.length > 0) {
+    const scored = await prisma.$queryRaw<{ id: number; score: number | null; tokens: number }[]>`
+      SELECT n.id,
+             sampark_text_score(${draft.name}, k.key, sampark_search_skel(k.key)) AS score,
+             cardinality(string_to_array(sampark_search_key(${draft.name}), ' ')) AS tokens
+      FROM unnest(${drafts.map((d) => d.id)}::int[], ${drafts.map((d) => d.draft.name)}::text[]) AS n(id, name)
+      CROSS JOIN LATERAL (SELECT sampark_search_key(n.name) AS key) k
+    `;
+    const byId = new Map(scored.map((s) => [s.id, s]));
+    createRequests = drafts
+      .filter(({ id, draft: d }) => {
+        const s = byId.get(id);
+        if (s === undefined || s.score === null) return false;
+        const otherMatch =
+          d.phone === draft.phone ||
+          (dob !== undefined && !!d.dateOfBirth && new Date(d.dateOfBirth).getTime() === dob.getTime());
+        return s.tokens >= 2 || otherMatch;
+      })
+      .map(({ id, draft: d, submittedBy }) => ({ id, name: d.name, submittedBy }));
+  }
 
   if (cadres.length === 0 && createRequests.length === 0) return undefined;
   return { cadres, createRequests };
@@ -369,7 +386,7 @@ export function makeCadreCreateRequestsService({
         throw badRequest('thana is outside your jurisdiction', 'THANA_OUT_OF_SCOPE');
       }
 
-      const duplicateWarning = await findDuplicateCandidates(draft, prisma);
+      const duplicateWarning = await findDuplicateCandidates(draft, prisma, actor.scope);
 
       const { needsAdmin, needsSuperAdmin } = requiredApprovalsFor(actor.role);
 
@@ -452,7 +469,7 @@ export function makeCadreCreateRequestsService({
           // immutability here. Only meaningful while still pending.
           const duplicateWarning =
             r.status === 'pending'
-              ? await findDuplicateCandidates(r.draft as unknown as CreateCadreDraft, prisma, r.id)
+              ? await findDuplicateCandidates(r.draft as unknown as CreateCadreDraft, prisma, actor.scope, r.id)
               : undefined;
           return { ...wire, duplicateWarning };
         }),

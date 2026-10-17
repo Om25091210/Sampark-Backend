@@ -393,6 +393,20 @@ describe('cadre create requests', () => {
     await app.close();
   });
 
+  it('warns on a SPELLING VARIANT of an existing cadre — Latin vs Devanagari, no phone or DOB (ADR-071)', async () => {
+    const app = await makeApp();
+    const existing = await prisma.cadre.create({
+      data: {
+        name: `${NAME_PREFIX} हिड़मा पोडियाम`, phone: '+910000002100', thana: THANA, currentAddress: 'पता',
+        designation: 'पदनाम', category: 'surrendered', alertLevel: 'normal', aliases: [],
+      },
+    });
+    const req = await submit(app, officerToken, draft({ name: `${NAME_PREFIX} Hidma Podiam`, phone: '+910000002199' }));
+    expect(req.status).toBe('pending'); // still never blocked
+    expect(req.duplicateWarning?.cadres.some((c) => c.id === existing.id)).toBe(true);
+    await app.close();
+  });
+
   it('warns on a name+thana+phone match against another pending create request, but does not block', async () => {
     const app = await makeApp();
     const dupName = `${NAME_PREFIX} DUP REQ`;

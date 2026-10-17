@@ -103,6 +103,17 @@ export const facetsQuery = z.object({
 
 export type FacetsQuery = z.infer<typeof facetsQuery>;
 
+// ADR-071. "Is this person already in the register?" — asked from the create-cadre form while the
+// officer is still typing. Only `name` is required; father / thana / phone corroborate a match.
+export const similarCadresQuery = z.object({
+  name: z.string().trim().min(1).max(100),
+  fatherName: z.string().trim().max(100).optional(),
+  thana: z.string().trim().max(100).optional(),
+  phone: z.string().trim().max(20).optional(),
+});
+
+export type SimilarCadresQuery = z.infer<typeof similarCadresQuery>;
+
 // ─── Bulk historical import (ADR-038) ──────────────────────────────────────────
 //
 // One-time backfill of the ~1,478-row paper surrender register, pushed from an

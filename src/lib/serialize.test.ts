@@ -45,6 +45,7 @@ describe('toWireUser org scope (ADR-042)', () => {
     id: 1, name: 'SDOPBJR', phone: null, email: 'sdopbjr@sampark.internal',
     passwordHash: null, totpSecret: null, totpConfirmedAt: null, role: 'admin' as const,
     designation: null, avatarUrl: null, badgeImageUrl: null, deletedAt: null,
+    searchText: null, searchSkel: null,
     createdAt: new Date(), updatedAt: new Date(),
   };
 

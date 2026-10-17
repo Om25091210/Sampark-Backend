@@ -133,6 +133,7 @@ do not "fix" it to a single convention:
 | `POST /auth/logout` | — | — | empty |
 | `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`assignedTo`,`surrenderOrigin`,`alertLevel`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
 | `GET /stats/dashboard` **(admin+)** | — | — | camelCase `DashboardStats` (counts; see ADR-020, gated by ADR-030) |
+| `GET /cadres/similar` **(ADR-071)** | — | camelCase (`name` required; `fatherName`,`thana`,`phone`) | `{ data: SimilarCadre[] }` — ≤5 possible duplicates, each with `matchedFather`/`sameThana`/`samePhone`; scope-bounded, advisory |
 | `GET /cadres/:id` | — | — | camelCase `Cadre` |
 | `POST /cadres/:id/transfer` | snake (`to_officer_id`) | — | empty |
 | `GET /officers` **(admin+)** | — | camelCase (`search`,`page`,`pageSize`) | camelCase `PaginatedResponse<Officer>` — `AuthUser` + `assignedCadreCount` |
@@ -144,6 +145,12 @@ do not "fix" it to a single convention:
 | `GET /cadres/:id/reports/export` | — | — | snake (`download_url`) |
 
 `Cadre.avatarSource` is a mobile-local mock field — **never** return it in an entity response.
+
+**`search` is fuzzy (ADR-070/071)** on `GET /cadres`, `/officers`, `/users` and `/reports`: Devanagari and
+Latin spellings fold to one phonetic key (`sampark_search_key()` in SQL) kept in derived `search_*` columns by a
+per-table trigger, ranked with `pg_trgm`. The `search_*` columns are internal — **never serialize them**. The
+rules have a TypeScript twin in the mobile app (`src/lib/searchKey.ts`); a rule change needs both sides plus the
+shared fixture `src/lib/search-key-parity.json` regenerated (`search-key-parity.test.ts` guards the SQL half).
 
 `GET /reports` (ADR-021) is the aggregate reporting feed across all cadres. `reportedBy=me` resolves to the
 caller (the "my reporting record" screen); `reportedBy=<officerId>` scopes to that officer. Like
