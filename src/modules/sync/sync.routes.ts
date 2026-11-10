@@ -1,7 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import type { Role } from '@prisma/client';
-import { makeSyncService } from './sync.service.js';
-import { syncPullQuery, syncPushBody } from './sync.schema.js';
+import { makeSyncService, type SyncPushItemResult, type SyncPushResult } from './sync.service.js';
+import {
+  parsePushBody,
+  syncPullQuery,
+  syncPushBody,
+  type PushKind,
+  type RejectedPushItem,
+} from './sync.schema.js';
 import { makeReportsService } from '../reports/reports.service.js';
 import { makeCadreChangesService } from '../cadre-changes/cadre-changes.service.js';
 import { makeCadreProformaAService } from '../cadre-proforma-a/cadre-proforma-a.service.js';
@@ -12,6 +18,37 @@ import { bearerAuth, jsonResponse, zodToJson } from '../../lib/openapi.js';
 // `AuthPrincipal.role` is a plain string off the JWT — same narrowing every other
 // route with a role-typed parameter does (reports.routes.ts, cadre-changes.routes.ts).
 const ROLES: readonly string[] = ['super_admin', 'admin', 'officer', 'viewer'];
+
+/**
+ * Puts items that failed validation back into the response at the position they held in the
+ * request, as an ordinary per-item `error`. `processed` holds the results for the items that
+ * DID validate, in request order, so the two lists interleave exactly. The phone matches
+ * results by `clientKey`, so order is a courtesy — but the route documents it, so keep it.
+ */
+function mergeResults(
+  processed: SyncPushItemResult[],
+  rejected: RejectedPushItem[],
+): SyncPushItemResult[] {
+  if (rejected.length === 0) return processed;
+  const byIndex = new Map(rejected.map((r) => [r.index, r]));
+  const total = processed.length + rejected.length;
+  const out: SyncPushItemResult[] = [];
+  let next = 0;
+  for (let i = 0; i < total; i += 1) {
+    const bad = byIndex.get(i);
+    if (bad !== undefined) {
+      out.push({ clientKey: bad.clientKey, status: 'error', error: bad.error });
+    } else {
+      out.push(processed[next]!);
+      next += 1;
+    }
+  }
+  return out;
+}
+
+const PUSH_KINDS: readonly PushKind[] = [
+  'reports', 'cadreChangeRequests', 'proformaAChangeRequests', 'proformaBChangeRequests',
+];
 
 // The offline-first mobile mirror (extends ADR-002 to the current stack — see
 // BC-THESIS-SAMPARK.md's sync ADR). `GET /sync/pull` is a delta feed of everything
@@ -116,10 +153,24 @@ export async function syncRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (request) => {
-      const body = syncPushBody.parse(request.body);
+      // Item by item, not the whole body at once: one invalid item must not 400 the batch.
+      const { body, rejected } = parsePushBody(request.body);
       const role = request.authUser!.role;
       if (!ROLES.includes(role)) throw forbidden('Unrecognised role on token');
-      return service.push(body, { id: request.authUser!.sub, role: role as Role, scope: request.scope! });
+      const result = await service.push(body, {
+        id: request.authUser!.sub, role: role as Role, scope: request.scope!,
+      });
+      const merged = { ...result } as SyncPushResult;
+      for (const kind of PUSH_KINDS) merged[kind] = mergeResults(result[kind], rejected[kind]);
+      for (const kind of PUSH_KINDS) {
+        if (rejected[kind].length > 0) {
+          app.log.warn(
+            { kind, rejected: rejected[kind].map((r) => ({ clientKey: r.clientKey, error: r.error })) },
+            'sync push: items failed validation and were reported back individually',
+          );
+        }
+      }
+      return merged;
     },
   );
 }

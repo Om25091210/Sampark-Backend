@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../app.js';
 import { testConfig } from '../../test/helpers.js';
 import { signAccessToken } from '../../lib/tokens.js';
+import { parsePushBody } from './sync.schema.js';
 
 const prisma = new PrismaClient();
 const config = testConfig();
@@ -178,8 +179,44 @@ afterAll(async () => {
   await cleanupCadre(CADRE_IN_SCOPE);
   await cleanupCadre(CADRE_OUT_OF_SCOPE);
   await cleanupCadre(CADRE_NARROWING);
+  // A proposal made by (or routed to) a fixture user leaves a Notification pointing at it —
+  // clear those first or the FK blocks the user delete (same as auth.test.ts's cleanup).
+  await prisma.notification.deleteMany({ where: { user: { phone: { in: PHONES } } } });
   await prisma.user.deleteMany({ where: { phone: { in: PHONES } } });
   await prisma.$disconnect();
+});
+
+// The mobile app converts an AB Proforma payload to this shape before sending (its
+// src/lib/proformaWire.ts). These pin the contract from the server's side: the repaired payload
+// is accepted, the pre-fix payload is rejected as an ITEM (never the request).
+describe('parsePushBody', () => {
+  const edit = (changes: Record<string, unknown>) => ({
+    kind: 'edit', idempotency_key: randomUUID(), cadre_id: 1, changes,
+  });
+
+  it('accepts the wire form of an economic status and a list with no blank entries', () => {
+    const { body, rejected } = parsePushBody({
+      proformaAChangeRequests: [edit({ economicStatus: 'fair', otherPointsOfInterest: [] })],
+    });
+    expect(rejected.proformaAChangeRequests).toEqual([]);
+    expect(body.proformaAChangeRequests).toHaveLength(1);
+  });
+
+  it('rejects the pre-fix payload (Hindi label + blank entry) as an item, naming the field', () => {
+    const bad = edit({ economicStatus: 'ठीक-ठाक', otherPointsOfInterest: [''] });
+    const { body, rejected } = parsePushBody({ proformaAChangeRequests: [bad] });
+    expect(body.proformaAChangeRequests).toHaveLength(0);
+    expect(rejected.proformaAChangeRequests).toHaveLength(1);
+    expect(rejected.proformaAChangeRequests[0]!.clientKey).toBe(bad.idempotency_key);
+    expect(rejected.proformaAChangeRequests[0]!.error).toContain('economicStatus');
+  });
+
+  it('an empty or missing body is an empty, valid push', () => {
+    const { body, rejected } = parsePushBody(undefined);
+    expect(body.reports).toEqual([]);
+    expect(body.cadreChangeRequests).toEqual([]);
+    expect(Object.values(rejected).every((r) => r.length === 0)).toBe(true);
+  });
 });
 
 describe('sync', () => {
@@ -313,6 +350,88 @@ describe('sync', () => {
     const rows = await prisma.cadreChangeRequest.findMany({ where: { cadreId: cadreInScopeId } });
     const incidentRows = rows.filter((r) => 'incident' in (r.changes as Record<string, unknown>));
     expect(incidentRows).toHaveLength(1);
+    await app.close();
+  });
+
+  // ── One bad item must not fail the batch ────────────────────────────────────
+  // The route documents itself as never all-or-nothing. It used to parse the WHOLE body with
+  // one Zod schema, so a single invalid item 400'd every queued edit sent alongside it — in
+  // production an AB Proforma carrying the Hindi label 'ठीक-ठाक' where the enum 'fair' belongs
+  // blocked all of an officer's other edits on every sync.
+
+  it('POST /sync/push: an invalid proforma item is reported on its own; the cadre edit beside it still goes through', async () => {
+    const app = await makeApp();
+    const goodKey = randomUUID();
+    const badKey = randomUUID();
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: {
+        cadreChangeRequests: [
+          { idempotency_key: goodKey, cadre_id: cadreInScopeId, changes: { verificationOffice: 'सिंक टेस्ट कार्यालय' } },
+        ],
+        proformaAChangeRequests: [
+          {
+            kind: 'create', idempotency_key: badKey, cadre_id: cadreInScopeId,
+            // The exact production failure: a Hindi label where the enum belongs, plus a blank list entry.
+            fields: { ...MINIMAL_PROFORMA_A_FIELDS, economicStatus: 'ठीक-ठाक', otherPointsOfInterest: [''] },
+          },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as PushBody;
+    expect(body.cadreChangeRequests[0]!.status).toBe('created');
+    expect(body.proformaAChangeRequests).toHaveLength(1);
+    const bad = body.proformaAChangeRequests[0]!;
+    expect(bad.clientKey).toBe(badKey);
+    expect(bad.status).toBe('error');
+    expect(bad.error).toContain('economicStatus');
+    // Nothing was written for the rejected item.
+    expect(await prisma.proformaChangeRequest.count({ where: { idempotencyKey: badKey } })).toBe(0);
+    // And the good one really landed.
+    expect(await prisma.cadreChangeRequest.count({ where: { idempotencyKey: goodKey } })).toBe(1);
+    await app.close();
+  });
+
+  it('POST /sync/push: results stay in request order when an item in the middle is rejected', async () => {
+    const app = await makeApp();
+    const [k1, k2, k3] = [randomUUID(), randomUUID(), randomUUID()];
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: {
+        cadreChangeRequests: [
+          { idempotency_key: k1, cadre_id: cadreInScopeId, changes: { supervisoryOffice: 'सिंक टेस्ट पर्यवेक्षण' } },
+          { idempotency_key: k2, cadre_id: cadreInScopeId, changes: {} }, // "at least one field" — invalid
+          { idempotency_key: k3, cadre_id: cadreInScopeId, changes: { residingVillage: 'सिंक टेस्ट ग्राम' } },
+        ],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const results = (res.json() as PushBody).cadreChangeRequests;
+    expect(results.map((r) => r.clientKey)).toEqual([k1, k2, k3]);
+    expect(results.map((r) => r.status)).toEqual(['created', 'error', 'created']);
+    await app.close();
+  });
+
+  it('POST /sync/push: an item with no usable idempotency_key is a malformed REQUEST → 400', async () => {
+    // Without a key there is no clientKey to report the failure under, so this cannot be
+    // answered per item.
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: { cadreChangeRequests: [{ cadre_id: cadreInScopeId, changes: { incident: 'x' } }] },
+    });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('POST /sync/push: more than 100 items of one kind is still refused up front → 400', async () => {
+    const app = await makeApp();
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/sync/push', headers: auth(superToken),
+      payload: { cadreChangeRequests: Array.from({ length: 101 }, () => ({})) },
+    });
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 

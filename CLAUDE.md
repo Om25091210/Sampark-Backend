@@ -212,6 +212,13 @@ Both tracks converge on the **same access+refresh token pair** and share the **s
   and send the `idempotency_key` lands as part of the **sync feature build** (ADR-013).
 - `UPDATE_CADRE` exists in the client's queue type but is **not** synced yet — do not design a backend
   contract around it until the client implements it.
+- **`POST /sync/push` validates per item, never per batch.** The phone sends every queued edit kind (cadre
+  edits, AB and B proformas) in one request, so a whole-body parse let ONE invalid item 400 all of them —
+  in production an AB Proforma with the Hindi economic-status label blocked every other edit that officer
+  had queued, on every sync. Only the envelope (four arrays, each ≤ 100) and each item's `idempotency_key`
+  are request-level; any other invalid item comes back as an ordinary `{ clientKey, status: 'error', error }`
+  in request order (`parsePushBody` in `sync.schema.ts`). Never replace it with a single `.parse()` of the
+  body, and add new push item kinds to `parsePushBody`'s schema table.
 - Paginated list responses match the mobile `PaginatedResponse<T>` shape exactly.
 
 ## Phase 1 scope (mobile surface only)
