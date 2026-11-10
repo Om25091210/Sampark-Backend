@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { makeAuthService } from './auth.service.js';
-import { loginBody, refreshBody, twoFactorVerifyBody } from './auth.schema.js';
+import { loginBody, logoutBody, refreshBody, twoFactorVerifyBody } from './auth.schema.js';
 import {
   bearerAuth,
   emptyResponse,
@@ -116,13 +116,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       preHandler: app.authenticate,
       schema: {
         tags: ['Auth'],
-        summary: 'Revoke all refresh tokens for the user',
+        summary: 'Log out — one session if `refresh_token` is sent, otherwise all of the user\'s sessions',
+        description:
+          'Optional body `{ refresh_token }`. With it only that device\'s session ends (officers share ' +
+          'institutional IDs across phones, so one phone logging out must not end the others). ' +
+          'Without it every refresh token for the user is revoked.',
         security: bearerAuth,
         response: { 204: emptyResponse('Logged out') },
       },
     },
     async (request, reply) => {
-      await service.logout(request.authUser!.sub);
+      const { refresh_token } = logoutBody.parse(request.body ?? {});
+      await service.logout(request.authUser!.sub, refresh_token);
       reply.code(204);
       return null;
     },

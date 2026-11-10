@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 import type { PrismaClient, User } from '@prisma/client';
 import type { AppConfig } from '../../config/env.js';
@@ -12,7 +13,11 @@ import {
   signChallengeToken,
   verifyChallengeToken,
 } from '../../lib/tokens.js';
-import { REFRESH_REUSE_GRACE_MS, revokeAllRefreshTokens } from './refresh-tokens.js';
+import {
+  REFRESH_REUSE_GRACE_MS,
+  revokeAllRefreshTokens,
+  revokeRefreshTokenFor,
+} from './refresh-tokens.js';
 
 export interface AuthDeps {
   prisma: PrismaClient;
@@ -60,7 +65,8 @@ export interface AuthService {
   verifyTwoFactor(challengeToken: string, otp: string): Promise<AuthedResponse>;
   refresh(refreshToken: string): Promise<{ access_token: string; refresh_token: string }>;
   me(userId: number): Promise<WireUser>;
-  logout(userId: number): Promise<void>;
+  /** With `refreshToken`: end only that session. Without: end every session for the user. */
+  logout(userId: number, refreshToken?: string): Promise<void>;
 }
 
 // ADR-042 / SDR-001. Which roles carry a second factor. Officers (the 60 shared thana
@@ -80,7 +86,9 @@ const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
 
 export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService {
-  async function issueTokens(user: User): Promise<TokenPair> {
+  // `family` ties a rotated token to the login it came from (see RefreshToken.family): a fresh
+  // login mints a new one, a refresh passes the old token's through.
+  async function issueTokens(user: User, family: string = randomUUID()): Promise<TokenPair> {
     const access = await signAccessToken(
       { sub: user.id, role: user.role },
       config.jwtSecret,
@@ -92,6 +100,7 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
         userId: user.id,
         tokenHash: hashToken(refresh, config.jwtSecret),
         expiresAt: new Date(Date.now() + config.refreshTokenTtlDays * 86_400_000),
+        family,
       },
     });
     return { access, refresh };
@@ -279,7 +288,8 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
           data: { revokedAt: now, rotatedAt: now },
         });
       }
-      const tokens = await issueTokens(user);
+      // Same family as the token it replaces (a pre-family row has none, so it starts one).
+      const tokens = await issueTokens(user, stored.family ?? undefined);
       return { access_token: tokens.access, refresh_token: tokens.refresh };
     },
 
@@ -289,8 +299,14 @@ export function makeAuthService({ prisma, config, log }: AuthDeps): AuthService 
       return toWireUser(user);
     },
 
-    async logout(userId) {
-      await revokeAllRefreshTokens(prisma, userId);
+    async logout(userId, refreshToken) {
+      if (refreshToken === undefined) {
+        // The caller can't say which session it is (web, or an older mobile build): the safe
+        // reading is "end them all".
+        await revokeAllRefreshTokens(prisma, userId);
+        return;
+      }
+      await revokeRefreshTokenFor(prisma, userId, hashToken(refreshToken, config.jwtSecret));
     },
   };
 }

@@ -1020,11 +1020,17 @@ model RefreshToken {
   // may be exchanged once more — see REFRESH_REUSE_GRACE_MS in auth/refresh-tokens.ts.
   // Cleared by logout / password reset / deactivation so those can't be undone by it.
   rotatedAt DateTime? @map("rotated_at")
+  // One login on one device = one family. Minted at login and inherited by every token that
+  // rotation derives from it, so "end this device's session" can revoke the whole chain even
+  // when the device names a token that has since been rotated away. NULL on rows from before
+  // this column existed; those are revoked individually.
+  family    String?
   createdAt DateTime  @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
+  @@index([userId, family])
   @@map("refresh_tokens")
 }
 

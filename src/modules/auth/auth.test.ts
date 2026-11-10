@@ -325,6 +325,110 @@ describe('auth (ADR-042 — email + password)', () => {
     await app.close();
   });
 
+  // ── Logout is per device when the device says which session it is ───────────
+  // Officers share institutional IDs across phones (ADR-042). Before this, one phone logging
+  // out revoked every refresh token for the account and force-logged-out all the others,
+  // wiping their offline mirror on the next token refresh.
+
+  const refreshWith = (app: FastifyInstance, token: string) =>
+    app.inject({ method: 'POST', url: '/api/v1/auth/refresh', payload: { refresh_token: token } });
+
+  it('logout with a refresh_token ends only that device; another phone on the same ID keeps working', async () => {
+    const app = await makeApp();
+    const phoneA = (await login(app, OFFICER_EMAIL)).body;
+    const phoneB = (await login(app, OFFICER_EMAIL)).body;
+    expect(phoneA.refresh_token).not.toBe(phoneB.refresh_token);
+
+    const out = await app.inject({
+      method: 'POST', url: '/api/v1/auth/logout',
+      headers: { authorization: `Bearer ${phoneA.access_token}` },
+      payload: { refresh_token: phoneA.refresh_token },
+    });
+    expect(out.statusCode).toBe(204);
+
+    expect((await refreshWith(app, phoneA.refresh_token!)).statusCode).toBe(401);
+    expect((await refreshWith(app, phoneB.refresh_token!)).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('logout without a body still ends every session (web, and mobile builds that predate this)', async () => {
+    const app = await makeApp();
+    const phoneA = (await login(app, OFFICER_EMAIL)).body;
+    const phoneB = (await login(app, OFFICER_EMAIL)).body;
+
+    const out = await app.inject({
+      method: 'POST', url: '/api/v1/auth/logout',
+      headers: { authorization: `Bearer ${phoneA.access_token}` }, payload: {},
+    });
+    expect(out.statusCode).toBe(204);
+
+    expect((await refreshWith(app, phoneA.refresh_token!)).statusCode).toBe(401);
+    expect((await refreshWith(app, phoneB.refresh_token!)).statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("logout cannot be used to revoke another account's refresh token", async () => {
+    const app = await makeApp();
+    const officer = (await login(app, OFFICER_EMAIL)).body;
+    const admin = (await login(app, ADMIN_EMAIL)).body;
+
+    // The officer names the ADMIN's refresh token. It belongs to a different user, so it
+    // matches nothing: a quiet 204, and the admin's session is untouched.
+    const out = await app.inject({
+      method: 'POST', url: '/api/v1/auth/logout',
+      headers: { authorization: `Bearer ${officer.access_token}` },
+      payload: { refresh_token: admin.refresh_token },
+    });
+    expect(out.statusCode).toBe(204);
+    expect((await refreshWith(app, admin.refresh_token!)).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("logout naming a rotated-away token still ends that device's live session, not another phone's", async () => {
+    const app = await makeApp();
+    const phoneA = (await login(app, OFFICER_EMAIL)).body;
+    const phoneB = (await login(app, OFFICER_EMAIL)).body;
+    // Phone A refreshes (twice), so the token it logged in with is two rotations behind its
+    // live one — which is how it looks on a real phone, whose stored copy lags the API client.
+    const r1 = (await refreshWith(app, phoneA.refresh_token!)).json() as { access_token: string; refresh_token: string };
+    const r2 = (await refreshWith(app, r1.refresh_token)).json() as { access_token: string; refresh_token: string };
+
+    const out = await app.inject({
+      method: 'POST', url: '/api/v1/auth/logout',
+      headers: { authorization: `Bearer ${r2.access_token}` },
+      payload: { refresh_token: phoneA.refresh_token }, // the stale one
+    });
+    expect(out.statusCode).toBe(204);
+
+    // The whole of phone A's chain is dead — including the rotated-away tokens that would
+    // otherwise still replay inside their reuse window, and the live one it never named.
+    for (const token of [phoneA.refresh_token!, r1.refresh_token, r2.refresh_token]) {
+      expect((await refreshWith(app, token)).statusCode).toBe(401);
+    }
+    // Phone B, same ID, is untouched.
+    expect((await refreshWith(app, phoneB.refresh_token!)).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('a session that predates token families (family NULL) is revoked on its own', async () => {
+    const app = await makeApp();
+    const legacy = (await login(app, OFFICER_EMAIL)).body;
+    const other = (await login(app, OFFICER_EMAIL)).body;
+    // Simulate rows written before the column existed.
+    await prisma.refreshToken.updateMany({ where: { userId: officerId }, data: { family: null } });
+
+    const out = await app.inject({
+      method: 'POST', url: '/api/v1/auth/logout',
+      headers: { authorization: `Bearer ${legacy.access_token}` },
+      payload: { refresh_token: legacy.refresh_token },
+    });
+    expect(out.statusCode).toBe(204);
+    expect((await refreshWith(app, legacy.refresh_token!)).statusCode).toBe(401);
+    // A NULL family must never be treated as "everyone with a NULL family".
+    expect((await refreshWith(app, other.refresh_token!)).statusCode).toBe(200);
+    await app.close();
+  });
+
   it('GET /auth/me returns the institutional ID; logout revokes refresh tokens', async () => {
     const app = await makeApp();
     const { body } = await login(app, OFFICER_EMAIL);

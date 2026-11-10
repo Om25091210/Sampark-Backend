@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import { randomUUID } from 'node:crypto';
+import compress from '@fastify/compress';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
@@ -96,6 +97,20 @@ export async function buildApp(opts: BuildAppOptions): Promise<FastifyInstance> 
   await app.register(cors, {
     origin: opts.config.allowedOrigins,
     methods: ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'],
+  });
+
+  // Response compression. Field phones sit on EDGE/2G, where an uncompressed JSON body is the
+  // difference between a first offline sync that finishes and one the client abandons: a
+  // /sync/pull for a large scope carries thousands of cadres, each with up to three long
+  // presigned avatar URLs — tens of megabytes of near-identical text that gzip shrinks several
+  // times over. gzip only (every Android HTTP stack negotiates and inflates it transparently);
+  // level 4 keeps CPU modest on the single small task. The threshold leaves small responses
+  // alone, and already-compressed types (images, PDFs) are skipped by content type.
+  await app.register(compress, {
+    global: true,
+    encodings: ['gzip'],
+    threshold: 1024,
+    zlibOptions: { level: 4 },
   });
 
   await app.register(prismaPlugin, { client: opts.prisma });

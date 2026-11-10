@@ -18,6 +18,13 @@ export const twoFactorVerifyBody = z.object({
 
 export const refreshBody = z.object({ refresh_token: z.string().min(1) });
 
+// Optional on purpose. With it, logout ends only THAT device's session; without it (the web
+// app, and mobile builds that predate it) logout revokes every session for the account — see
+// AuthService.logout. Officers share institutional IDs across phones (ADR-042), so "revoke
+// everything" is wrong for them, but it stays the safe default for a caller that can't say
+// which session it is.
+export const logoutBody = z.object({ refresh_token: z.string().min(1).optional() });
+
 export type LoginBody = z.infer<typeof loginBody>;
 export type TwoFactorVerifyBody = z.infer<typeof twoFactorVerifyBody>;
 export type RefreshBody = z.infer<typeof refreshBody>;

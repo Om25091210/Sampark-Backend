@@ -130,7 +130,7 @@ do not "fix" it to a single convention:
 | `POST /auth/2fa/verify` | snake (`challenge_token`, `otp`) | — | snake tokens + camelCase `user` |
 | `POST /auth/refresh` | snake (`refresh_token`) | — | snake (`access_token`, `refresh_token?`) |
 | `GET /auth/me` | — | — | camelCase `AuthUser` |
-| `POST /auth/logout` | — | — | empty |
+| `POST /auth/logout` | snake (`refresh_token`, **optional**) | — | empty |
 | `GET /cadres` | — | camelCase (`category`,`filter`,`search`,`assignedTo`,`surrenderOrigin`,`alertLevel`,`page`,`pageSize`) | camelCase `PaginatedResponse<Cadre>` |
 | `GET /stats/dashboard` **(admin+)** | — | — | camelCase `DashboardStats` (counts; see ADR-020, gated by ADR-030) |
 | `GET /cadres/similar` **(ADR-071)** | — | camelCase (`name` required; `fatherName`,`thana`,`phone`) | `{ data: SimilarCadre[] }` — ≤5 possible duplicates, each with `matchedFather`/`sameThana`/`samePhone`; scope-bounded, advisory |
@@ -186,7 +186,18 @@ Both tracks converge on the **same access+refresh token pair** and share the **s
   → token pair + `user`. TOTP via **otplib** (ADR-011 / SDR-001). The exact login/challenge shapes are
   backend-proposed and confirmed when the web auth screens are wired.
 - Tokens are Bearer in `Authorization`. The mobile interceptor calls `/auth/refresh` on 401 with a
-  single-flight guard; refresh failure force-clears tokens (logout).
+  single-flight guard; a refresh the server explicitly rejects (4xx) force-clears tokens (logout) — a
+  network error, timeout or 5xx does not.
+- **Logout is per device when the device names its session.** Officers share institutional IDs across
+  phones (ADR-042), so `POST /auth/logout` with `{ refresh_token }` revokes only that token's **family**
+  (`refresh_tokens.family`: minted at login, inherited on every rotation, so a stale or rotated-away token
+  still ends the device's whole chain) — never another phone's. Without a body (web, older mobile builds)
+  it revokes every session for the user, as before. Password reset and deactivation always revoke all.
+  Go through `revokeAllRefreshTokens` / `revokeRefreshTokenFor` (`auth/refresh-tokens.ts`); a hand-rolled
+  `updateMany` leaves the 10-minute rotation reuse window (`rotatedAt`) open.
+- **Responses are gzipped** (`@fastify/compress`, gzip only, ≥1 KB). A first `/sync/pull` is tens of MB of
+  near-identical JSON (up to three presigned avatar URLs per cadre) and phones on EDGE abandon it
+  uncompressed; production logs showed 38 of 53 first-time pulls never completing. Don't drop it.
 
 ### Offline & idempotency (see ADR-013)
 
