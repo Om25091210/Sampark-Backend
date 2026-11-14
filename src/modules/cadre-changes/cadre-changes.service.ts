@@ -551,7 +551,12 @@ export function makeCadreChangesService({
       const where: Prisma.CadreChangeRequestWhereInput = {};
       // ADR-044 + BE#16. The approver queue and the submissions list are both bounded by
       // the cadre's jurisdiction, so an SDOP's queue is their own sub-division's work.
-      if (actor.scope.kind !== 'all') where.cadre = { thana: { in: [...actor.scope.thanas] } };
+      // A soft-deleted cadre's requests can never be applied, so they never belong in a queue
+      // (cadres.service.ts's remove() cancels them; this also covers rows from before that).
+      where.cadre =
+        actor.scope.kind !== 'all'
+          ? { deletedAt: null, thana: { in: [...actor.scope.thanas] } }
+          : { deletedAt: null };
       if (query.status !== undefined) where.status = query.status;
       if (query.submittedBy !== undefined) where.submittedById = query.submittedBy;
       if (query.cadreId !== undefined) where.cadreId = query.cadreId;

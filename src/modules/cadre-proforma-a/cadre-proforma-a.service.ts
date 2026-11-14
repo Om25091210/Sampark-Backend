@@ -467,7 +467,11 @@ export function makeCadreProformaAService({ prisma, storage, mediaUrlTtlSeconds 
 
     async list(query, actor) {
       const where: Prisma.ProformaChangeRequestWhereInput = { proformaType: 'ab' };
-      if (actor.scope.kind !== 'all') where.cadre = { thana: { in: [...actor.scope.thanas] } };
+      // Requests on a soft-deleted cadre can never be applied — keep them out of every queue.
+      where.cadre =
+        actor.scope.kind !== 'all'
+          ? { deletedAt: null, thana: { in: [...actor.scope.thanas] } }
+          : { deletedAt: null };
       if (query.status !== undefined) where.status = query.status;
       if (query.submittedBy !== undefined) where.submittedById = query.submittedBy;
       if (query.cadreId !== undefined) where.cadreId = query.cadreId;

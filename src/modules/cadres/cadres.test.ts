@@ -2340,9 +2340,52 @@ describe('cadres delete (super_admin)', () => {
   };
 
   afterAll(async () => {
+    await prisma.cadreChangeRequest.deleteMany({ where: { cadreId: { in: created } } });
+    await prisma.proformaChangeRequest.deleteMany({ where: { cadreId: { in: created } } });
     await prisma.auditLog.deleteMany({ where: { entityType: 'cadre', entityId: { in: created.map(String) } } });
     await prisma.outboxEvent.deleteMany({ where: { aggregateType: 'cadre', aggregateId: { in: created.map(String) } } });
     await prisma.cadre.deleteMany({ where: { id: { in: created } } });
+  });
+
+  it('cancels the cadre\'s pending change + proforma requests, and they leave the approver queue', async () => {
+    const app = await makeApp();
+    const id = await makeTarget('pending-requests');
+    const change = await prisma.cadreChangeRequest.create({
+      data: {
+        cadreId: id,
+        changes: { phone: { old: '+910000001001', new: '+910000001002' } },
+        submittedById: adminId,
+        needsAdmin: false,
+        needsSuperAdmin: true,
+      },
+    });
+    const proforma = await prisma.proformaChangeRequest.create({
+      data: {
+        cadreId: id, proformaType: 'ab', changeType: 'create', draft: {},
+        submittedById: adminId, needsAdmin: false, needsSuperAdmin: true,
+      },
+    });
+
+    // Before the delete the super_admin's queue holds the change request.
+    const before = await app.inject({
+      method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(superAdminToken),
+    });
+    expect(before.statusCode).toBe(200);
+    expect((before.json() as { data: { id: number }[] }).data.map((r) => r.id)).toContain(change.id);
+
+    const del = await app.inject({ method: 'DELETE', url: `/api/v1/cadres/${id}`, headers: auth(superAdminToken) });
+    expect(del.statusCode).toBe(204);
+
+    expect((await prisma.cadreChangeRequest.findUniqueOrThrow({ where: { id: change.id } })).status).toBe('cancelled');
+    const p = await prisma.proformaChangeRequest.findUniqueOrThrow({ where: { id: proforma.id } });
+    expect(p.status).toBe('cancelled');
+    expect(p.decidedById).toBe(superAdminId);
+
+    const after = await app.inject({
+      method: 'GET', url: '/api/v1/changes?awaitingMe=true&pageSize=50', headers: auth(superAdminToken),
+    });
+    expect((after.json() as { data: { id: number }[] }).data.map((r) => r.id)).not.toContain(change.id);
+    await app.close();
   });
 
   it('rejects an unauthenticated call with 401', async () => {

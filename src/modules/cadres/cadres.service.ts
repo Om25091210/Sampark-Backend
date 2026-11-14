@@ -189,9 +189,12 @@ export interface CadresService {
   ): Promise<void>;
   // Task 2 (super-admin cadre delete). Soft-delete only — sets `Cadre.deletedAt`,
   // which every read path already excludes (see `list`/`getById` above). Related
-  // rows (reports, change/create requests, notifications) are deliberately left
-  // untouched: they keep pointing at the now-deleted cadre for audit purposes,
-  // exactly like the schema's lack of an `onDelete` cascade already implies.
+  // rows (reports, notifications) are deliberately left untouched: they keep pointing
+  // at the now-deleted cadre for audit purposes, exactly like the schema's lack of an
+  // `onDelete` cascade already implies. The exception is still-PENDING change and
+  // proforma requests: they can never be applied to a deleted cadre, so remove()
+  // cancels them (status `cancelled`, decidedReason 'Cadre deleted') to take them out
+  // of the approver queues.
   // super_admin-only (route-enforced), so — like backfillCategory/correctFields
   // below — there is no `scope` parameter: a super_admin's scope is unrestricted
   // by definition (ADR-044).
@@ -825,13 +828,34 @@ export function makeCadresService({
 
       await prisma.$transaction(async (tx) => {
         const updated = await tx.cadre.update({ where: { id }, data: { deletedAt: new Date() } });
+        // Whatever was still waiting for approval on this cadre can never be applied now
+        // (applyWithin refuses a deleted cadre). Cancel it so it leaves every approver
+        // queue instead of sitting there as a card nobody can approve or reject.
+        const cancel = {
+          status: 'cancelled' as const,
+          decidedAt: new Date(),
+          decidedById: actorId,
+          decidedReason: 'Cadre deleted',
+        };
+        const cancelledChanges = await tx.cadreChangeRequest.updateMany({
+          where: { cadreId: id, status: 'pending' },
+          data: cancel,
+        });
+        const cancelledProformas = await tx.proformaChangeRequest.updateMany({
+          where: { cadreId: id, status: 'pending' },
+          data: cancel,
+        });
         await writeAuditLog(tx, {
           actorId,
           action: 'cadre.delete',
           entityType: 'cadre',
           entityId: String(id),
           before: { name: cadre.name, deletedAt: null },
-          after: { deletedAt: updated.deletedAt!.toISOString() },
+          after: {
+            deletedAt: updated.deletedAt!.toISOString(),
+            cancelledChangeRequests: cancelledChanges.count,
+            cancelledProformaRequests: cancelledProformas.count,
+          },
         });
         await writeOutboxEvent(tx, {
           aggregateType: 'cadre',
